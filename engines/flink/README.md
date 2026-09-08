@@ -70,18 +70,33 @@ The hint reaches the table through `table.dynamic-table-options.enabled`,
 stack applies them from `flink.env`.
 
 `scripts/smoke.sh` confirms the rest on a live job. On `runs/smoke-flink.yaml`
-— 1 taskmanager, 4 slots, `source_parallelism: 4` — the graph is
-`Source: kafka_source -> ConstraintEnforcer` at 4, `IcebergStreamWriter` at 4,
-and `IcebergFilesCommitter -> IcebergSink` at 1; `GET
-/jobs/<id>/checkpoints/config` reports `interval 10000`, `min_pause 2000`,
-`mode exactly_once`. The committer is a singleton by construction — the sink
-serialises commits whatever the writers do.
+— 2 taskmanagers, 4 slots, `source_parallelism: 4` — the insert renders
+`'write-parallelism' = '8'` and the graph comes back with
+`Source: kafka_source -> ConstraintEnforcer` at 4, `IcebergStreamWriter` at 8
+and `IcebergFilesCommitter -> IcebergSink` at 1, so the hint does apply. A
+writer sitting at the reader count on such a fleet is how one that did not
+would look. The committer is a singleton by construction — the sink serialises
+commits whatever the writers do. `GET /jobs/<id>/checkpoints/config` reports
+`interval 10000`, `min_pause 2000`, `mode exactly_once`, matching the knobs.
 
-That spec does **not** exercise the `write-parallelism` hint: its readers and
-its fleet are both 4, so the two numbers coincide and no hint is emitted. A
-spec whose `source_parallelism` is below `taskmanagers * slots` is the one to
-read the writer's parallelism on; a writer sitting at the reader count there
-means the hint did not apply.
+A fleet whose slots equal `source_parallelism` emits no hint at all, because
+the two numbers coincide and there is nothing to say.
+
+## Sizing
+
+Two figures worth carrying into a real spec, both measured on the local stack
+against the `smoke` corpus's 5 MB/s, with the engine image emulated on arm64:
+
+| Fleet | Result |
+|---|---|
+| 1 taskmanager, 4 slots | absorbs ~77% of the offered rate. Drains every row exactly, freshness p95 ~95 s against a 60 s bound |
+| 2 taskmanagers, 8 slots | absorbs ~98%. Freshness p95 ~15 s, drain ~10 s |
+
+Checkpoint duration is what the slots are spent on: state is a few kilobytes,
+and the 5-to-17 seconds a checkpoint takes is writers flushing Parquet. So
+slots, not memory, are the dial for freshness on this shape of workload — and a
+freshness breach with clean exactness means the fleet was too small for the
+offer, which is the thing the benchmark exists to detect.
 
 ## Catalog properties
 

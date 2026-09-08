@@ -84,7 +84,7 @@ into the example config and start the engine:
 ```bash
 cd <this checkout>
 COMPOSE="docker compose -f deploy/compose/local/docker-compose.yml"
-RUN_ID=$(ls -t runs | head -1)          # or read it off the facts above
+RUN_ID=<the run_id the first shell printed>
 export RUN_DIR="$PWD/runs/$RUN_ID"
 
 TABLE=$(jq -r .table "$RUN_DIR/facts.json")
@@ -152,5 +152,9 @@ engine branches outside it.
 - **Refuse unknown keys.** A misspelled knob costs one error message instead of
   a published result whose tuning silently did not apply.
 
-Register the engine in `ingest_bench/specs/engines.py` and its spec key becomes
-usable: `engine: <name>` plus a `<name>:` block of knobs.
+Register it by adding its knobs module to `MANAGED` in
+`ingest_bench/specs/engines.py`, and `engine: <name>` plus a `<name>:` block of
+knobs becomes a usable spec. The module owes two functions:
+`validate(block, spec, meta)`, which refuses a block that cannot describe a
+runnable leg, and `render(spec, site, derived, meta)`, which returns the files
+to write into the run directory keyed by filename.

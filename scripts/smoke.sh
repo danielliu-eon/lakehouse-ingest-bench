@@ -132,7 +132,10 @@ harness "gen-corpus --preset smoke$SETS --out s3://corpus --seed 1"
 # The run
 # ---------------------------------------------------------------------------
 
-STAGE_OUT="$(mktemp -t ingest-bench-stage)"
+# A template with X's and an explicit directory, because `mktemp -t <prefix>`
+# is a BSD spelling: GNU coreutils refuses a template with no X's in it, so the
+# BSD form works on a developer's Mac and fails in CI.
+STAGE_OUT="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-stage.XXXXXX")"
 log "staging $(basename "$SPEC_FILE")"
 harness "stage --spec /runs/$(basename "$SPEC_FILE") --site /site.yaml --runs-dir /runs" | tee "$STAGE_OUT"
 RUN_ID="$(awk -F': ' '/^run_id: /{print $2; exit}' "$STAGE_OUT")"

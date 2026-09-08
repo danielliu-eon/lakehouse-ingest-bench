@@ -14,8 +14,8 @@ the host. Give Docker 16 GB of RAM.
 
 ```bash
 git clone <this repository> && cd lakehouse-ingest-bench
-uv sync                     # only for the tests and the tools outside a container
-scripts/smoke.sh            # add --set duration_s=30 for a quicker one
+uv sync                                 # only for the tests and the tools outside a container
+scripts/smoke.sh                        # about ten minutes
 ```
 
 That builds a five-minute 5 MB/s corpus, creates a Kafka topic and an Iceberg
@@ -27,15 +27,27 @@ and scores what lands in the table. It ends with the verdict:
   "run_valid": true,
   "state": "drained",
   "producer_bound": false,
-  "freshness": { "p50_s": 8.6, "p95_s": 13.4, "p99_s": 14.6, "max_s": 14.8 },
+  "prefix": 299,
+  "last_batch": 299,
+  "committed_rows": 5840896,
+  "offered_rows": 5840896,
+  "freshness": { "p50_s": 9.944, "p95_s": 14.947, "p99_s": 20.311, "max_s": 23.916 },
   "exactness": { "exact": true, "loss_rows": 0, "duplicate_rows": 0 },
-  "keepup": { "absorbed_at_offer_end": 0.98, "drain_s": 11.2 }
+  "keepup": { "absorbed_at_offer_end": 0.980, "drain_s": 9.73 }
 }
 ```
 
-`run_valid: true` is the whole point: every offered row arrived exactly once,
-the table stayed inside its freshness bound, and the producer kept to its
-schedule. The artifacts behind it stay in `runs/<run_id>/`.
+`run_valid: true` is the whole point: all 5,840,896 offered rows arrived exactly
+once, the table stayed inside its 60-second freshness bound, and the producer
+kept to its schedule. `absorbed_at_offer_end: 0.98` says the engine held the
+offered rate with almost no standing debt. The artifacts behind it stay in
+`runs/<run_id>/`.
+
+`--set duration_s=30` gives a 30-second corpus and a run in a few minutes, which
+is what CI uses. Its verdict block reads oddly in two places — the freshness
+quantiles collapse to one sample and `absorbed_at_offer_end` comes out near zero
+— because the corpus is shorter than the spec's warmup and than one commit
+cycle. `docs/running.md` explains both.
 
 Nothing measured locally is a result. The harness, the broker, the object store
 and the engine share one machine's cores, and on an arm64 host the engine image

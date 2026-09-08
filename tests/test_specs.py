@@ -18,7 +18,7 @@ def test_smoke_specs_load() -> None:
     flink = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     assert flink.engine == "flink" and flink.table.managed_by == "harness" and flink.producer.speed == 1.0
     assert flink.scoring.warmup_s == 60 and flink.scoring.geometry_offsets_s == (600, 1200, 1800, 2700, 3600)
-    assert flink.engine_block["taskmanagers"] == 1
+    assert flink.engine_block["taskmanagers"] == 2
     ext = model.load_run_spec(ROOT / "runs" / "smoke-external.yaml")
     assert ext.external is not None and ext.external.name == "your-engine" and ext.fleet[0].vcpu == 2
 

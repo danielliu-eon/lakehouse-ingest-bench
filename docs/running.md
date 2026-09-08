@@ -50,6 +50,19 @@ run regenerates the corpus; with `--keep`, a second run at a *different*
 guess which one to score. Run directories live on the host under `runs/` and
 survive teardown either way.
 
+Two things to know about `--set duration_s=30`, both of which make its verdict
+block read oddly. The shipped specs exclude the first 60 seconds after the epoch
+from the freshness window, because a fleet meeting its first rows is
+provisioning rather than lagging; a 30-second corpus is shorter than that, so
+the window collapses to the run's last instant and `freshness.window` reports
+one sample four times over. Read `freshness.full` instead for a short run's
+whole lag curve. And `keepup.absorbed_at_offer_end` comes out near zero, because
+the engine's first commit lands after the last batch was acked — with a
+ten-second checkpoint interval there is barely one commit inside a
+thirty-second offer. The short run is still a real check: the table has to
+drain and exactness has to be clean. It is the freshness bound and the keep-up
+fraction that only a corpus longer than the warmup exercises.
+
 ## The run directory
 
 Staging writes `runs/<run_id>/`, and everything downstream reads it:
@@ -100,6 +113,11 @@ Beyond those: `prefix` against `last_batch` is how far the contiguous
 completeness watermark got, `freshness.window` carries the p50/p95/p99/max lag
 in seconds after the warmup, and `keepup.absorbed_at_offer_end` is the fraction
 of the offer that had already landed when the last batch was acked.
+
+A breached freshness bound with clean exactness and a `drained` state is not a
+malfunction: it is the fleet being too small for the offer, which is the thing
+the benchmark exists to detect. `engines/flink/README.md` carries the two
+measured points for the smoke corpus.
 
 `gate --out runs/<run_id>/scores` answers `PASS`, `UNDERSIZED` or `VOID` from
 the same artifacts while a run is still going, which is what a sweep uses to

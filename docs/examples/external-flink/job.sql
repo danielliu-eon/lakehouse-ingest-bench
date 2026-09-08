@@ -45,5 +45,5 @@ CREATE CATALOG ice WITH (
   'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
 );
 
-INSERT INTO ice.`@NAMESPACE@`.`@TABLE@` /*+ OPTIONS('distribution-mode' = 'hash') */
+INSERT INTO ice.`@NAMESPACE@`.`@TABLE@` /*+ OPTIONS('distribution-mode' = 'hash', 'write-parallelism' = '8') */
 SELECT id, partition_key, event_time, event_id, event_type, user_id, source_id, page_id, account_id, campaign_id, asset_id, country, device_type, os, browser, viewport, price, cost, amount_micros, latency_ms, is_visible, client_hash, payload FROM kafka_source;

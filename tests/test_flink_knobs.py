@@ -61,13 +61,15 @@ def test_render_sql_and_conf(meta: metadata.CorpusMetadata) -> None:
     # the TIMESTAMP(6) column above cannot be planned at all.
     assert "'avro.timestamp_mapping.legacy' = 'false'" in sql
     assert "'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'" in sql and "'client.region' = 'us-east-1'" in sql
-    assert "/*+ OPTIONS('distribution-mode' = 'hash') */" in sql
+    # Two taskmanagers of four slots against four readers, so the sink has to
+    # state the writer parallelism rather than inherit the readers'.
+    assert "/*+ OPTIONS('distribution-mode' = 'hash', 'write-parallelism' = '8') */" in sql
     assert sql.count("NOT NULL") == len(meta.field_names())
     conf = knobs.render_conf(spec, d)
     assert (
         conf["execution.checkpointing.interval"] == "10s"
         and conf["parallelism.default"] == "4"
-        and conf["pipeline.max-parallelism"] == "16"
+        and conf["pipeline.max-parallelism"] == "32"
     )
     files = knobs.render(spec, _site(), d, meta)
     assert set(files) == {"job.sql", "flink-conf.yaml", "flink.env"}
@@ -84,19 +86,27 @@ def test_writers_spread_wider_than_readers(meta: metadata.CorpusMetadata) -> Non
 
     The pinned Kafka connector takes no source-parallelism option, so the job
     default holds the readers down and only a sink hint lifts the writers back
-    to the fleet — the one case where the two numbers disagree.
+    to the fleet — the one case where the two numbers disagree. Both sides of
+    that branch are checked here, because a hint emitted unconditionally would
+    be indistinguishable from a working one on the shipped spec.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     override = {"execution.checkpointing.min-pause": "9s"}
-    wider = replace(spec, engine_block={**spec.engine_block, "taskmanagers": 2, "extra_flink_conf": override})
+    wider = replace(spec, engine_block={**spec.engine_block, "taskmanagers": 4, "extra_flink_conf": override})
     knobs.validate(wider.engine_block, wider, meta)
     d = derive.derive(wider, _site(), stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     sql = knobs.render_sql(wider, _site(), d, meta)
-    assert "/*+ OPTIONS('distribution-mode' = 'hash', 'write-parallelism' = '8') */" in sql
+    assert "/*+ OPTIONS('distribution-mode' = 'hash', 'write-parallelism' = '16') */" in sql
     conf = knobs.render_conf(wider, d)
-    assert conf["parallelism.default"] == "4" and conf["pipeline.max-parallelism"] == "32"
+    assert conf["parallelism.default"] == "4" and conf["pipeline.max-parallelism"] == "64"
     # extra_flink_conf is applied last, so it overrides a setting named above.
     assert conf["execution.checkpointing.min-pause"] == "9s"
+
+    # One taskmanager gives four slots against four readers, so the numbers
+    # coincide and there is nothing for the hint to say.
+    level = replace(spec, engine_block={**spec.engine_block, "taskmanagers": 1})
+    knobs.validate(level.engine_block, level, meta)
+    assert "/*+ OPTIONS('distribution-mode' = 'hash') */" in knobs.render_sql(level, _site(), d, meta)
 
 
 def test_render_refuses_a_catalog_flink_cannot_read(meta: metadata.CorpusMetadata) -> None:
