@@ -92,7 +92,17 @@ class BatchFill:
 
 
 def epoch_us(preset: Preset) -> int:
-    return int(datetime.fromisoformat(preset.corpus_epoch.replace("Z", "+00:00")).timestamp() * 1_000_000)
+    """The instant the corpus's first batch arrives, in microseconds since the Unix epoch.
+
+    A timestamp without an offset is refused rather than resolved in local time.
+    The offset does not enter the corpus hash, so a naive epoch would let two
+    machines in different zones write different event times under one corpus
+    hash — each internally consistent, neither reproducing the other.
+    """
+    moment = datetime.fromisoformat(preset.corpus_epoch.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError(f"corpus_epoch {preset.corpus_epoch!r} needs an explicit UTC offset or a trailing Z")
+    return int(moment.timestamp() * 1_000_000)
 
 
 def fill_batch(
@@ -185,6 +195,14 @@ def verify_batch(
         raise AssertionError(f"{label}: stored bytes do not match the manifest sha256")
     schema = fastavro.parse_schema(c.avro_schema(columns))
     key_frames = {name: list(frames.iter_frames(frames.decompress(blob))) for name, blob in key_data.items()}
+    # A producer reads a sidecar in lockstep with the batch, so a sidecar of the
+    # wrong length is a corpus fault whatever its contents. Counting the frames
+    # up front is also what makes the row walk below a comparison rather than an
+    # unchecked index: a short sidecar would otherwise fail on the index and a
+    # long one would never be looked at past the last row.
+    for name, framed in key_frames.items():
+        if len(framed) != record.rows:
+            raise AssertionError(f"{label}: sidecar {name} holds {len(framed)} frames for {record.rows} rows")
     expected_id = record.id_min
     total = 0
     counts: dict[int, int] = {}

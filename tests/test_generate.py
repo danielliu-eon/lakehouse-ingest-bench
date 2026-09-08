@@ -151,3 +151,39 @@ def test_verify_batch_catches_a_flipped_byte(tiny: tuple[preset.Preset, str, dic
     keys = {k: uri.read_bytes(uri.join(corpus_uri, u)) for k, u in record.key_uris.items()}
     with pytest.raises(AssertionError, match="batch 0"):
         generate.verify_batch(record, bytes(data), keys, p.columns, {})
+
+
+def _first_batch(corpus_uri: str) -> tuple[generate.BatchRecord, bytes, dict[str, bytes], list[str]]:
+    """The first batch's record and stored bytes, its sidecars, and its decoded key strings."""
+    record = generate.BatchRecord.from_json(uri.read_text(uri.join(corpus_uri, "manifest.jsonl")).splitlines()[0])
+    data = uri.read_bytes(uri.join(corpus_uri, record.uri))
+    sidecars = {name: uri.read_bytes(uri.join(corpus_uri, rel)) for name, rel in record.key_uris.items()}
+    users = [frame.decode() for frame in frames.iter_frames(frames.decompress(sidecars["user_id"]))]
+    return record, data, sidecars, users
+
+
+def test_verify_batch_catches_a_truncated_sidecar(tiny: tuple[preset.Preset, str, dict[str, object]]) -> None:
+    p, corpus_uri, _ = tiny
+    record, data, sidecars, users = _first_batch(corpus_uri)
+    sidecars["user_id"] = frames.compress(frames.string_frames(users[:-1]), 3)
+    expected = f"batch 0: sidecar user_id holds {record.rows - 1} frames for {record.rows} rows"
+    with pytest.raises(AssertionError, match=expected):
+        generate.verify_batch(record, data, sidecars, p.columns, {})
+
+
+def test_verify_batch_catches_a_sidecar_with_an_extra_frame(
+    tiny: tuple[preset.Preset, str, dict[str, object]],
+) -> None:
+    p, corpus_uri, _ = tiny
+    record, data, sidecars, users = _first_batch(corpus_uri)
+    sidecars["user_id"] = frames.compress(frames.string_frames([*users, users[-1]]), 3)
+    expected = f"batch 0: sidecar user_id holds {record.rows + 1} frames for {record.rows} rows"
+    with pytest.raises(AssertionError, match=expected):
+        generate.verify_batch(record, data, sidecars, p.columns, {})
+
+
+def test_naive_corpus_epoch_is_refused(tiny: tuple[preset.Preset, str, dict[str, object]]) -> None:
+    p, _, _ = tiny
+    assert generate.epoch_us(p) == 1_767_225_600_000_000
+    with pytest.raises(ValueError, match="corpus_epoch"):
+        generate.epoch_us(replace(p, corpus_epoch="2026-01-01T00:00:00"))

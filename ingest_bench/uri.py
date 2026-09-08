@@ -10,15 +10,18 @@ cluster run differ in one argument rather than in a code path.
 from __future__ import annotations
 
 import os
+import re
 
 import fsspec
 from fsspec.implementations.local import LocalFileSystem
 
-_SCHEMES = ("s3://", "gs://")
+_REMOTE_SCHEMES = ("s3://", "gs://")
+_LOCAL_SCHEME = "file://"
+_ANY_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
 def is_remote(uri: str) -> bool:
-    return uri.startswith(_SCHEMES)
+    return uri.startswith(_REMOTE_SCHEMES)
 
 
 def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
@@ -27,6 +30,11 @@ def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
     S3-compatible stores other than AWS are reached by pointing
     ``AWS_ENDPOINT_URL`` at them, which is the same variable the AWS SDKs read,
     so a compose-hosted store needs no argument of its own.
+
+    A scheme this module does not serve is refused rather than read as a
+    relative path. Falling through would write a bucket's worth of corpus into
+    a local directory named after the scheme, and nothing about that surfaces
+    until a cluster cannot find the corpus it was pointed at.
     """
     if uri.startswith("s3://"):
         kwargs: dict[str, object] = {}
@@ -36,7 +44,10 @@ def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
         return fsspec.filesystem("s3", **kwargs), uri[len("s3://") :]
     if uri.startswith("gs://"):
         return fsspec.filesystem("gcs"), uri[len("gs://") :]
-    return LocalFileSystem(auto_mkdir=True), uri
+    path = uri[len(_LOCAL_SCHEME) :] if uri.startswith(_LOCAL_SCHEME) else uri
+    if _ANY_SCHEME.match(path):
+        raise ValueError(f"unsupported URI scheme in {uri!r}")
+    return LocalFileSystem(auto_mkdir=True), path
 
 
 def join(uri: str, *parts: str) -> str:
