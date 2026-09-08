@@ -6,7 +6,7 @@ import pytest
 from ingest_bench import catalog as cat
 from ingest_bench import uri
 from ingest_bench.corpus import generate, metadata, preset
-from ingest_bench.table import create, ddl
+from ingest_bench.table import cli, create, ddl
 
 WORKLOADS = Path(__file__).resolve().parents[1] / "workloads"
 
@@ -87,3 +87,33 @@ def test_catalog_props_files_then_flags(tmp_path: Path) -> None:
     assert cat.table_identifier("c.ns.t") == ("ns", "t")
     with pytest.raises(ValueError):
         cat.table_identifier("t")
+
+
+def test_ddl_only_prints_the_ddl_and_reaches_no_catalog(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, corpus: metadata.CorpusMetadata
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--ddl-only must not reach a catalog")
+
+    monkeypatch.setattr(cli, "create_table", refuse)
+    code = cli.create(
+        [
+            "--table",
+            "bench.t",
+            "--corpus",
+            corpus.uri,
+            "--partition",
+            "identity(partition_key)",
+            "--table-prop",
+            "format-version=2",
+            "--ddl-only",
+        ]
+    )
+    partition = create.parse_partition("identity(partition_key)")
+    expected = ddl.spark_sql_ddl(corpus, "bench.t", partition, {"format-version": "2"})
+    assert code == 0
+    assert capsys.readouterr().out == f"{expected}\n"
+
+
+def test_type_maps_cover_the_same_published_types() -> None:
+    assert set(create._TYPES) == set(ddl._TYPES)
