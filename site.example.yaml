@@ -1,0 +1,15 @@
+# Copy to site.yaml and fill in. Every YOUR_ placeholder must go; loading refuses otherwise.
+corpus_root: s3://YOUR_BUCKET/corpus
+runs_root: s3://YOUR_BUCKET/runs
+warehouse: s3://YOUR_BUCKET/warehouse
+kafka:
+  bootstrap_servers: YOUR_BOOTSTRAP:9092
+  security: {}                      # optional librdkafka security.* / sasl.* keys; never copied into run.json
+catalog:
+  props:                            # passed to pyiceberg and rendered into engine configs
+    uri: http://YOUR_CATALOG:8181
+    warehouse: s3://YOUR_BUCKET/warehouse
+kubernetes: {}                      # phase 2: context, service account, node placement
+pricing:
+  vcpu_hour_usd: 0.0
+  gib_hour_usd: 0.0
