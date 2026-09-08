@@ -707,12 +707,14 @@ def calibrate_payload_width(seed: int, target: int, columns: tuple[ColumnDistrib
             f"which exceeds target_row_bytes {target}: widen the budget or narrow the columns"
         )
     # A payload cell is length-prefixed and the prefix is itself a varint, so a
-    # row does not grow byte for byte with the payload: the linear estimate
-    # overshoots by however much the prefix widened. One measurement recovers
-    # that offset, and the two widths straddling the correction are then scored
-    # on measured rows, so the answer holds under the encoder rather than under
-    # the estimate.
+    # row does not grow byte for byte with the payload: crossing a prefix
+    # boundary puts the optimum a byte or two below where the linear estimate
+    # says it is, and how far depends on the width a schema lands at. One
+    # measurement recovers that offset, and the three widths around the
+    # correction are then scored on measured rows — so the answer holds under
+    # the encoder for a schema the tool has never seen, rather than under an
+    # estimate calibrated against the ones it has.
     estimate = max(0, int(target - empty_mean))
     corrected = max(0, estimate - int(round(realized_encoded_row_size(seed, estimate, columns) - target)))
-    candidates = [corrected, corrected + 1]
+    candidates = range(max(0, corrected - 1), corrected + 2)
     return min(candidates, key=lambda width: abs(realized_encoded_row_size(seed, width, columns) - target))
