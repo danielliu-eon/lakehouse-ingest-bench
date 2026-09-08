@@ -1,4 +1,4 @@
-"""Generate a corpus: batch files, key sidecars, manifest, partition truth, corpus.json.
+"""Generate a corpus: batch files, key sidecars, manifest, partition truth, column stats, corpus.json.
 
 The manifest is the frozen scoring input. Every figure in it is re-derived
 from the stored bytes by `verify_batch` before the corpus is published, so the
@@ -304,7 +304,8 @@ def generate(
         for key in range(preset.partition_count)
     }
     uri.write_text(uri.join(corpus_uri, "partition_truth.json"), json.dumps(truth, indent=2))
-    meta = corpus_json(
+    uri.write_text(uri.join(corpus_uri, "column_stats.json"), dump_column_stats(column_stats))
+    meta = finalize_corpus_json(
         preset,
         seed,
         records,
@@ -319,6 +320,27 @@ def generate(
     )
     uri.write_text(uri.join(corpus_uri, "corpus.json"), json.dumps(meta, indent=2, sort_keys=True))
     return meta
+
+
+def dump_column_stats(column_stats: dict[str, ColumnStats]) -> str:
+    """The sampled column statistics in the form a merge can re-derive them from.
+
+    `corpus.json` publishes derived figures — a distinct-value estimate, an
+    entropy — and those cannot be re-merged: a union of shard sketches is the
+    corpus's sketch, while a union of per-shard estimates is nothing. So the
+    sampler's own state travels beside them, which is what lets a merge apply
+    the corpus-wide gates a shard cannot judge from its own batches.
+
+    Written compactly rather than indented like its neighbours: a sketch is a
+    list of opaque digests, so there is nothing in here for a reader.
+    """
+    document = {name: stats.to_dict() for name, stats in column_stats.items()}
+    return json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+
+def load_column_stats(document: str) -> dict[str, ColumnStats]:
+    raw = cast(dict[str, object], json.loads(document))
+    return {name: ColumnStats.from_dict(cast(dict[str, object], entry)) for name, entry in raw.items()}
 
 
 def partition_weights(preset: Preset) -> np.ndarray:
@@ -347,7 +369,7 @@ def partition_share_deviation(preset: Preset, truth: dict[str, dict[str, int]]) 
     return float(np.max(np.abs(realized - weights) / weights))
 
 
-def corpus_json(
+def finalize_corpus_json(
     preset: Preset,
     seed: int,
     records: list[BatchRecord],
@@ -366,8 +388,8 @@ def corpus_json(
     that failed one must not exist to be picked up: a leg scored against a
     corpus whose skew or row width is not what it publishes reports a number
     about a workload nobody asked for. A shard cannot judge a corpus-wide
-    statistic from its own batches, so the gates hold for the unsharded run
-    and Task 7's merge is what applies them to a sharded one.
+    statistic from its own batches, so the gates hold for the unsharded run,
+    and merging every shard is what applies them to a sharded one.
     """
     row_count = sum(record.rows for record in records)
     encoded = sum(record.encoded_bytes for record in records)

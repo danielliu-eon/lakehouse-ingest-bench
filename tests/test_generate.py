@@ -133,7 +133,7 @@ def test_blob_entropy_gate_rejects_a_compressible_payload(
         stats = {column.name: ColumnStats(column.name) for column in columns}
         for _ in range(64):
             stats["payload"].observe(payload)
-        return generate.corpus_json(shaped, 1, records, truth, stats, 1, 64, 64, 3, 0, 1)
+        return generate.finalize_corpus_json(shaped, 1, records, truth, stats, 1, 64, 64, 3, 0, 1)
 
     published = meta_for(bytes(range(256)))
     assert float(published["unbounded_blob_min_entropy_bits_per_byte"]) == pytest.approx(8.0)  # type: ignore[arg-type]

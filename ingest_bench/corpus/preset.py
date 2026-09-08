@@ -77,6 +77,14 @@ class Preset:
         return self.offered_bytes_per_s * self.batch_interval_ms // 1000
 
 
+def _as_int_value(value: object) -> int:
+    return int(cast(int | float | str, value))
+
+
+def _as_float_value(value: object) -> float:
+    return float(cast(int | float | str, value))
+
+
 def _apply_override(raw: dict[str, object], assignment: str) -> None:
     key, sep, value = assignment.partition("=")
     if not sep:
@@ -165,9 +173,53 @@ def effective_dict(preset: Preset) -> dict[str, object]:
     return data
 
 
+def canonical_json(data: dict[str, object]) -> str:
+    """The one rendering a preset is compared and hashed by, so key order cannot change either."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
 def corpus_hash(preset: Preset) -> str:
-    canonical = json.dumps(effective_dict(preset), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()[:8]
+    return hashlib.sha256(canonical_json(effective_dict(preset)).encode()).hexdigest()[:8]
+
+
+def preset_from_effective(effective: dict[str, object], schema_name: str) -> Preset:
+    """The preset a corpus was generated from, rebuilt from its published effective form.
+
+    Merging shard corpora has to gate the whole the way a single pass would,
+    and the gates read the preset rather than the corpus, so the preset has to
+    come back out of `corpus.json` — a schema file on the merging machine
+    would be a second source of truth for a corpus that already exists.
+
+    The rebuilt preset is required to reproduce the effective form it was read
+    from: anything the round trip dropped would gate the merged corpus against
+    a workload nobody generated, and the corpus hash would no longer name it.
+    """
+    if str(effective["schema_name"]) != schema_name:
+        raise ValueError(f"the effective preset names schema {effective['schema_name']!r}, not {schema_name!r}")
+    declared = [cast(dict[str, object], entry) for entry in cast(list[object], effective["columns"])]
+    preset = Preset(
+        name=str(effective["name"]),
+        schema_name=schema_name,
+        offered_bytes_per_s=_as_int_value(effective["offered_bytes_per_s"]),
+        duration_s=_as_int_value(effective["duration_s"]),
+        partition_count=_as_int_value(effective["partition_count"]),
+        alpha=_as_float_value(effective["alpha"]),
+        target_row_bytes=_as_int_value(effective["target_row_bytes"]),
+        batch_interval_ms=_as_int_value(effective["batch_interval_ms"]),
+        corpus_epoch=str(effective["corpus_epoch"]),
+        kafka_key_columns=tuple(str(name) for name in cast(list[object], effective["kafka_key_columns"])),
+        column_overrides=cast(dict[str, dict[str, object]], effective["column_overrides"]),
+        # The reserved columns lead every schema and carry no declaration, so
+        # `build_columns` is what puts them back rather than the published form.
+        columns=c.build_columns(
+            tuple(c.column_from_dict(entry) for entry in declared if str(entry["kind"]) != c.KIND_RESERVED)
+        ),
+    )
+    if canonical_json(effective_dict(preset)) != canonical_json(effective):
+        raise ValueError(
+            f"the preset rebuilt for {preset.name} does not reproduce the effective preset it was read from"
+        )
+    return preset
 
 
 def corpus_dir_name(preset: Preset) -> str:
