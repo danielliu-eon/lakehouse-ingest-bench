@@ -571,13 +571,11 @@ def partition_label(key: int) -> str:
 
 
 def draw_partition_keys(seed: int, batch: int, row_start: int, rows: int, cdf: np.ndarray) -> np.ndarray:
-    """Per-row partition keys, drawn from the same counter-mode stream a column uses.
-
-    The key of a row is a function of ``(seed, batch, position)`` alone, so a
-    block starting at ``row_start`` draws the keys the rows at those positions
-    would be drawn anywhere else — which is what lets a shard that produces one
-    batch, or one part of one, agree with the unsharded run.
-    """
+    """Per-row partition keys of one batch, under the corpus's Zipf weights."""
+    # The keys ride a counter stream positioned like a column's because
+    # re-blocking must not move a key: a row's key has to come out the same
+    # whether its batch was drawn in one block or in several, which is what
+    # lets a shard agree with the unsharded run.
     words = column_words(seed, batch, "partition_key", row_start, rows, 1)[::_PHILOX_WORDS_PER_BLOCK]
     return np.searchsorted(cdf, word_fractions(words), side="right").astype(np.int64)
 
@@ -659,17 +657,16 @@ def column_strings(block: RowBlock, name: str) -> list[str]:
 
 CALIBRATION_ROWS = 4096
 CALIBRATION_INTERVAL_US = 1_000_000
-# A row's identity and its event time are zigzag varints, so what each costs
-# follows its magnitude, and a written row carries both near the top of their
-# range: an identity carries its batch's block, and an event time carries
-# microseconds since the Unix epoch. Sampling at batch zero and epoch zero
-# would measure the two of them at the one width no written row has — five and
-# eight bytes become two and three — and the payload budget would silently
-# absorb the difference. So the sample sits past the first identity block, and
-# at a wall-clock epoch; the epoch's exact value does not matter, since a
-# microsecond timestamp costs eight bytes across the whole present era.
+# A row's identity and its event time are zigzag varints, so each costs what
+# its magnitude costs. An identity carries its batch's block, so it is five
+# bytes for every batch past the first; an event time carries microseconds
+# since the Unix epoch, so it is eight bytes for any epoch between 1975 and
+# 2041. At batch zero and epoch zero those two measure three and two bytes
+# instead — the one width no written row has — and the payload budget would
+# absorb the difference under a calibrated name. So the sample sits past the
+# first identity block, at a wall-clock epoch whose exact value is immaterial.
 CALIBRATION_BATCH = 1
-CALIBRATION_EPOCH_US = 1_767_225_600_000_000
+CALIBRATION_EPOCH_US = 1_767_225_600_000_000  # 2026-01-01T00:00:00Z
 
 
 def realized_encoded_row_size(seed: int, payload_width: int, columns: tuple[ColumnDistribution, ...]) -> float:
@@ -712,10 +709,10 @@ def calibrate_payload_width(seed: int, target: int, columns: tuple[ColumnDistrib
     # A payload cell is length-prefixed and the prefix is itself a varint, so a
     # row does not grow byte for byte with the payload: the linear estimate
     # overshoots by however much the prefix widened. One measurement recovers
-    # that offset, and the widths around the correction are then scored on
-    # measured rows, so the answer holds under the encoder rather than under
+    # that offset, and the two widths straddling the correction are then scored
+    # on measured rows, so the answer holds under the encoder rather than under
     # the estimate.
     estimate = max(0, int(target - empty_mean))
     corrected = max(0, estimate - int(round(realized_encoded_row_size(seed, estimate, columns) - target)))
-    candidates = range(max(0, corrected - 1), corrected + 2)
+    candidates = [corrected, corrected + 1]
     return min(candidates, key=lambda width: abs(realized_encoded_row_size(seed, width, columns) - target))
