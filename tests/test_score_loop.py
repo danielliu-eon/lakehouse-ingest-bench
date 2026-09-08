@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 from typing import TextIO
@@ -43,8 +44,10 @@ def _props(tmp_path: Path) -> dict[str, str]:
     return {"type": "sql", "uri": f"sqlite:///{tmp_path}/cat.db", "warehouse": f"file://{tmp_path}/wh"}
 
 
-def _finished_producer(logs: Path, records: list[generate.BatchRecord], epoch: int, late_batch: int = -1) -> None:
-    """One finished shard's publish log: every batch acked, then the done trailer."""
+def _finished_producer(
+    logs: Path, records: list[generate.BatchRecord], epoch: int, late_batch: int = -1, done: bool = True
+) -> None:
+    """One shard's publish log: every batch acked, then the done trailer."""
     for record in records:
         late = 9000 if record.batch == late_batch else 50
         publish_log.append(
@@ -59,7 +62,8 @@ def _finished_producer(logs: Path, records: list[generate.BatchRecord], epoch: i
                 0,
             ),
         )
-    publish_log.append_done(logs / "publish_log-0.jsonl", 0, len(records))
+    if done:
+        publish_log.append_done(logs / "publish_log-0.jsonl", 0, len(records))
 
 
 def test_scorer_drains_and_validates(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
@@ -241,3 +245,130 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert args.catalog_props == {"type": "sql", "uri": "sqlite:///cat.db"}
     assert args.expected_publish_shards == 4 and args.warmup_s == 60
     assert args.out_dir == tmp_path / "scores" and args.freshness_bound_s == 180.0
+
+
+def test_shortened_replay_is_scored_on_what_was_offered(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(props, "bench.run4", corpus, create.parse_partition("unpartitioned"), {})
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # The producer was given --seconds, so only the first two of the manifest's
+    # four batches were ever sent.
+    _finished_producer(logs, records[:2], epoch)
+    for record in records[:2]:
+        table.append(_rows_of(record, corpus))
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.run4",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 0
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["run_valid"] is True and summary["state"] == "drained"
+    assert summary["prefix"] == 1 and summary["last_batch"] == 1
+    exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
+    assert exact["expected_rows"] == sum(r.rows for r in records[:2]) and exact["expected_rows"] < corpus.row_count
+    assert exact["exact"] and exact["loss_rows"] == 0 and exact["scored_batches"] == 2
+
+
+def test_a_snapshot_arriving_between_polls_is_tallied_once(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(props, "bench.run5", corpus, create.parse_partition("unpartitioned"), {})
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _finished_producer(logs, records, epoch)
+    table.append(_rows_of(records[0], corpus))
+    clock = StepClock(now_ms())
+    log = io.StringIO()
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.run5",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=5.0,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    state = score._load_inputs(args, clock, log)
+    assert score._poll_once(state, clock, log) is True
+    assert len(state.seen) == 1 and state.tally.prefix() == 0
+    samples = score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE)
+    assert len(samples) == 1 and samples[0].committed_rate is None
+
+    table.append(_rows_of(records[1], corpus))
+    clock.sleep(5.0)
+    assert score._poll_once(state, clock, log) is True
+    assert len(state.seen) == 2 and state.tally.prefix() == 1
+    assert state.tally.committed_rows() == records[0].rows + records[1].rows
+    samples = score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE)
+    assert len(samples) == 2
+    # The whole offer was already published, so only the committed side moved.
+    assert samples[1].offered_rate == 0.0 and samples[1].committed_rate == records[1].rows / 5.0
+
+    clock.sleep(5.0)
+    assert score._poll_once(state, clock, log) is False
+    assert len(state.seen) == 2 and state.tally.committed_rows() == records[0].rows + records[1].rows
+    assert len(score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE)) == 3
+    assert len(state.observations) == 2 and [obs.prefix for obs in state.observations] == [0, 1]
+
+
+def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(props, "bench.run6", corpus, create.parse_partition("unpartitioned"), {})
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log_path = logs / "publish_log-0.jsonl"
+    _finished_producer(logs, records[:3], epoch, done=False)
+    for record in records[:3]:
+        table.append(_rows_of(record, corpus))
+    real_shards_done = publish_log.shards_done
+
+    def finishing(uri_prefix: str) -> set[int]:
+        # The shard publishes its last batch and its trailer while this very
+        # poll is in flight, which is the race the read order has to survive.
+        if not publish_log.shard_done(log_path):
+            _finished_producer(logs, records[3:], epoch, done=False)
+            publish_log.append_done(log_path, 0, len(records))
+        return real_shards_done(uri_prefix)
+
+    # The loop reaches it through the same module object, so this is the
+    # function it will call.
+    monkeypatch.setattr(publish_log, "shards_done", finishing)
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.run6",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=5.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    # Batch 3 was offered, so the leg is still behind: reading the records
+    # before the done state would have declared the three-batch list final and
+    # scored this as a valid drained run.
+    assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["run_valid"] is False and summary["last_batch"] == 3 and summary["prefix"] == 2
+    exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
+    assert exact["scored_batches"] == 4 and exact["loss_rows"] == records[3].rows

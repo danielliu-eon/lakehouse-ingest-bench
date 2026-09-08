@@ -317,8 +317,17 @@ def _read_inputs(state: ScoreState, clock: Clock) -> bool:
     engine duplicating rows. Every commit is recorded in `snapshots.jsonl`
     whatever its operation, so what the table did stays visible.
     """
+    # The done state is read before the records, and that order is what makes
+    # the record list trustworthy: a shard appends its trailer after its last
+    # record, so a trailer already present when the records are read guarantees
+    # those records are complete. Read the other way round, a shard finishing
+    # between the two reads would have a record list missing its last batch
+    # declared final, and the leg would be scored over a partial offer.
+    offer_ended = _offer_ended(state.args)
     state.records = publish_log.read_all(state.args.publish_logs_uri)
-    state.offer_ended = _offer_ended(state.args)
+    # Assigned only once the records it describes are in hand, so a failed read
+    # cannot leave a finished offer paired with the previous poll's records.
+    state.offer_ended = offer_ended
     table = load_table(state.args.catalog_props, state.args.table)
     document = read_metadata(table)
     seen_new = False
@@ -419,7 +428,10 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
         grid_ms=GRID_MS,
     )
     state.result = result
-    state.exactness = exactness_result(state.tally)
+    # Only the batches the publish logs say were sent are judged: a replay over
+    # a prefix of the corpus never offered the rest, and scoring them would
+    # report rows nobody sent as rows the engine lost.
+    state.exactness = exactness_result(state.tally, offered_batches={record.batch for record in state.records})
     # A bound producer names the fault whichever way the leg ended: the offer,
     # not the engine, is what the figures describe.
     state.state = PRODUCER_BOUND if state.producer_bound() else ending

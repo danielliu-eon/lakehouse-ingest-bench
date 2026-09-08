@@ -108,7 +108,7 @@ def test_exactness_result() -> None:
     t = tally.BatchTally(records, 1_000_000_007)
     t.add_ids(np.arange(0, 10))
     t.add_ids(np.arange(1 << 32, (1 << 32) + 12))  # two extra rows
-    r = exactness.exactness_result(t)
+    r = exactness.exactness_result(t, offered_batches={0, 1})
     assert r["exact"] is False and r["duplicate_rows"] == 2 and r["loss_rows"] == 0 and r["duplicate_ppm"] == 100_000.0
 
 
