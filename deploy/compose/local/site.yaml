@@ -1,0 +1,27 @@
+# The site config for the local stack, checked in because it describes this
+# compose file rather than an operator's own cloud: the addresses are the
+# stack's service names and the credentials are MinIO's defaults, which are
+# not secrets. A real site copies site.example.yaml instead and keeps it out
+# of git.
+#
+# Mounted at /site.yaml in the harness container. Pricing is zero because a
+# local run measures nothing worth costing.
+corpus_root: s3://corpus
+runs_root: s3://runs
+warehouse: s3://warehouse
+kafka:
+  bootstrap_servers: kafka:9092
+  security: {}
+catalog:
+  props:
+    uri: http://iceberg-rest:8181
+    warehouse: s3://warehouse/
+    s3.endpoint: http://minio:9000
+    s3.access-key-id: admin
+    s3.secret-access-key: password
+    s3.path-style-access: "true"
+    s3.region: us-east-1
+kubernetes: {}
+pricing:
+  vcpu_hour_usd: 0.0
+  gib_hour_usd: 0.0
