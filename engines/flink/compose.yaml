@@ -1,0 +1,54 @@
+# Included by the local stack, which owns the broker, the object store and the
+# catalog these services depend on. The image's platform is fixed by the
+# Dockerfile and is deliberately not restated per service: a runtime platform
+# selector is matched against the built image's manifest list, which a
+# single-platform build's attestation entry makes the daemon reject.
+services:
+  flink-jobmanager:
+    profiles: [flink]
+    build:
+      context: ../..
+      dockerfile: engines/flink/Dockerfile
+    image: lakehouse-ingest-bench/flink:local
+    command: jobmanager
+    ports: ["8081:8081"]
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: ${JM_MEM_MB:-1024}m
+        state.backend.type: hashmap
+        state.checkpoints.dir: s3://warehouse/_flink/checkpoints
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: admin
+        s3.secret-key: password
+    depends_on: [kafka, minio-init, iceberg-rest]
+  flink-taskmanager:
+    profiles: [flink]
+    image: lakehouse-ingest-bench/flink:local
+    command: taskmanager
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: ${SLOTS:-4}
+        taskmanager.memory.process.size: ${TM_MEM_MB:-2048}m
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: admin
+        s3.secret-key: password
+    depends_on: [flink-jobmanager]
+  flink-job:
+    profiles: [flink-job]
+    image: lakehouse-ingest-bench/flink:local
+    volumes: ["${RUN_DIR:?set RUN_DIR to the staged run directory}:/run:ro"]
+    environment: [AWS_REGION=us-east-1]
+    command: ["flink", "run", "-m", "flink-jobmanager:8081", "-py", "/opt/bench/job.py", "--sql", "/run/job.sql", "--conf", "/run/flink-conf.yaml"]
+    depends_on: [flink-jobmanager]

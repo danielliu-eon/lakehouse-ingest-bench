@@ -55,6 +55,13 @@ files = ["ingest_bench", "engines", "tests"]
 module = ["confluent_kafka.*", "fastavro.*", "fsspec.*", "s3fs.*", "gcsfs.*", "pyarrow.*", "zstandard.*"]
 ignore_missing_imports = true
 
+# PyFlink is installed in the engine's image, never in this environment: it
+# ships only x86_64 Linux and macOS wheels, and the harness has no reason to
+# import the submitter that uses it.
+[[tool.mypy.overrides]]
+module = ["pyflink.*"]
+ignore_missing_imports = true
+
 # `confluent_kafka.admin` ships type information but declares no `__all__`, so
 # under strict mode the names it re-exports from the C extension — `NewTopic`
 # among them — are not importable. The alternative is importing them from the

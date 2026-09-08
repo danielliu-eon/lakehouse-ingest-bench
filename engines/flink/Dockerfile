@@ -1,0 +1,49 @@
+# PyFlink publishes no Linux aarch64 wheel in any release, so the image is
+# amd64 wherever it is built; the alternative is building PyFlink from source
+# inside the image. A benchmark fleet is x86 in any case. On an arm64
+# developer machine the local stack then runs emulated, which is enough to
+# check a run end to end but not to measure one.
+ARG IMAGE_PLATFORM=linux/amd64
+FROM --platform=${IMAGE_PLATFORM} flink:1.20.1-scala_2.12-java17
+
+ARG ICEBERG_VERSION=1.9.2
+ARG KAFKA_CONNECTOR_VERSION=3.4.0-1.20
+ARG FLINK_VERSION=1.20.1
+ARG HADOOP_VERSION=3.3.6
+
+# The entrypoint moves the named jar out of `opt` into `plugins`, which is
+# what puts an S3 filesystem on the checkpoint path's classpath. Table data
+# takes a different route: the Iceberg jars below reach storage through their
+# own FileIO.
+ENV ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-${FLINK_VERSION}.jar
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/python3 /usr/bin/python \
+ && python3 -m pip install --no-cache-dir "apache-flink==${FLINK_VERSION}" "pyyaml==6.0.2"
+
+WORKDIR /opt/flink/lib
+ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-flink-runtime-1.20/${ICEBERG_VERSION}/iceberg-flink-runtime-1.20-${ICEBERG_VERSION}.jar .
+# The runtime jar carries Iceberg's own AWS and GCP code but not the cloud
+# SDKs it calls, which is what these two bundles are.
+ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-gcp-bundle/${ICEBERG_VERSION}/iceberg-gcp-bundle-${ICEBERG_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro/${FLINK_VERSION}/flink-sql-avro-${FLINK_VERSION}.jar .
+# Iceberg's Flink runtime resolves a table through Hadoop's `Configuration`
+# whichever FileIO then reads it, so these are needed even for object storage.
+# woodstox and stax2 are what `Configuration` parses XML with; commons-logging
+# is what it logs through.
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-common/${HADOOP_VERSION}/hadoop-common-${HADOOP_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-auth/${HADOOP_VERSION}/hadoop-auth-${HADOOP_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-hdfs-client/${HADOOP_VERSION}/hadoop-hdfs-client-${HADOOP_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-mapreduce-client-core/${HADOOP_VERSION}/hadoop-mapreduce-client-core-${HADOOP_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/com/fasterxml/woodstox/woodstox-core/6.5.1/woodstox-core-6.5.1.jar .
+ADD https://repo1.maven.org/maven2/org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar .
+ADD https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar .
+RUN chown -R flink:flink /opt/flink/lib && chmod 644 /opt/flink/lib/*.jar
+
+COPY engines/flink/job.py /opt/bench/job.py
+USER flink
+WORKDIR /opt/flink
