@@ -118,12 +118,16 @@ def load_preset(source: str, *, workloads_dir: Path, overrides: Sequence[str] = 
     column_overrides = cast(dict[str, dict[str, object]], raw["column_overrides"])
     columns = c.apply_column_overrides(columns, column_overrides)
     key_columns = tuple(str(k) for k in cast(list[object], raw["kafka_key_columns"]))
-    names = {column.name for column in columns}
-    bad = [k for k in key_columns if k not in names]
+    by_name = {column.name: column for column in columns}
+    bad = [k for k in key_columns if k not in by_name]
     if bad:
         raise ValueError(f"kafka_key_columns name unknown column(s): {', '.join(bad)}")
-    string_kinds = {c.KIND_CATEGORICAL, c.KIND_RESERVED}
-    non_string = [k for k in key_columns if next(col for col in columns if col.name == k).kind not in string_kinds]
+    # A Kafka key is UTF-8 text, so a categorical column is the only kind that can
+    # supply one. `partition_key` is the sole exception: it is a reserved string
+    # column, computed rather than drawn, so it declares no value kind of its own.
+    # `id` is reserved too but is a long, which is why the reserved kind cannot
+    # stand in for the check.
+    non_string = [k for k in key_columns if k != "partition_key" and by_name[k].kind != c.KIND_CATEGORICAL]
     if non_string:
         raise ValueError(f"kafka_key_columns must be string columns: {', '.join(non_string)}")
     preset = Preset(

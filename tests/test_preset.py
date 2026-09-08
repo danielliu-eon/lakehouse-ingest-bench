@@ -62,3 +62,8 @@ def test_hash_is_stable_and_ignores_nothing_relevant() -> None:
 def test_key_columns_must_exist() -> None:
     with pytest.raises(ValueError, match="kafka_key_columns"):
         p.load_preset("smoke", workloads_dir=WORKLOADS, overrides=["kafka_key_columns=[nope]"])
+
+
+def test_key_column_must_be_a_string_column() -> None:
+    with pytest.raises(ValueError, match="string"):
+        p.load_preset("smoke", workloads_dir=WORKLOADS, overrides=["kafka_key_columns=[id]"])
