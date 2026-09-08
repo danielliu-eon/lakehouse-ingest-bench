@@ -1,4 +1,6 @@
 # Full-scale corpus: one hour at 600 MB/s, 512 keys, uniform.
+# Generating this needs about 6 GB of memory per process: the generator
+# buffers a whole 600 MB batch. See docs/running.md.
 schema: events
 offered_bytes_per_s: 600MB
 duration_s: 3600

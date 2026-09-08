@@ -1,15 +1,21 @@
 import io
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import TextIO
 
 import pytest
+from pyiceberg.exceptions import NamespaceAlreadyExistsError
+from pyiceberg.schema import Schema
+from pyiceberg.table import Table
+from pyiceberg.types import LongType, NestedField
 
 from ingest_bench import uri
+from ingest_bench.catalog import open_catalog
 from ingest_bench.clock import Clock, now_ms
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.producer import publish_log
-from ingest_bench.scorer import cli, score
+from ingest_bench.scorer import cli, score, snapshots
 from ingest_bench.table import create
 from tests.test_tally import _rows_of
 
@@ -191,16 +197,89 @@ def _drained_run(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, lat
     return out_dir
 
 
-def test_gate_judges_a_leg_from_the_artifacts(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+def test_gate_judges_a_run_from_the_artifacts(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
     assert cli.gate(["--out", str(tmp_path / "nothing")]) == 5  # no summary is no measurement
     out_dir = _drained_run(tmp_path, corpus, "gate1")
     assert cli.gate(["--out", str(out_dir)]) == 0
     assert score.read_keepup_samples(out_dir / score.KEEPUP_SAMPLES_FILE)[0].backlog_rows == 0
 
 
-def test_gate_voids_a_producer_bound_leg(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+def test_gate_voids_a_producer_bound_run(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
     out_dir = _drained_run(tmp_path, corpus, "gate2", late_batch=2)
     assert cli.gate(["--out", str(out_dir)]) == 5
+
+
+def _table_of(props: dict[str, str], name: str, fields: list[NestedField]) -> Table:
+    """A table holding exactly these columns, which `create_table` will not build.
+
+    Every shape the schema check exists to catch is one the harness refuses to
+    create, so they are created through the catalog directly.
+    """
+    catalog = open_catalog(props)
+    with suppress(NamespaceAlreadyExistsError):
+        catalog.create_namespace("bench", properties={"location": f"{props['warehouse']}/bench"})
+    return catalog.create_table(("bench", name), schema=Schema(*fields))
+
+
+def test_check_table_schema_reads_the_columns_the_table_holds(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    props = _props(tmp_path)
+    created = create.create_table(props, "bench.shape1", corpus, create.parse_partition("unpartitioned"), {})
+    assert snapshots.check_table_schema(created.schema(), corpus) == []
+
+    fields = list(create.iceberg_schema(corpus).fields)
+    dropped = _table_of(props, "shape2", [f for f in fields if f.name != "event_type"])
+    assert snapshots.check_table_schema(dropped.schema(), corpus) == [
+        "the table has no column 'event_type', which the corpus publishes as string"
+    ]
+
+    retyped = _table_of(
+        props,
+        "shape3",
+        [f if f.name != "event_time" else NestedField(f.field_id, f.name, LongType(), required=True) for f in fields],
+    )
+    assert snapshots.check_table_schema(retyped.schema(), corpus) == [
+        "column 'event_time' is long in the table and timestamp in the corpus"
+    ]
+
+    # An engine free to add a column of its own is still holding the corpus's.
+    widened = _table_of(props, "shape4", [*fields, NestedField(900, "ingest_ms", LongType(), required=False)])
+    assert snapshots.check_table_schema(widened.schema(), corpus) == []
+
+
+def test_a_table_missing_a_corpus_column_voids_the_run(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    fields = [f for f in create.iceberg_schema(corpus).fields if f.name != "event_type"]
+    table = _table_of(props, "run7", fields)
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _finished_producer(logs, records, epoch)
+    # Every row of the offer is in the table, so nothing but the column set can
+    # be what voids this run.
+    for record in records:
+        table.append(_rows_of(record, corpus).drop_columns(["event_type"]))
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.run7",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["state"] == "void" and summary["run_valid"] is False
+    assert summary["reason"] == (
+        "table schema mismatch: the table has no column 'event_type', which the corpus publishes as string"
+    )
+    # Nothing was tallied: the rows are there, and they describe another table.
+    assert summary["committed_rows"] == 0
+    assert cli.gate(["--out", str(tmp_path / "out")]) == 5
 
 
 def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,13 +298,13 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                 "--corpus",
                 "s3://bench/corpus/events",
                 "--table",
-                "bench.leg",
+                "bench.events",
                 "--catalog-prop",
                 "type=sql",
                 "--catalog-prop",
                 "uri=sqlite:///cat.db",
                 "--publish-logs",
-                "s3://bench/runs/leg/producer",
+                "s3://bench/runs/events/producer",
                 "--epoch",
                 "1700000000.25",
                 "--out",
@@ -364,7 +443,7 @@ def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
         warmup_s=0,
         freshness_bound_s=180.0,
     )
-    # Batch 3 was offered, so the leg is still behind: reading the records
+    # Batch 3 was offered, so the run is still behind: reading the records
     # before the done state would have declared the three-batch list final and
     # scored this as a valid drained run.
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2

@@ -49,3 +49,19 @@ def test_an_unknown_argument_is_refused() -> None:
     out = subprocess.run([str(SMOKE), "--warmup"], capture_output=True, text=True)
     assert out.returncode == 2, out.stdout
     assert "unknown argument --warmup" in out.stderr
+
+
+def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
+    """Every `producer:` key reaches a command line rather than a hardcoded value.
+
+    The staged run directory keeps the spec verbatim as the record of what was
+    asked for, so a spec key the script ignores publishes a claim about a run
+    that did not happen. Checked as text because the alternative needs Docker,
+    a broker and a corpus, which is the compose smoke and not a unit test.
+    """
+    text = SMOKE.read_text()
+    for key in ("speed", "seconds", "behind_max_ms"):
+        assert f"yq '.producer.{key}'" in text, f"smoke.sh never reads producer.{key}"
+    for flag in ("--speed $SPEED", "--seconds $REPLAY_SECONDS", "--behind-max-ms $BEHIND_MAX_MS"):
+        assert flag in text, f"smoke.sh reads a producer key but never passes {flag.split()[0]}"
+    assert "--speed 1" not in text, "smoke.sh still hardcodes a replay speed"

@@ -63,6 +63,35 @@ thirty-second offer. The short run is still a real check: the table has to
 drain and exactness has to be clean. It is the freshness bound and the keep-up
 fraction that only a corpus longer than the warmup exercises.
 
+## Generating a corpus
+
+`gen-corpus --preset <name>` builds the corpus a run is scored against. The
+generator holds a whole batch in memory while it encodes one, so its peak
+resident memory is roughly ten times the batch's encoded bytes. A preset's
+batch is `offered_bytes_per_s x batch_interval_ms / 1000`:
+
+| Preset | Batch | Peak memory |
+|---|---|---|
+| `events-100mbs-{uniform,skew}` | 100 MB | about 1 GB |
+| `events-600mbs-{uniform,skew}` | 600 MB | about 6 GB |
+
+`--shard-index` / `--shard-count` split the batches across processes, which is
+how a large corpus is generated in parallel — but every shard builds whole
+batches of the same size, so sharding buys throughput and not headroom. Either
+600 MB/s preset therefore needs about 6 GB free per generating process. A
+streaming batch writer that removes the whole-batch buffer is a planned
+follow-up.
+
+## The Kafka topic
+
+Staging creates the run's topic with `kafka.partitions` partitions. Its
+replication factor is not a knob in phase 1: it is 1 when the bootstrap host is
+`localhost`, `127.0.0.1` or `kafka`, and 3 for any other host, on the
+assumption that a cluster reached by name has at least three brokers. A one- or
+two-broker cluster under any other hostname fails staging with an
+`INVALID_REPLICATION_FACTOR` from Kafka until a site knob exists, which is
+planned. The local stack is unaffected.
+
 ## Sizing the producer
 
 `scripts/measure-producer.sh` times one producer shard sending a corpus (3 GB
@@ -120,11 +149,11 @@ the scorer reads the offered side from there rather than from the local disk.
 ## Reading the verdict
 
 **`run_valid`** is the only field that decides whether a result may be
-published. It is true when all four hold: the table drained, the freshness p95
-stayed inside the spec's bound, exactness found no loss, duplication or
-corruption in any offered batch, and the producer kept to its schedule. It is
-false for a run still going — a partial run's lag is a lower bound and its
-exactness an upper one.
+published. It is true when all five hold: the table held the corpus's columns,
+it drained, the freshness p95 stayed inside the spec's bound, exactness found
+no loss, duplication or corruption in any offered batch, and the producer kept
+to its schedule. It is false for a run still going — a partial run's lag is a
+lower bound and its exactness an upper one.
 
 **`state`** says how the run ended.
 
@@ -132,6 +161,9 @@ exactness an upper one.
 - `idle_stop` — the table stopped taking commits with rows still outstanding.
   The engine died, fell behind past the scorer's patience, or never consumed.
 - `producer_bound` — see below.
+- `void` — the table does not hold the columns the corpus published, so
+  nothing measured against it describes the corpus. `reason` names each
+  column that is missing or of the wrong type.
 
 **`producer_bound`** means the offer, not the engine, set the rate: some batch
 was acked more than `producer.behind_max_ms` after it was due, or a delivery

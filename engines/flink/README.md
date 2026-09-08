@@ -20,6 +20,13 @@ release**; on arm64 the stack runs emulated, which checks a run end to end but
 does not measure one. `job.sql` holds the catalog's credentials verbatim: it
 is a config file, not the publishable record — `facts.json` is that.
 
+On **Apple Silicon** that emulation is why the smoke takes appreciably longer
+than its native equivalent, and why `runs/smoke-flink.yaml` asks for two
+TaskManagers to absorb a 5 MB/s corpus. Replacing `job.py` with a Java SQL
+runner would retire the platform pin and make this image multi-arch; that is a
+planned follow-up, and `script.py` is stdlib-only so the submitter can be
+swapped without touching the rest.
+
 Hadoop arrives as the **shaded client pair** and not as `hadoop-common` plus
 siblings. Flink installs its `HadoopModule` the moment it finds Hadoop on the
 classpath, and installing it initializes `UserGroupInformation` — which needs
@@ -100,7 +107,7 @@ offer, which is the thing the benchmark exists to detect.
 
 ## Catalog properties
 
-The leg needs an Iceberg **REST** catalog; any other `type` in
+A run needs an Iceberg **REST** catalog; any other `type` in
 `site.catalog.props` is refused at stage time. pyiceberg's names carry through
 unchanged bar one, and `type` is translated rather than passed on:
 

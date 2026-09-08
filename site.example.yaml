@@ -3,6 +3,9 @@ corpus_root: s3://YOUR_BUCKET/corpus
 runs_root: s3://YOUR_BUCKET/runs
 warehouse: s3://YOUR_BUCKET/warehouse
 kafka:
+  # Staging replicates the topic once when this host is localhost, 127.0.0.1 or
+  # kafka, and three times otherwise. A cluster of fewer than three brokers
+  # under another hostname fails topic creation; see docs/running.md.
   bootstrap_servers: YOUR_BOOTSTRAP:9092
   security: {}                      # optional librdkafka security.* / sasl.* keys; never copied into run.json
 catalog:

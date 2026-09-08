@@ -191,6 +191,14 @@ SHARDS="$(yq '.producer.shards' "$SPEC_FILE")"
 [[ $SHARDS == null || $SHARDS == 1 ]] ||
 	die "this script offers one producer shard and $(basename "$SPEC_FILE") asks for $SHARDS"
 
+# Every knob the spec sets about the offer, so the run that happens is the run
+# the copied spec claims. A key the spec leaves out is left out here too, and
+# the producer and the scorer apply their own defaults rather than ones this
+# script would have to keep in step with theirs.
+SPEED="$(yq '.producer.speed' "$SPEC_FILE")"
+REPLAY_SECONDS="$(yq '.producer.seconds' "$SPEC_FILE")"
+BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC_FILE")"
+
 EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 SCORE="score --corpus $CORPUS_URI --table $TABLE --catalog-prop-file /catalog.props"
 SCORE="$SCORE --publish-logs s3://runs/$RUN_ID/producer --epoch $EPOCH --out /runs/$RUN_ID/scores"
@@ -201,13 +209,19 @@ for key in warmup_s freshness_bound_s; do
 	value="$(yq ".scoring.$key" "$SPEC_FILE")"
 	[[ $value == null ]] || SCORE="$SCORE --${key//_/-} $value"
 done
+# The scorer decides whether the producer, rather than the engine, set the rate,
+# so the spec's tolerance has to reach it and not only the producer.
+[[ $BEHIND_MAX_MS == null ]] || SCORE="$SCORE --behind-max-ms $BEHIND_MAX_MS"
 
 log "starting the scorer (epoch $EPOCH, idle stop ${IDLE_STOP_S}s)"
 compose run -d --name "scorer-$RUN_ID" harness "$SCORE" >/dev/null
 
-PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $RUN_ID --epoch $EPOCH --speed 1"
+PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $RUN_ID --epoch $EPOCH"
 PRODUCE="$PRODUCE --publish-log /runs/$RUN_ID/publish_log-0.jsonl --upload-prefix s3://runs/$RUN_ID"
 [[ -z $KEY_COLUMN ]] || PRODUCE="$PRODUCE --key-column $KEY_COLUMN"
+[[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
+[[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
+[[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"
 log "offering the corpus"
 harness "$PRODUCE"
 

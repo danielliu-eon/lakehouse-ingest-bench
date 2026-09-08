@@ -10,7 +10,7 @@ This is the primary contract and the one to reach for first.
 
 **Tier 2, managed.** The engine lives in `engines/<name>/`, the harness sizes
 and starts it from a run spec, and a sweep can vary its knobs. Worth the extra
-code only when you want many legs of the same engine at different sizes.
+code only when you want many runs of the same engine at different sizes.
 
 ## The tier 1 contract
 
@@ -20,9 +20,10 @@ Six rules. Break one and the run is not comparable to any other.
    single-record encoding per `schema.avsc`; keys are UTF-8 strings or null.
 2. Append every row to the table, mapping columns one to one by name.
    Extra columns are allowed; dropped, renamed or retyped ones void the run.
-   `corpus.json` publishes the Iceberg type of every column. When the engine
-   creates the table, the scorer checks names and types against `corpus.json`
-   at the first snapshot and voids the run on a mismatch.
+   `corpus.json` publishes the Iceberg type of every column, and the scorer
+   checks the table's columns and types against it the first time it loads the
+   table, voiding the run on a mismatch. This is the rule that matters when
+   the engine creates the table, since the harness then never sees its DDL.
 3. Append-only: no delete files, no upserts, no overwrites.
 4. Data files in Parquet or ORC.
 5. Commit through the catalog the harness names.
@@ -114,8 +115,8 @@ part that matters.
 
 | Field | Meaning |
 |---|---|
-| `run_valid` | the only field that decides whether a result may be published: the table drained, freshness held, exactness was clean and the producer kept its schedule |
-| `state` | `drained`, `idle_stop` or `producer_bound` |
+| `run_valid` | the only field that decides whether a result may be published: the table held the corpus's columns and drained, freshness held, exactness was clean and the producer kept its schedule |
+| `state` | `drained`, `idle_stop`, `producer_bound` or `void` |
 | `producer_bound` | the offer, not your engine, set the rate — the run says nothing about the engine |
 | `prefix` / `last_batch` | the newest fully-arrived batch, against the last one offered; equal means drained |
 | `freshness.window` | p50/p95/p99/max lag in seconds, over the run after the warmup |
@@ -149,8 +150,8 @@ README, the Dockerfile, `compose.yaml`, the job source and `knobs.py`, and
 `engines/flink/` is the worked example of those five. Two rules in it are worth
 copying:
 
-- **Render, never reach.** Nothing in `knobs.py` touches a cluster, so a leg's
-  whole configuration can be read, and diffed against another leg's, before any
+- **Render, never reach.** Nothing in `knobs.py` touches a cluster, so a run's
+  whole configuration can be read, and diffed against another run's, before any
   compute is paid for.
 - **Refuse unknown keys.** A misspelled knob costs one error message instead of
   a published result whose tuning silently did not apply.
@@ -159,5 +160,5 @@ Register it by adding its knobs module to `MANAGED` in
 `ingest_bench/specs/engines.py`, and `engine: <name>` plus a `<name>:` block of
 knobs becomes a usable spec. The module owes two functions:
 `validate(block, spec, meta)`, which refuses a block that cannot describe a
-runnable leg, and `render(spec, site, derived, meta)`, which returns the files
+runnable engine, and `render(spec, site, derived, meta)`, which returns the files
 to write into the run directory keyed by filename.

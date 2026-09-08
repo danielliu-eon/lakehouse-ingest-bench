@@ -1,9 +1,9 @@
-"""Command lines for scoring a leg and for judging one while it runs.
+"""Command lines for scoring a run and for judging one while it goes.
 
 `score` is the measurement and `gate` is the decision drawn from it, and they
 are separate commands because they run on different rhythms: one process scores
-a leg from its first commit to its last, while a driver asks the gate every
-minute or so whether the leg is still worth paying for. The gate therefore
+a run from its first commit to its last, while a driver asks the gate every
+minute or so whether the run is still worth paying for. The gate therefore
 reads the scorer's artifacts rather than the table — the scorer has already
 paid for that read, and two readers of one table would disagree about when a
 commit became visible.
@@ -36,7 +36,7 @@ DEFAULT_FLOOR_WINDOW_S = 60
 def build_score_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="score",
-        description="Score a leg while it runs: freshness, exactness and keep-up from one pass over the commits.",
+        description="Score a run as it goes: freshness, exactness and keep-up from one pass over the commits.",
     )
     add_catalog_arguments(parser)
     parser.add_argument(
@@ -99,7 +99,7 @@ def build_score_parser() -> argparse.ArgumentParser:
 def build_gate_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gate",
-        description="Judge a running leg from the scorer's artifacts: PASS, UNDERSIZED or VOID.",
+        description="Judge a run in flight from the scorer's artifacts: PASS, UNDERSIZED or VOID.",
     )
     parser.add_argument("--out", required=True, metavar="DIR", help="the scorer's artifact directory")
     parser.add_argument(
@@ -123,7 +123,7 @@ def score(argv: Sequence[str] | None = None) -> int:
     table = str(args.table)
     try:
         # A malformed --table is an argument error rather than a catalog one, so
-        # it is resolved here instead of surfacing hours into a leg.
+        # it is resolved here instead of surfacing hours into a run.
         table_identifier(table)
         props = load_catalog_props(
             [str(prop) for prop in args.catalog_prop], [str(name) for name in args.catalog_prop_file]
@@ -160,12 +160,17 @@ def gate(argv: Sequence[str] | None = None) -> int:
     args = build_gate_parser().parse_args(argv)
     out_dir = Path(str(args.out))
     summary_path = out_dir / score_loop.SUMMARY_FILE
-    # A leg whose scorer has published nothing is void rather than a crash
+    # A run whose scorer has published nothing is void rather than a crash
     # here: the gate is polled in a loop, and the absence of a measurement is
     # one of the answers it exists to give.
     if not summary_path.exists():
-        return _report(VOID, f"{summary_path} does not exist, so the leg has no measurement to judge")
+        return _report(VOID, f"{summary_path} does not exist, so the run has no measurement to judge")
     summary = cast(dict[str, object], json.loads(summary_path.read_text(encoding="utf-8")))
+    # A run the loop itself voided is void here too, with the reason it gave.
+    # The verdict function judges lag and backlog, and both are figures about a
+    # table this run has been found not to have.
+    if summary["state"] == score_loop.VOID:
+        return _report(VOID, str(summary["reason"]))
     producer = cast(dict[str, object], summary["producer"])
     # A bound producer is a fact about the offer, so it cannot be reported
     # through the reader-aborted reason the verdict function would give it.

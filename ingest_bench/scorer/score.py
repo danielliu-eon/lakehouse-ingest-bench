@@ -1,10 +1,10 @@
 """The scoring loop: walk a table's commits as they land, and judge the run.
 
-Every figure a leg is reported by comes out of one pass over the table's
+Every figure a run is reported by comes out of one pass over the table's
 commits, taken while the run is still going. The loop exists in that shape for
 two reasons. A run offers hundreds of gigabytes, so re-reading the table at
 each point of interest would cost more than the ingest under test; and the
-verdict has to be available before the leg is torn down, because a sweep
+verdict has to be available before the run is torn down, because a sweep
 abandons an undersized fleet rather than paying for its full duration.
 
 So the live estimate and the final verdict are the same computation, and the
@@ -12,8 +12,9 @@ verdict exists the moment the table drains. There is no post-drain pass: the
 tally, the observations and the keep-up samples the loop has already
 accumulated are exactly what the final figures are drawn from.
 
-Every artifact is written as it goes. A leg that dies mid-run still says how
-far it got, and `gate` reads these files while the loop is still writing them.
+Every artifact is written as it goes. A run that dies part way through still
+says how far it got, and `gate` reads these files while the loop is still
+writing them.
 """
 
 from __future__ import annotations
@@ -30,7 +31,13 @@ from ingest_bench.producer import publish_log
 from ingest_bench.scorer import freshness
 from ingest_bench.scorer.exactness import exactness_result
 from ingest_bench.scorer.keepup import KeepupSample, keepup_summary, make_sample
-from ingest_bench.scorer.snapshots import added_files, load_table, read_metadata, snapshots_in_order
+from ingest_bench.scorer.snapshots import (
+    added_files,
+    check_table_schema,
+    load_table,
+    read_metadata,
+    snapshots_in_order,
+)
 from ingest_bench.scorer.tally import BatchTally, read_id_column
 
 APPEND = "append"
@@ -39,8 +46,10 @@ RUNNING = "running"
 DRAINED = "drained"
 IDLE_STOP = "idle_stop"
 PRODUCER_BOUND = "producer_bound"
+VOID = "void"
 
 IDLE_STOP_REASON = "idle_stop_before_drain"
+SCHEMA_MISMATCH_REASON = "table schema mismatch"
 
 SNAPSHOTS_FILE = "snapshots.jsonl"
 KEEPUP_SAMPLES_FILE = "keepup_samples.jsonl"
@@ -53,15 +62,15 @@ GRID_MS = 1000
 
 # A catalog, an object store and a publish-log prefix are all remote, and any
 # of them can refuse one poll. Retrying a bounded number of times is what keeps
-# a five-second network fault from ending a three-hour leg; raising after that
-# is what keeps a leg that has lost its inputs from being scored as one that
+# a five-second network fault from ending a three-hour run; raising after that
+# is what keeps a run that has lost its inputs from being scored as one that
 # simply stopped receiving commits.
 MAX_CONSECUTIVE_READ_FAILURES = 5
 
 
 @dataclass(frozen=True)
 class ScoreArgs:
-    """One leg's scoring inputs, all of them facts the run was started with."""
+    """One run's scoring inputs, all of them facts the run was started with."""
 
     corpus_uri: str
     table: str
@@ -100,6 +109,10 @@ class ScoreState:
     # twice; the set is cleared once the commit is fully applied.
     applied_files: set[str] = field(default_factory=set)
     records: list[publish_log.PublishRecord] = field(default_factory=list)
+    # The corpus columns the table does not hold, or None until the table has
+    # been loaded once. An engine-created table need not exist when the scorer
+    # starts, so the check cannot happen before the first successful load.
+    schema_mismatches: list[str] | None = None
     offer_ended: bool = False
     read_failures: int = 0
     state: str = RUNNING
@@ -138,14 +151,15 @@ class ScoreState:
         )
 
     def run_valid(self) -> bool:
-        """Whether a result may be published from this leg.
+        """Whether a result may be published from this run.
 
-        False for a leg still running: nothing is valid until the table has
+        False for a run still going: nothing is valid until the table has
         drained, because the figures a partial run offers are a lower bound on
         its lag and an upper bound on its exactness.
         """
         return (
-            self.result is not None
+            not self.schema_mismatches
+            and self.result is not None
             and self.result.verdict
             and self.exactness is not None
             and bool(self.exactness["exact"])
@@ -164,7 +178,7 @@ def _write_json(path: Path, document: dict[str, object]) -> None:
 
     Written through a temporary and renamed, because `gate` reads these while
     the loop is still writing them: a reader that caught a half-written summary
-    would judge the leg on a truncated document.
+    would judge the run on a truncated document.
     """
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -180,7 +194,7 @@ def _as_optional_float(value: object) -> float | None:
 
 
 def read_keepup_samples(path: Path) -> list[KeepupSample]:
-    """The keep-up samples the loop wrote, for a reader judging a running leg."""
+    """The keep-up samples the loop wrote, for a reader judging a run in flight."""
     samples: list[KeepupSample] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -235,7 +249,7 @@ def _keepup(state: ScoreState) -> dict[str, object]:
 
 
 def _live_lag_s(state: ScoreState) -> float | None:
-    """The lag as of the last sample, which is what the gate judges a leg on.
+    """The lag as of the last sample, which is what the gate judges a run on.
 
     Measured the way `lag_series` measures it, so the live figure and the
     published series cannot disagree: from the epoch while no batch is
@@ -254,8 +268,8 @@ def _write_summary(state: ScoreState) -> None:
     """The one summary writer, used live and at the end.
 
     Live and final summaries come from this function alone so they cannot
-    drift: a driver polling the running leg reads the same fields, with the
-    same meanings, that the finished leg publishes.
+    drift: a driver polling a run in flight reads the same fields, with the
+    same meanings, that the finished run publishes.
     """
     result = state.result
     document: dict[str, object] = {
@@ -322,13 +336,20 @@ def _read_inputs(state: ScoreState, clock: Clock) -> bool:
     # record, so a trailer already present when the records are read guarantees
     # those records are complete. Read the other way round, a shard finishing
     # between the two reads would have a record list missing its last batch
-    # declared final, and the leg would be scored over a partial offer.
+    # declared final, and the run would be scored over a partial offer.
     offer_ended = _offer_ended(state.args)
     state.records = publish_log.read_all(state.args.publish_logs_uri)
     # Assigned only once the records it describes are in hand, so a failed read
     # cannot leave a finished offer paired with the previous poll's records.
     state.offer_ended = offer_ended
     table = load_table(state.args.catalog_props, state.args.table)
+    if state.schema_mismatches is None:
+        state.schema_mismatches = check_table_schema(table.schema(), state.corpus)
+    if state.schema_mismatches:
+        # Nothing is tallied from a table of the wrong shape. The rows it does
+        # hold would produce figures about a different table than the corpus
+        # describes, and publishing them is what the void exists to prevent.
+        return False
     document = read_metadata(table)
     seen_new = False
     for info in snapshots_in_order(document):
@@ -408,9 +429,9 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
 
 
 def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
-    """Score the leg from what the loop accumulated, and publish every artifact.
+    """Score the run from what the loop accumulated, and publish every artifact.
 
-    Both endings are scored the same way. A leg that stopped while it was still
+    Both endings are scored the same way. A run that stopped while it was still
     behind is not withheld from judgement: its freshness quantiles over what it
     did commit, and the rows it never received, are the measurement — the run
     is invalid, and the artifacts say why rather than being absent.
@@ -432,13 +453,19 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
     # a prefix of the corpus never offered the rest, and scoring them would
     # report rows nobody sent as rows the engine lost.
     state.exactness = exactness_result(state.tally, offered_batches={record.batch for record in state.records})
-    # A bound producer names the fault whichever way the leg ended: the offer,
-    # not the engine, is what the figures describe.
-    state.state = PRODUCER_BOUND if state.producer_bound() else ending
-    if ending == IDLE_STOP:
-        state.reason = IDLE_STOP_REASON
-        # No verdict was reached, so the gate has nothing to judge the fleet on.
-        state.aborted = True
+    if ending == VOID:
+        # A void outranks a bound producer: the table is not the one the corpus
+        # describes, so no figure taken from either side describes anything.
+        state.state = VOID
+        state.reason = f"{SCHEMA_MISMATCH_REASON}: {'; '.join(state.schema_mismatches or [])}"
+    else:
+        # A bound producer names the fault whichever way the run ended: the
+        # offer, not the engine, is what the figures describe.
+        state.state = PRODUCER_BOUND if state.producer_bound() else ending
+        if ending == IDLE_STOP:
+            state.reason = IDLE_STOP_REASON
+            # No verdict was reached, so the gate has nothing to judge the fleet on.
+            state.aborted = True
     document: dict[str, object] = dict(asdict(result))
     # Both time bases are published so another bound can be evaluated offline
     # from one run's artifacts: the table's own commit timestamps, and the wall
@@ -456,19 +483,22 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
 
 
 def run(args: ScoreArgs, clock: Clock, log: TextIO) -> int:
-    """Score one leg, returning 0 once it drained and 2 if it stopped idle.
+    """Score one run, returning 0 once it drained and 2 if it did not.
 
     The exit code says whether the loop reached a verdict, not what the verdict
     was: a drained run that lost rows still returns 0, with `run_valid` false
-    in `summary.json`. An idle stop is the other outcome — the table stopped
-    receiving commits with rows still outstanding, so there is no measurement
-    to publish and no reason to keep paying for the fleet.
+    in `summary.json`. Two endings return 2 because no verdict was reachable —
+    an idle stop, where the table stopped receiving commits with rows still
+    outstanding, and a void, where the table does not hold the columns the
+    corpus published. Neither leaves anything worth paying for the fleet for.
     """
     state = _load_inputs(args, clock, log)
     try:
         while True:
             if _poll_once(state, clock, log):
                 state.last_new_ms = clock.now_ms()
+            if state.schema_mismatches:
+                return _finalize(state, VOID, clock, log)
             if state.offer_ended and state.tally.prefix() == state.last_batch():
                 return _finalize(state, DRAINED, clock, log)
             if clock.now_ms() - state.last_new_ms >= args.idle_stop_s * 1000:
@@ -476,7 +506,7 @@ def run(args: ScoreArgs, clock: Clock, log: TextIO) -> int:
             clock.sleep(args.poll_interval_s)
     except Exception as error:
         # The last summary on disk has to say the reader is gone: a gate that
-        # read a stale running summary would report a dead leg as passing.
+        # read a stale running summary would report a dead run as passing.
         state.aborted = True
         state.reason = f"scorer_failed: {type(error).__name__}"
         _write_summary(state)

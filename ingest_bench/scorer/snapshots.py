@@ -1,10 +1,11 @@
-"""A table's commit history, and which data files each commit added.
+"""A table's shape and its commit history, and which data files each commit added.
 
 The scorer never asks a writer what it wrote. Freshness is the wall time of a
 commit and exactness is the rows that commit made visible, so both are read out
 of the table's own metadata and manifests — the same surface any reader of the
 table sees. Trusting a writer's report instead would score the engine's
-bookkeeping rather than the table it produced.
+bookkeeping rather than the table it produced. The column set is read the same
+way and for the same reason.
 """
 
 from __future__ import annotations
@@ -13,12 +14,14 @@ from dataclasses import dataclass
 
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import DataFileContent, ManifestEntryStatus
+from pyiceberg.schema import Schema
 from pyiceberg.serializers import FromInputFile
 from pyiceberg.table import Table
 from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.table.snapshots import ADDED_RECORDS, TOTAL_RECORDS, Snapshot, Summary
 
 from ingest_bench.catalog import open_catalog, table_identifier
+from ingest_bench.corpus.metadata import CorpusMetadata
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,31 @@ def read_metadata(table: Table) -> TableMetadata:
     credentials and endpoint the catalog handed out.
     """
     return FromInputFile.table_metadata(table.io.new_input(table.metadata_location))
+
+
+def check_table_schema(schema: Schema, meta: CorpusMetadata) -> list[str]:
+    """Every corpus column the table does not hold under the type the corpus publishes.
+
+    An engine that creates its own table chooses the column set, and a table
+    that dropped, renamed or retyped a column still carries the ids the tally
+    is built from — so the run would score exact and fresh against a table
+    that is not the one the corpus describes. Extra columns are allowed: the
+    contract is that the corpus's columns survive one to one, not that nothing
+    else may be added.
+
+    ``str`` of an Iceberg primitive type is the same name the corpus publishes,
+    which is what lets the comparison stay a string one rather than needing a
+    second copy of the type map that built the table.
+    """
+    held = {field.name: str(field.field_type) for field in schema.fields}
+    mismatches: list[str] = []
+    for name in meta.field_names():
+        published = meta.iceberg_types[name]
+        if name not in held:
+            mismatches.append(f"the table has no column {name!r}, which the corpus publishes as {published}")
+        elif held[name] != published:
+            mismatches.append(f"column {name!r} is {held[name]} in the table and {published} in the corpus")
+    return mismatches
 
 
 def _summary(snapshot: Snapshot) -> Summary:
