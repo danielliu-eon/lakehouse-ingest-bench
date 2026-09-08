@@ -44,6 +44,12 @@ ADD https://repo1.maven.org/maven2/org/codehaus/woodstox/stax2-api/4.2.1/stax2-a
 ADD https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar .
 RUN chown -R flink:flink /opt/flink/lib && chmod 644 /opt/flink/lib/*.jar
 
-COPY engines/flink/job.py /opt/bench/job.py
+# The submitter and the one module it shares with the renderer, kept at their
+# package path so the import reads the same here as in the repository. The
+# renderer itself is not copied: it reaches the catalog through pyiceberg,
+# which this image has no reason to carry.
+ENV PYTHONPATH=/opt/bench
+COPY engines/__init__.py /opt/bench/engines/
+COPY engines/flink/__init__.py engines/flink/script.py engines/flink/job.py /opt/bench/engines/flink/
 USER flink
 WORKDIR /opt/flink

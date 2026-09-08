@@ -17,6 +17,7 @@ from typing import cast
 
 import yaml
 
+from engines.flink.script import join_statements
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.specs.derive import Derived
@@ -71,10 +72,12 @@ REQUIRED_KNOBS = frozenset({"taskmanagers", "slots", "tm_cpu", "tm_mem_mb", "che
 _MAX_PARALLELISM_FACTOR = 4
 
 # The Flink SQL type each type name a corpus publishes is declared as.
-# `TIMESTAMP(6)` and not `TIMESTAMP_LTZ`: the corpus carries zoneless
-# microseconds, and Flink's `avro` format derives its reader schema from this
-# DDL, so a type of the wrong width or zone yields a reader schema that does
-# not match the bytes the producer wrote.
+# `TIMESTAMP(6)` and not `TIMESTAMP_LTZ` because the Iceberg column is a
+# zoneless timestamp and the corpus carries zoneless microseconds. Under the
+# non-legacy Avro mapping the source reads that column as Avro
+# `local-timestamp-micros`, which annotates a `long` — the same wire form as
+# the corpus's `timestamp-micros`, differing only in the logical type's name,
+# and Avro's binary encoding ignores the annotation.
 _DDL_TYPES = {
     "long": "BIGINT",
     "string": "STRING",
@@ -307,10 +310,12 @@ def _with_clause(options: list[tuple[str, str]]) -> str:
 def _column_ddl(name: str, meta: CorpusMetadata) -> str:
     """One source column, declared required.
 
-    Every column is `NOT NULL` because the `avro` format reads this DDL as its
-    reader schema: a nullable column becomes a union with null, which does not
-    match the non-union writer schema the corpus published, and a row the
-    corpus wrote carries a value in every column anyway.
+    The `avro` format derives its reader schema from this DDL, so the DDL is
+    what has to describe the bytes the producer wrote. Every column is
+    `NOT NULL` because a nullable one becomes a union with null, and a union
+    is a different wire encoding — a branch index precedes the value — than
+    the non-union schema the corpus published. A row the corpus wrote carries
+    a value in every column anyway.
     """
     published = meta.iceberg_types[name]
     if published not in _DDL_TYPES:
@@ -333,6 +338,12 @@ def _source_ddl(site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str
         ("scan.startup.mode", "earliest-offset"),
         *((f"properties.{key}", value) for key, value in site.kafka_security.items()),
         ("format", "avro"),
+        # Flink's legacy mapping sends SQL `TIMESTAMP` to Avro `timestamp-*`,
+        # which it caps at millisecond precision, so a `TIMESTAMP(6)` column
+        # cannot be planned at all while the legacy default stands. Disabled,
+        # the column maps to `local-timestamp-micros` instead: microseconds,
+        # zoneless, and the same `long` on the wire as the corpus wrote.
+        ("avro.timestamp_mapping.legacy", "false"),
     ]
     return f"CREATE TABLE {SOURCE_TABLE} (\n{columns}\n) WITH (\n{_with_clause(options)}\n)"
 
@@ -396,15 +407,9 @@ def _insert(derived: Derived, meta: CorpusMetadata, knobs: Knobs) -> str:
 
 
 def render_sql(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
-    """The script the job submits: the source, the catalog and the insert.
-
-    Statements are separated by a `;` ending a line, which is what the runner
-    splits on. A property value may itself hold a `;` — a SASL configuration
-    does — so the line end is what keeps the split unambiguous.
-    """
+    """The script the job submits: the source, the catalog and the insert."""
     knobs = read(spec.engine_block)
-    statements = (_source_ddl(site, derived, meta), _catalog_ddl(site), _insert(derived, meta, knobs))
-    return ";\n\n".join(statements) + ";\n"
+    return join_statements((_source_ddl(site, derived, meta), _catalog_ddl(site), _insert(derived, meta, knobs)))
 
 
 # ---------------------------------------------------------------------------

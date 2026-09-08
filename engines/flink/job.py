@@ -6,7 +6,8 @@ Parquet, committing to Iceberg — is done by released connectors. Keeping this
 to a submitter is what makes a result attributable to Flink.
 
 PyFlink is installed in the image and not in this repository's environment, so
-nothing in the harness imports this module.
+it is imported where it is used rather than at module scope: that keeps this
+module importable — and therefore testable — without Flink.
 """
 
 from __future__ import annotations
@@ -16,17 +17,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
-from pyflink.table import EnvironmentSettings, TableEnvironment
 
-# The separator `render_sql` writes between statements. A property value may
-# itself hold a `;` — a SASL configuration does — so the line end is what
-# makes the split unambiguous.
-STATEMENT_SEPARATOR = ";\n"
+from engines.flink.script import split_statements
 
-
-def statements_in(script: str) -> list[str]:
-    """The script's statements, in the order they have to be submitted."""
-    return [statement.strip() for statement in script.split(STATEMENT_SEPARATOR) if statement.strip()]
+__all__ = ["build_parser", "main", "split_statements"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,24 +30,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wait",
         action="store_true",
-        help="block until the job ends; without it submission returns as soon as the job is accepted",
+        help="block until the job ends; needs an attached submission, and never returns for a streaming insert",
     )
     return parser
 
 
+def read_conf(path: Path) -> dict[str, str]:
+    """The settings at ``path``, every value as the string a Flink config takes."""
+    loaded = yaml.safe_load(path.read_text())
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path} must hold a mapping of Flink setting to value, got {type(loaded).__name__}")
+    return {str(key): str(value) for key, value in loaded.items()}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    table_env = TableEnvironment.create(EnvironmentSettings.in_streaming_mode())
-
-    conf = yaml.safe_load(Path(str(args.conf)).read_text())
-    if not isinstance(conf, dict):
-        raise ValueError(f"{args.conf} must hold a mapping of Flink setting to value, got {type(conf).__name__}")
-    for key, value in conf.items():
-        table_env.get_config().set(str(key), str(value))
-
-    statements = statements_in(Path(str(args.sql)).read_text())
+    conf = read_conf(Path(str(args.conf)))
+    statements = split_statements(Path(str(args.sql)).read_text())
     if not statements:
         raise ValueError(f"{args.sql} holds no statements")
+
+    from pyflink.table import EnvironmentSettings, TableEnvironment
+
+    table_env = TableEnvironment.create(EnvironmentSettings.in_streaming_mode())
+    for key, value in conf.items():
+        table_env.get_config().set(key, value)
+
     for statement in statements[:-1]:
         table_env.execute_sql(statement)
     # The last statement is the insert, and it is the only one that starts a

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from engines.flink import knobs
+from engines.flink import job, knobs
 from ingest_bench import uri
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.specs import derive, model
@@ -57,6 +57,9 @@ def test_render_sql_and_conf(meta: metadata.CorpusMetadata) -> None:
         and "'format' = 'avro'" in sql
         and "'scan.startup.mode' = 'earliest-offset'" in sql
     )
+    # Without this the legacy mapping caps SQL TIMESTAMP at milliseconds and
+    # the TIMESTAMP(6) column above cannot be planned at all.
+    assert "'avro.timestamp_mapping.legacy' = 'false'" in sql
     assert "'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'" in sql and "'client.region' = 'us-east-1'" in sql
     assert "/*+ OPTIONS('distribution-mode' = 'hash') */" in sql
     assert sql.count("NOT NULL") == len(meta.field_names())
@@ -116,3 +119,23 @@ def test_quotes_in_a_value_stay_inside_their_literal(meta: metadata.CorpusMetada
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     assert "'properties.sasl.password' = 'pa''s''s'" in knobs.render_sql(spec, site, d, meta)
+
+
+def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMetadata) -> None:
+    """The two halves of the script contract, checked against each other.
+
+    The renderer runs in the harness and the submitter runs in the Flink
+    image, so nothing at run time would report a disagreement about where one
+    statement ends and the next begins.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    d = derive.derive(spec, _site(), stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    statements = job.split_statements(knobs.render_sql(spec, _site(), d, meta))
+    assert len(statements) == 3
+    assert all(statement and not statement.endswith(";") for statement in statements)
+    assert statements[0].startswith("CREATE TABLE kafka_source")
+    assert statements[1].startswith("CREATE CATALOG ice")
+    assert statements[2].startswith("INSERT INTO ice.")
+    # A `;` inside a property value must not be read as a statement end.
+    with_semicolons = replace(_site(), kafka_security={"sasl.jaas.config": "a=b;c=d;"})
+    assert len(job.split_statements(knobs.render_sql(spec, with_semicolons, d, meta))) == 3

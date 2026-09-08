@@ -9,7 +9,7 @@ or serializer is written here — so a Flink result is Flink's.
 | Piece | What it is |
 |---|---|
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
-| Source | `flink-sql-connector-kafka:3.4.0-1.20`, Avro via `flink-sql-avro:1.20.1` |
+| Source | `flink-sql-connector-kafka:3.4.0-1.20`, Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-{common,auth,hdfs-client,mapreduce-client-core}:3.3.6`, `woodstox-core:6.5.1`, `stax2-api:4.2.1`, `commons-logging:1.2` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
@@ -20,8 +20,8 @@ release**; on arm64 the stack runs emulated, which checks a run end to end but
 does not measure one. `job.sql` holds the catalog's credentials verbatim: it
 is a config file, not the publishable record — `facts.json` is that.
 
-The `flink` profile starts the cluster; `flink-job` then submits one run with
-`RUN_DIR` set to its staged directory, detached, so it exits on acceptance.
+The `flink` profile starts the cluster; `flink-job` submits one run detached,
+mounting `$RUN_DIR` — set it to the staged run directory, or the mount fails.
 
 ## Knobs
 
