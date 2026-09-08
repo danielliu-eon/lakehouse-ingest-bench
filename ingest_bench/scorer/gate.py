@@ -1,6 +1,6 @@
 """The live verdict that stops a run that cannot pass.
 
-A leg runs for hours, and most of the legs in a sizing sweep are undersized by
+A run lasts hours, and most of the runs in a sizing sweep are undersized by
 construction. Waiting for the full duration to learn that costs the sweep more
 than it costs to judge early, so the gate reads the two signals that separate a
 fleet which is merely warming up from one which will never catch up: the lag
@@ -57,7 +57,7 @@ def gate_verdict(
     now_ms: int,
     epoch_ms: int,
 ) -> tuple[str, str]:
-    """Judge a running leg, with the figure that decided it.
+    """Judge a run in flight, with the figure that decided it.
 
     Nothing is judged undersized before the adaptation period is up. A fleet
     scaling out to meet its first rows is lagging for a reason that will pass,
@@ -65,7 +65,7 @@ def gate_verdict(
     limit.
     """
     if freshness_partial["aborted"]:
-        return VOID, "the freshness reader aborted, so the leg has no measurement to judge"
+        return VOID, "the freshness reader aborted, so the run has no measurement to judge"
 
     lag = freshness_partial["lag_s"]
     if lag is not None and not isinstance(lag, (int, float)):

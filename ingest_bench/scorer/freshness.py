@@ -93,7 +93,7 @@ def lag_series(
 
 def missing_emit_prefixes(series: list[dict[str, int | float | None]]) -> list[int]:
     """Prefixes sampled without an emit time — publish-log coverage gaps as
-    seen from the table side. Non-empty means the leg cannot be scored."""
+    seen from the table side. Non-empty means the run cannot be scored."""
     gaps = {int(row["prefix"]) for row in series if row["lag_s"] is None and row["prefix"] is not None}
     return sorted(gaps)
 
@@ -107,7 +107,7 @@ def lag_quantiles(series: list[dict[str, int | float | None]]) -> dict[str, floa
     for row in series:
         lag = row["lag_s"]
         # One unlaggable sample voids the quantiles: computing them over the
-        # remaining samples would report a flattering number for a leg whose
+        # remaining samples would report a flattering number for a run whose
         # coverage failure already makes it unscorable.
         if lag is None:
             return _no_quantiles()
@@ -172,7 +172,7 @@ class FreshnessResult:
 
     Both the windowed and the full-run quantiles are published. The window is
     what the bound is judged on, and the full run is what says how much of the
-    lag the warmup hid — a leg whose window passes only because its warmup
+    lag the warmup hid — a run whose window passes only because its warmup
     swallowed a ten-minute cold start is a different result from one that was
     fresh throughout, and the artifact should not have to be re-derived to
     tell them apart.
@@ -214,7 +214,7 @@ def freshness_result(
     grid_ms: int = 1000,
     clock: str = TIMESTAMP_CLOCK,
 ) -> FreshnessResult:
-    """Score one leg's freshness over the measurement window.
+    """Score one run's freshness over the measurement window.
 
     The window starts a warmup after the epoch because a fleet that has just
     been handed its first rows is provisioning, not lagging, and the bound is a

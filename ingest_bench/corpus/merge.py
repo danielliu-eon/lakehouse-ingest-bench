@@ -4,7 +4,7 @@ Generating a large corpus is split across machines, and a shard sees only the
 batches it owns — so it can publish neither a corpus-wide figure nor the gates
 that decide whether the corpus may exist. This is where the whole is assembled
 and judged: the merged `corpus.json` is written only if the whole passes what a
-single-pass corpus has to pass, so a leg can never be scored against a corpus
+single-pass corpus has to pass, so a run can never be scored against a corpus
 that only looked right one shard at a time.
 
 The batch files stay where they were written. Copying them would double the
@@ -123,7 +123,7 @@ def merge(shard_uris: list[str], out_uri: str) -> dict[str, object]:
     truth = _sum_partition_truth(shard_uris, preset)
     column_stats = _merge_column_stats(shard_uris, preset)
     # The gates run before anything is written, so a corpus that failed one
-    # never exists to be picked up by a leg.
+    # never exists to be picked up by a run.
     meta = finalize_corpus_json(
         preset,
         _as_int_value(first["seed"]),

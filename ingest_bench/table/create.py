@@ -3,7 +3,7 @@
 The table is the contract between the corpus and the engine under test: its
 column set and types come from what the corpus published, and its partition
 spec and table properties are read back out of the catalog by every engine, so
-this is the one place a leg's scheme and encoding are set. Deriving the schema
+this is the one place a run's scheme and encoding are set. Deriving the schema
 from a preset instead would let a preset edited after generation give the
 writer one schema and the engines another.
 """
@@ -43,7 +43,7 @@ PARTITION_RE = (
 )
 
 # Iceberg numbers partition fields from 1000, and a table created with a single
-# partition field starts there. Pinning it keeps the spec of one leg's table
+# partition field starts there. Pinning it keeps the spec of one run's table
 # comparable with another's.
 PARTITION_FIELD_ID = 1000
 
@@ -60,7 +60,7 @@ _TYPES: dict[str, IcebergType] = {
 
 @dataclass(frozen=True)
 class Partition:
-    """A partition scheme as a leg asked for it, before a schema binds it."""
+    """A partition scheme as a run asked for it, before a schema binds it."""
 
     transform: str
     column: str | None
@@ -195,7 +195,7 @@ def create_table(
 def drop_table(props: dict[str, str], table: str) -> None:
     """Drop the table, or accept that it is already gone.
 
-    A teardown also runs after a leg that failed before creating anything, and
+    A teardown also runs after a run that failed before creating anything, and
     again when a retry re-enters it, so absence is the intended end state
     rather than an error.
     """

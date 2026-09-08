@@ -56,7 +56,7 @@ def test_catalog_props_file_matches_the_site_catalog_block() -> None:
     """The two ways the stack names its catalog have to agree.
 
     `site.yaml` is what the run driver reads and `catalog.props` is what the
-    table tools take on `--catalog-prop-file`; a leg uses both. Editing one
+    table tools take on `--catalog-prop-file`; a run uses both. Editing one
     alone would point the table tools at a different catalog than the driver,
     and the divergence would surface as a table that exists nowhere the
     scorer looks.

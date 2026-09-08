@@ -3,7 +3,7 @@
 The corpus fixes the offered rate: a batch carries a fixed interval's worth of
 bytes and declares the offset from the run's start at which it is due. Pacing
 is therefore arithmetic on that offset rather than a rate limiter — every shard
-of every leg computes the same due time from the same epoch, so two engines
+of every run computes the same due time from the same epoch, so two engines
 compared against one corpus were offered the same bytes at the same moments.
 """
 

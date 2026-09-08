@@ -1,6 +1,6 @@
 """The one catalog client and the one property loader every tool here shares.
 
-A leg addresses its table through whatever catalog the site runs, and the
+A run addresses its table through whatever catalog the site runs, and the
 properties that reach it decide which one that is. Building the client in a
 single place is what keeps a property file authoritative: a tool that
 constructed a REST client directly would honour the file's credentials while

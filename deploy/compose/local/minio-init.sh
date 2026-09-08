@@ -1,6 +1,6 @@
 #!/bin/sh
-# The three buckets the stack's paths name: the corpus a leg reads, the
-# warehouse the catalog writes tables into, and the run directories a leg
+# The three buckets the stack's paths name: the corpus a run reads, the
+# warehouse the catalog writes tables into, and the run directories a run
 # publishes. Created here rather than by whichever tool touches one first,
 # so a missing bucket is not reported as a permission error from inside a
 # writer.

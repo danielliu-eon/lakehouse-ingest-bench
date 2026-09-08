@@ -385,7 +385,7 @@ def finalize_corpus_json(
     """Everything a consumer needs to know about the corpus, and the gates it passed.
 
     The gates run here rather than in a checker of their own because a corpus
-    that failed one must not exist to be picked up: a leg scored against a
+    that failed one must not exist to be picked up: a run scored against a
     corpus whose skew or row width is not what it publishes reports a number
     about a workload nobody asked for. A shard cannot judge a corpus-wide
     statistic from its own batches, so the gates hold for the unsharded run,

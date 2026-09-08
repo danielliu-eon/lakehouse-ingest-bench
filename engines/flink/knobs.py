@@ -1,9 +1,9 @@
-"""The knobs a managed Flink leg is sized by, and the files one run needs.
+"""The knobs a managed Flink run is sized by, and the files one run needs.
 
 Everything here renders text: the SQL the job submits, the configuration it is
 submitted with, and the cluster shape the local stack starts. Nothing in this
-module reaches a cluster, which is what lets a leg's whole configuration be
-read — and diffed against another leg's — before any compute is paid for.
+module reaches a cluster, which is what lets a run's whole configuration be
+read — and diffed against another run's — before any compute is paid for.
 
 The engine is stock Flink: a released image, released connector jars and SQL.
 No source, sink or serializer is written anywhere in this package, so a result
@@ -42,7 +42,7 @@ REST = "rest"
 
 # The type each knob is declared as. This is also the accepted surface: a key
 # that is not here is refused, so a misspelled knob costs one error message
-# instead of running a leg whose tuning silently did not apply.
+# instead of starting a run whose tuning silently did not apply.
 KNOBS: dict[str, type] = {
     "taskmanagers": int,
     "slots": int,
@@ -62,13 +62,13 @@ KNOBS: dict[str, type] = {
 
 # The knobs with no defensible default: the fleet's size, the memory a
 # taskmanager gets, how often it commits and how it distributes writes are the
-# axes a leg exists to vary, and guessing any of them would publish a result
+# axes a run exists to vary, and guessing any of them would publish a result
 # nobody chose.
 REQUIRED_KNOBS = frozenset({"taskmanagers", "slots", "tm_cpu", "tm_mem_mb", "checkpoint_interval", "distribution_mode"})
 
 # Flink writes `pipeline.max-parallelism` into a job's state at its first
 # checkpoint and cannot raise it on a restore, so the default leaves room to
-# grow a leg's fleet without discarding the state it had.
+# grow a run's fleet without discarding the state it had.
 _MAX_PARALLELISM_FACTOR = 4
 
 # The Flink SQL type each type name a corpus publishes is declared as.
@@ -151,7 +151,7 @@ def _conf_at(value: object, where: str) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class Knobs:
-    """One leg's Flink sizing and tuning, with every default already filled in."""
+    """One run's Flink sizing and tuning, with every default already filled in."""
 
     taskmanagers: int
     slots: int
@@ -261,7 +261,7 @@ def read(block: dict[str, object]) -> Knobs:
 
 
 def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> None:
-    """Refuse a Flink block that cannot describe a runnable leg.
+    """Refuse a Flink block that cannot describe a runnable cluster.
 
     ``meta`` is unread: every knob here is about the compute, and the corpus
     constrains none of them. It stays in the signature because the harness
@@ -355,7 +355,7 @@ def _catalog_key(key: str) -> str:
 
 def _required_prop(props: dict[str, str], key: str) -> str:
     if key not in props:
-        raise ValueError(f"site.catalog.props must set {key!r}: a Flink leg addresses its table through it")
+        raise ValueError(f"site.catalog.props must set {key!r}: a Flink run addresses its table through it")
     return props[key]
 
 
@@ -370,7 +370,7 @@ def _catalog_ddl(site: SiteConfig) -> str:
     props = site.catalog_props
     if _PYICEBERG_TYPE in props and props[_PYICEBERG_TYPE] != REST:
         raise ValueError(
-            f"a Flink leg reads its table through an Iceberg REST catalog, and site.catalog.props names catalog "
+            f"a Flink run reads its table through an Iceberg REST catalog, and site.catalog.props names catalog "
             f"type {props[_PYICEBERG_TYPE]!r}"
         )
     warehouse = _required_prop(props, "warehouse")
@@ -380,7 +380,7 @@ def _catalog_ddl(site: SiteConfig) -> str:
         ("uri", _required_prop(props, "uri")),
         ("warehouse", warehouse),
     ]
-    # Sorted by the name the site wrote, so two legs of one site render
+    # Sorted by the name the site wrote, so two runs of one site render
     # byte-identical catalog clauses and any diff between two scripts is a
     # difference in their knobs.
     options += [(_catalog_key(key), props[key]) for key in sorted(set(props) - _STATED_CATALOG_PROPS)]
@@ -434,8 +434,8 @@ def render_conf(spec: RunSpec, derived: Derived) -> dict[str, str]:
         "execution.checkpointing.min-pause": knobs.min_pause,
         "execution.checkpointing.unaligned.enabled": _flag(knobs.unaligned_checkpoints),
         # Exactly once is the promise the benchmark scores duplication
-        # against, so it is not a knob: a leg that relaxed it would be scored
-        # against a weaker claim than every other leg.
+        # against, so it is not a knob: a run that relaxed it would be scored
+        # against a weaker claim than every other run.
         "execution.checkpointing.mode": "EXACTLY_ONCE",
         "parallelism.default": str(knobs.parallelism_default()),
         "pipeline.max-parallelism": str(knobs.max_parallelism),
@@ -445,7 +445,7 @@ def render_conf(spec: RunSpec, derived: Derived) -> dict[str, str]:
         # The run id, so a job listing names the run rather than the SQL.
         "pipeline.name": derived.run_id,
     }
-    # Last, so a leg can override any setting above without this module
+    # Last, so a run can override any setting above without this module
     # growing a knob for it.
     conf.update(knobs.extra_flink_conf)
     return conf

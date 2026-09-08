@@ -1,6 +1,6 @@
-"""Command line for creating and dropping a leg's table.
+"""Command line for creating and dropping a run's table.
 
-The two commands bracket a leg: one creates the table the engine writes into
+The two commands bracket a run: one creates the table the engine writes into
 and the other removes it, so a run leaves a catalog as it found it. `--ddl-only`
 covers the engines that insist on creating their own table — it renders the same
 schema and scheme as a statement for the engine to run, and touches no catalog.
@@ -50,7 +50,7 @@ def build_create_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="SPEC",
         help="identity(<column>), bucket(<N>, <column>) or unpartitioned. The engines read the scheme back "
-        "from this table, so it is the one place a leg sets it",
+        "from this table, so it is the one place a run sets it",
     )
     parser.add_argument(
         "--table-prop",
@@ -74,7 +74,7 @@ def build_create_parser() -> argparse.ArgumentParser:
 
 
 def build_drop_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="drop-table", description="Drop a leg's table, or accept that it is gone.")
+    parser = argparse.ArgumentParser(prog="drop-table", description="Drop a run's table, or accept that it is gone.")
     add_catalog_arguments(parser)
     return parser
 

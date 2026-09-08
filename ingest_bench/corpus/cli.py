@@ -1,6 +1,6 @@
 """Command line for building a corpus and for merging the shards of one.
 
-A corpus is built once and read by every leg that is scored against it, so the
+A corpus is built once and read by every run that is scored against it, so the
 two commands here are the only way one is created: the preset and the seed name
 the corpus, and `corpus.json` inside it is the record of what was built.
 """

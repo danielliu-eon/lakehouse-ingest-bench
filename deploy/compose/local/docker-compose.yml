@@ -1,5 +1,5 @@
 # The local stack: a broker, an object store, an Iceberg catalog, and the
-# harness that drives them. Enough to run a leg end to end on one machine,
+# harness that drives them. Enough to take a run end to end on one machine,
 # which is what makes a change to the harness checkable without a cluster.
 #
 # Profiles split what is always up from what a command brings up:

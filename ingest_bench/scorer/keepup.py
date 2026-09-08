@@ -63,7 +63,7 @@ def keepup_summary(
     offer_end_ms: int | None,
     drained_ms: int | None,
 ) -> dict[str, object]:
-    """The keep-up scalars a leg is reported by.
+    """The keep-up scalars a run is reported by.
 
     ``absorbed_at_offer_end`` is read at the instant the offer stopped, not at
     the end of the run, because everything after that instant is drain: given
