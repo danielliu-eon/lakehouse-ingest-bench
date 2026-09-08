@@ -1,5 +1,6 @@
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -9,6 +10,7 @@ import pytest
 from ingest_bench import uri
 from ingest_bench.corpus import columns as c
 from ingest_bench.corpus import frames, generate, preset
+from ingest_bench.corpus.stats import ColumnStats
 
 WORKLOADS = Path(__file__).resolve().parents[1] / "workloads"
 
@@ -95,6 +97,50 @@ def test_corpus_json_publishes_types_roles_and_gates(tiny: tuple[preset.Preset, 
     assert abs(float(meta["mean_encoded_row_size_relative_deviation"])) <= 0.02  # type: ignore[arg-type]
     assert meta["key_columns"] == ["user_id", "partition_key"]
     assert meta["p"] == c.P and meta["id_block"] == c.ID_BLOCK
+
+
+def _unbounded_payload_columns() -> tuple[c.ColumnDistribution, ...]:
+    """The narrowest schema that declares an unbounded payload, so the entropy gate has something to judge.
+
+    Every bounded cardinality here sits above the sketch size, so no column
+    carries a closed-form expectation and the schema drives the entropy gate
+    without the cardinality gate having an opinion.
+    """
+    return c.build_columns(
+        (
+            c.timestamp_column("event_time", c.UNBOUNDED_CARDINALITY),
+            c.token_column("event_id", 32, role=c.ROLE_ENTITY),
+            c.integer_column("amount", 2000, 0, 1_000_000, role=c.ROLE_SUM_MEASURE),
+            c.blob_column("payload"),
+        )
+    )
+
+
+def test_blob_entropy_gate_rejects_a_compressible_payload(
+    tiny: tuple[preset.Preset, str, dict[str, object]],
+) -> None:
+    p, _, _ = tiny
+    columns = _unbounded_payload_columns()
+    shaped = replace(p, columns=columns, kafka_key_columns=("partition_key",))
+    rows, keys = 1000, shaped.partition_count
+    records = [generate.BatchRecord(0, 0, rows, 0, rows - 1, 0, rows * shaped.target_row_bytes, 1, "s", "b", {})]
+    truth = {
+        f"p{k:05d}": {"rows": rows // keys, "sum_mod": 0, "encoded_bytes": rows * shaped.target_row_bytes // keys}
+        for k in range(keys)
+    }
+
+    def meta_for(payload: bytes) -> dict[str, object]:
+        stats = {column.name: ColumnStats(column.name) for column in columns}
+        for _ in range(64):
+            stats["payload"].observe(payload)
+        return generate.corpus_json(shaped, 1, records, truth, stats, 1, 64, 64, 3, 0, 1)
+
+    published = meta_for(bytes(range(256)))
+    assert float(published["unbounded_blob_min_entropy_bits_per_byte"]) == pytest.approx(8.0)  # type: ignore[arg-type]
+    # 1000 rows leave the coldest of these keys far short of the gate's floor.
+    assert published["partition_byte_share_gate_enforced"] is False
+    with pytest.raises(ValueError, match="entropy"):
+        meta_for(b"\x00" * 256)
 
 
 def test_verify_batch_catches_a_flipped_byte(tiny: tuple[preset.Preset, str, dict[str, object]]) -> None:

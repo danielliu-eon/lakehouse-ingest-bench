@@ -31,12 +31,20 @@ from ingest_bench.corpus.stats import (
 
 GENERATOR_VERSION = "4"
 PARTITION_SHARE_MAX_DEVIATION = 0.05
-# A byte-share deviation is a statistic, and on a wiring-check corpus it is
-# dominated by sampling noise rather than by the generator, so below this many
-# rows the figure is published and not gated.
-PARTITION_SHARE_GATE_MIN_ROWS = 100_000
+# The share gate's floor is the coldest key's expected row count, not the
+# corpus's total rows: the noise on a key's realized share falls with the rows
+# behind that key alone, so the coldest key is what decides whether the
+# comparison measures the generator or the seed. A flat row floor cannot serve
+# both a wide key space and a narrow one — at any given corpus size it would
+# gate 512 keys on sampling noise while leaving 8 keys unchecked. Ten thousand
+# rows put the relative noise near 1%, which a 5% gate clears.
+PARTITION_SHARE_GATE_MIN_COLD_ROWS = 10_000
 MEAN_ROW_MAX_DEVIATION = 0.02
 CARDINALITY_MAX_DEVIATION = 0.10
+# A blob column asked for a fresh value per row is the corpus's incompressibility
+# axis, so bytes that a codec could fold away mean the axis is not there — however
+# the column is declared.
+UNBOUNDED_BLOB_MIN_ENTROPY_BITS_PER_BYTE = 7.5
 
 
 @dataclass
@@ -295,6 +303,12 @@ def generate(
     return meta
 
 
+def partition_weights(preset: Preset) -> np.ndarray:
+    """The byte share each partition key is asked for, normalized over the key space."""
+    weights = np.arange(1, preset.partition_count + 1, dtype=np.float64) ** -preset.alpha
+    return weights / weights.sum()
+
+
 def partition_share_deviation(preset: Preset, truth: dict[str, dict[str, int]]) -> float | None:
     """How far the realized byte share of the worst key is from its Zipf weight.
 
@@ -305,8 +319,7 @@ def partition_share_deviation(preset: Preset, truth: dict[str, dict[str, int]]) 
     total = sum(entry["encoded_bytes"] for entry in truth.values())
     if total == 0:
         return None
-    weights = np.arange(1, preset.partition_count + 1, dtype=np.float64) ** -preset.alpha
-    weights /= weights.sum()
+    weights = partition_weights(preset)
     realized = (
         np.array(
             [truth[v.partition_label(key)]["encoded_bytes"] for key in range(preset.partition_count)], dtype=np.float64
@@ -347,12 +360,9 @@ def corpus_json(
             f"mean encoded row {mean_row:.2f} deviates {mean_dev:+.2%} from target {preset.target_row_bytes}"
         )
     share_dev = partition_share_deviation(preset, truth) if shard_count == 1 else None
-    if (
-        share_dev is not None
-        and preset.alpha > 0
-        and row_count >= PARTITION_SHARE_GATE_MIN_ROWS
-        and share_dev > PARTITION_SHARE_MAX_DEVIATION
-    ):
+    cold_rows = row_count * float(partition_weights(preset).min())
+    share_gate_enforced = share_dev is not None and preset.alpha > 0 and cold_rows >= PARTITION_SHARE_GATE_MIN_COLD_ROWS
+    if share_dev is not None and share_gate_enforced and share_dev > PARTITION_SHARE_MAX_DEVIATION:
         raise ValueError(f"partition byte share deviates {share_dev:.2%} from the Zipf weights")
     # Under no skew the shares carry no information, so what is left to check is
     # that the key space is covered at all.
@@ -371,6 +381,20 @@ def corpus_json(
     max_card_dev = max(cardinality_devs.values(), default=None)
     if shard_count == 1 and max_card_dev is not None and max_card_dev > CARDINALITY_MAX_DEVIATION:
         raise ValueError(f"realized column cardinality deviates {max_card_dev:.2%} from the declaration")
+    # The floor over the unbounded blobs rather than a per-column check, because
+    # one compressible payload is enough to cost the corpus the axis; a schema
+    # with no unbounded blob has nothing to judge and yields None.
+    entropies = [
+        column_stats[column.name].value_byte_entropy_bits_per_byte()
+        for column in preset.columns
+        if column.kind == c.KIND_BLOB and column.cardinality == c.UNBOUNDED_CARDINALITY
+    ]
+    blob_entropy = min(entropies) if entropies else None
+    if shard_count == 1 and blob_entropy is not None and blob_entropy < UNBOUNDED_BLOB_MIN_ENTROPY_BITS_PER_BYTE:
+        raise ValueError(
+            f"unbounded blob column entropy {blob_entropy:.2f} bits/byte is below "
+            f"{UNBOUNDED_BLOB_MIN_ENTROPY_BITS_PER_BYTE}"
+        )
     manifest_sha = frames.sha256_hex("".join(record.to_json() + "\n" for record in records).encode())
     return {
         "name": preset.name,
@@ -406,6 +430,8 @@ def corpus_json(
         "partition_sum_mod": {key: entry["sum_mod"] for key, entry in truth.items()},
         "partition_encoded_bytes": {key: entry["encoded_bytes"] for key, entry in truth.items()},
         "partition_byte_share_max_relative_deviation": share_dev,
+        "partition_byte_share_gate_enforced": share_gate_enforced,
+        "unbounded_blob_min_entropy_bits_per_byte": blob_entropy,
         "column_stats": summaries,
         "column_stats_stride": stride,
         "column_cardinality_max_relative_deviation": max_card_dev,
