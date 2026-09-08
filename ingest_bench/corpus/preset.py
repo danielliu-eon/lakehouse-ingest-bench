@@ -222,5 +222,10 @@ def preset_from_effective(effective: dict[str, object], schema_name: str) -> Pre
     return preset
 
 
+def corpus_dir_name_for(name: str, hash_value: str) -> str:
+    """The corpus directory rule, for a caller holding only what `corpus.json` published."""
+    return f"{name}-{hash_value}"
+
+
 def corpus_dir_name(preset: Preset) -> str:
-    return f"{preset.name}-{corpus_hash(preset)}"
+    return corpus_dir_name_for(preset.name, corpus_hash(preset))

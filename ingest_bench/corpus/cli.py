@@ -17,7 +17,7 @@ from ingest_bench import uri
 from ingest_bench.corpus import merge as merge_corpora
 from ingest_bench.corpus import values as v
 from ingest_bench.corpus.generate import generate
-from ingest_bench.corpus.preset import Preset, corpus_dir_name, corpus_hash, load_preset
+from ingest_bench.corpus.preset import Preset, corpus_dir_name, corpus_dir_name_for, corpus_hash, load_preset
 
 WORKLOADS_ENV = "INGEST_BENCH_WORKLOADS"
 
@@ -118,7 +118,7 @@ def run_gen(args: argparse.Namespace) -> int:
 def run_merge(args: argparse.Namespace) -> int:
     shard_uris = [str(shard_uri) for shard_uri in args.shard_uris]
     meta = merge_corpora.merge(shard_uris, str(args.out))
-    corpus_uri = uri.join(str(args.out), f"{meta['name']}-{meta['corpus_hash']}")
+    corpus_uri = uri.join(str(args.out), corpus_dir_name_for(str(meta["name"]), str(meta["corpus_hash"])))
     print(
         f"wrote {corpus_uri} from {len(shard_uris)} shards: "
         f"{meta['row_count']} rows, {meta['encoded_bytes']} encoded bytes"
