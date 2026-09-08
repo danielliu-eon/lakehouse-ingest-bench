@@ -136,15 +136,18 @@ engine branches outside it.
 | File | Purpose |
 |---|---|
 | `README.md` | what the engine runs, knobs it honours, known traps |
-| `Dockerfile` | stock upstream image plus connector jars; pinned versions; built by CI and buildable locally |
+| `Dockerfile` | stock upstream image plus connector jars; pinned versions; built by CI to GHCR and buildable locally |
 | `deploy.yaml.tmpl` | the Kubernetes resource rendered from a run spec |
 | `compose.yaml` | the engine's services for the local stack |
 | job source | the job the engine runs (SQL or Python) |
 | `knobs.py` | run-spec keys the engine accepts, validation, rendering into the template and the DDL |
 | `verify.py` | reads effective state from the running engine and fails staging on drift from the spec |
-| `fleet.py` | requested vCPU and GiB per role from the spec, for the result |
+| `fleet.py` | requested vCPU and GiB per role from the spec, for `run.json` |
 
-`engines/flink/` is the worked example. Two rules it is worth copying:
+That table is the contract, not the current state: phase 1 ships only the
+README, the Dockerfile, `compose.yaml`, the job source and `knobs.py`, and
+`engines/flink/` is the worked example of those five. Two rules in it are worth
+copying:
 
 - **Render, never reach.** Nothing in `knobs.py` touches a cluster, so a leg's
   whole configuration can be read, and diffed against another leg's, before any
