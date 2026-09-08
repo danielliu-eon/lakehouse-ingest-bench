@@ -139,3 +139,28 @@ def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMeta
     # A `;` inside a property value must not be read as a statement end.
     with_semicolons = replace(_site(), kafka_security={"sasl.jaas.config": "a=b;c=d;"})
     assert len(job.split_statements(knobs.render_sql(spec, with_semicolons, d, meta))) == 3
+
+
+def test_the_external_example_is_what_the_renderer_produces(meta: metadata.CorpusMetadata) -> None:
+    """The walk-through's checked-in engine config has to describe these rows.
+
+    `docs/examples/external-flink/` is the config an operator starts by hand in
+    the external walk-through, so it is this renderer's output for the local
+    stack with the run's names left as placeholders. A column added to the
+    schema would otherwise leave it declaring a source that no longer matches
+    the bytes the producer writes, and the walk-through would fail as an Avro
+    decode error rather than as a document nobody updated.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    site = model.load_site(ROOT / "deploy" / "compose" / "local" / "site.yaml")
+    placeholders = derive.Derived(
+        run_id="@RUN_ID@",
+        topic="@TOPIC@",
+        table="@NAMESPACE@.@TABLE@",
+        namespace="@K8S_NAMESPACE@",
+        run_root="@RUN_ROOT@",
+        corpus_uri="@CORPUS_URI@",
+    )
+    example = ROOT / "docs" / "examples" / "external-flink"
+    for name, content in knobs.render(spec, site, placeholders, meta).items():
+        assert (example / name).read_text() == content, f"{example / name} is stale; re-render it"

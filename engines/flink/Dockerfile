@@ -32,16 +32,17 @@ ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-gcp-bundle/${ICEBE
 ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar .
 ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro/${FLINK_VERSION}/flink-sql-avro-${FLINK_VERSION}.jar .
 # Iceberg's Flink runtime resolves a table through Hadoop's `Configuration`
-# whichever FileIO then reads it, so these are needed even for object storage.
-# woodstox and stax2 are what `Configuration` parses XML with; commons-logging
-# is what it logs through.
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-common/${HADOOP_VERSION}/hadoop-common-${HADOOP_VERSION}.jar .
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-auth/${HADOOP_VERSION}/hadoop-auth-${HADOOP_VERSION}.jar .
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-hdfs-client/${HADOOP_VERSION}/hadoop-hdfs-client-${HADOOP_VERSION}.jar .
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-mapreduce-client-core/${HADOOP_VERSION}/hadoop-mapreduce-client-core-${HADOOP_VERSION}.jar .
-ADD https://repo1.maven.org/maven2/com/fasterxml/woodstox/woodstox-core/6.5.1/woodstox-core-6.5.1.jar .
-ADD https://repo1.maven.org/maven2/org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar .
-ADD https://repo1.maven.org/maven2/commons-logging/commons-logging/1.2/commons-logging-1.2.jar .
+# whichever FileIO then reads it, so Hadoop is needed even for object storage.
+#
+# The shaded client pair rather than `hadoop-common` and its siblings: Flink
+# installs its `HadoopModule` as soon as it finds Hadoop on the classpath, and
+# that initializes `UserGroupInformation`, which pulls in commons-configuration2,
+# guava, re2j and more. `hadoop-client-api` and `hadoop-client-runtime` are one
+# shading run of exactly that closure — the api jar's references point at the
+# relocated third-party packages the runtime jar carries — so the two together
+# are the whole Hadoop classpath and nothing else has to be enumerated.
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/${HADOOP_VERSION}/hadoop-client-api-${HADOOP_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/${HADOOP_VERSION}/hadoop-client-runtime-${HADOOP_VERSION}.jar .
 RUN chown -R flink:flink /opt/flink/lib && chmod 644 /opt/flink/lib/*.jar
 
 # The submitter and the one module it shares with the renderer, kept at their

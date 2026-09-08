@@ -11,7 +11,7 @@ or serializer is written here — so a Flink result is Flink's.
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
 | Source | `flink-sql-connector-kafka:3.4.0-1.20`, Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
-| Classpath | `hadoop-{common,auth,hdfs-client,mapreduce-client-core}:3.3.6`, `woodstox-core:6.5.1`, `stax2-api:4.2.1`, `commons-logging:1.2` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
+| Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
 | PyFlink | `apache-flink==1.20.1`, `pyyaml==6.0.2` |
 
@@ -19,6 +19,13 @@ The image is amd64 because **PyFlink publishes no Linux aarch64 wheel in any
 release**; on arm64 the stack runs emulated, which checks a run end to end but
 does not measure one. `job.sql` holds the catalog's credentials verbatim: it
 is a config file, not the publishable record — `facts.json` is that.
+
+Hadoop arrives as the **shaded client pair** and not as `hadoop-common` plus
+siblings. Flink installs its `HadoopModule` the moment it finds Hadoop on the
+classpath, and installing it initializes `UserGroupInformation` — which needs
+commons-configuration2, guava and re2j behind it. `hadoop-client-api` and
+`hadoop-client-runtime` are one shading run over exactly that closure, so the
+transitive set never has to be enumerated jar by jar.
 
 The `flink` profile starts the cluster; `flink-job` submits one run detached,
 mounting `$RUN_DIR` — set it to the staged run directory, or the mount fails.
@@ -58,13 +65,23 @@ unsupported `WITH` key fails validation. So the fallback is taken:
   when it differs from the default, so the writers use the whole fleet.
 
 The hint reaches the table through `table.dynamic-table-options.enabled`,
-`true` by default in 1.20.1 (verified in `TableConfigOptions`). Two things to
-confirm on the first live job: the graph at
-`http://<jobmanager>:8081` should show the source at `source_parallelism` and
-the writer at `taskmanagers * slots` (a writer at the reader count means the
-hint did not apply), and `GET /jobs/<id>/checkpoints/config` should report the
-interval asked for. `flink-conf.yaml`'s cluster-shaped keys are informational
-on a job config; the stack applies them from `flink.env`.
+`true` by default in 1.20.1 (verified in `TableConfigOptions`).
+`flink-conf.yaml`'s cluster-shaped keys are informational on a job config; the
+stack applies them from `flink.env`.
+
+`scripts/smoke.sh` confirms the rest on a live job. On `runs/smoke-flink.yaml`
+— 1 taskmanager, 4 slots, `source_parallelism: 4` — the graph is
+`Source: kafka_source -> ConstraintEnforcer` at 4, `IcebergStreamWriter` at 4,
+and `IcebergFilesCommitter -> IcebergSink` at 1; `GET
+/jobs/<id>/checkpoints/config` reports `interval 10000`, `min_pause 2000`,
+`mode exactly_once`. The committer is a singleton by construction — the sink
+serialises commits whatever the writers do.
+
+That spec does **not** exercise the `write-parallelism` hint: its readers and
+its fleet are both 4, so the two numbers coincide and no hint is emitted. A
+spec whose `source_parallelism` is below `taskmanagers * slots` is the one to
+read the writer's parallelism on; a writer sitting at the reader count there
+means the hint did not apply.
 
 ## Catalog properties
 

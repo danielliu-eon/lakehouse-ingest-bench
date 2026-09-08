@@ -35,3 +35,26 @@ def test_join_and_listdir(tmp_path: Path) -> None:
     assert uri.listdir(uri.join(root, "batches")) == ["000000.bin.zst", "000001.bin.zst"]
     assert uri.read_bytes(uri.join(root, "batches", "000000.bin.zst")) == b"y"
     assert not uri.exists(uri.join(root, "batches", "000002.bin.zst"))
+
+
+def test_read_bytes_reads_the_whole_object_rather_than_a_buffered_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Objects here are rewritten while they are read, so a read is one request.
+
+    A caching file object pins the ETag it opened with and fails a later range
+    request once the object behind it has been replaced. The producer
+    republishes its publish log every few seconds and the scorer reads that log
+    on every poll, so that failure would end a run. This fake refuses exactly
+    the call that would take that path.
+    """
+
+    class Republished:
+        def cat_file(self, path: str) -> bytes:
+            return b"fresh"
+
+        def open(self, path: str, mode: str) -> object:
+            raise AssertionError("read_bytes opened a buffered file")
+
+    monkeypatch.setattr(uri, "filesystem_for", lambda _: (Republished(), "runs/r/publish_log-0.jsonl"))
+    assert uri.read_bytes("s3://runs/r/publish_log-0.jsonl") == b"fresh"

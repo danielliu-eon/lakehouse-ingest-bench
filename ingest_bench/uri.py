@@ -37,7 +37,11 @@ def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
     until a cluster cannot find the corpus it was pointed at.
     """
     if uri.startswith("s3://"):
-        kwargs: dict[str, object] = {}
+        # No listings cache, because the scorer lists prefixes that are still
+        # being written into: a producer shard's publish log appears in a prefix
+        # an earlier poll already listed, and a cached listing would hide it —
+        # leaving the offer looking as though it never ended.
+        kwargs: dict[str, object] = {"use_listings_cache": False}
         endpoint = os.environ.get("AWS_ENDPOINT_URL")
         if endpoint:
             kwargs["client_kwargs"] = {"endpoint_url": endpoint}
@@ -65,9 +69,18 @@ def write_bytes(uri: str, data: bytes) -> None:
 
 
 def read_bytes(uri: str) -> bytes:
+    """The whole object at ``uri``, as it stands at this moment.
+
+    One request rather than a buffered file, because objects here are rewritten
+    while they are being read: a producer republishes its publish log every few
+    seconds, and the scorer reads that log on every poll. A caching file object
+    pins the ETag it opened with and fails a later range request with
+    ``FileExpired`` once the object behind it has been replaced — so a read that
+    happened to span a republish would end the run rather than return the newer
+    bytes.
+    """
     fs, path = filesystem_for(uri)
-    with fs.open(path, "rb") as handle:
-        return bytes(handle.read())
+    return bytes(fs.cat_file(path))
 
 
 def write_text(uri: str, text: str) -> None:
