@@ -55,6 +55,14 @@ files = ["ingest_bench", "engines", "tests"]
 module = ["confluent_kafka.*", "fastavro.*", "fsspec.*", "s3fs.*", "gcsfs.*", "pyarrow.*", "zstandard.*"]
 ignore_missing_imports = true
 
+# `confluent_kafka.admin` ships type information but declares no `__all__`, so
+# under strict mode the names it re-exports from the C extension — `NewTopic`
+# among them — are not importable. The alternative is importing them from the
+# extension directly, which erases their types.
+[[tool.mypy.overrides]]
+module = ["confluent_kafka.*"]
+implicit_reexport = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: needs the local compose stack"]
