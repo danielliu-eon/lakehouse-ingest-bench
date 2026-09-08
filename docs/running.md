@@ -63,6 +63,37 @@ thirty-second offer. The short run is still a real check: the table has to
 drain and exactness has to be clean. It is the freshness bound and the keep-up
 fraction that only a corpus longer than the warmup exercises.
 
+## Sizing the producer
+
+`scripts/measure-producer.sh` times one producer shard sending a corpus (3 GB
+encoded, ~11.7M rows) into the local Kafka broker with `--epoch` an hour in
+the past — every batch is already due, so the wall clock measures the
+producer alone, not the corpus's own pacing.
+
+Median of three runs on an Apple M5 Pro (arm64) under OrbStack — the harness
+image is native arm64, so nothing here is emulated, and Kafka is a single
+local broker sharing this machine's cores with the harness, so the figure is
+a per-process ceiling, not a cluster's:
+
+| Metric | Median | Runs |
+|---|---|---|
+| MB/s (encoded) | 115.6 | 115.57, 120.20, 115.57 |
+| rows/s | 449,182 | 449182, 467149, 449182 |
+
+Both comfortably clear the 30 MB/s floor below which the spec's fallback (a
+compiled producer) would be worth building; nothing here calls for it.
+
+Use the median to size a shard count for an offer:
+
+```
+shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
+```
+
+e.g. offering 500 MB/s needs `ceil(500 / 115.6 * 1.5) = 7` shards. Rerun the
+script after a change to the producer or the encoder, and on the machine that
+will actually run the offer — this figure is one laptop's, not a promise
+about any other host.
+
 ## The run directory
 
 Staging writes `runs/<run_id>/`, and everything downstream reads it:
