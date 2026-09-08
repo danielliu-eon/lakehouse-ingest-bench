@@ -1,8 +1,8 @@
 # Flink engine
 
 Stock Apache Flink 1.20.1 driven by SQL. `knobs.py` renders the script and the
-settings; `job.py` submits them with the PyFlink Table API. No source, sink or
-serializer is written here, so a Flink result is Flink's.
+settings, `job.py` submits them with the PyFlink Table API, and no source, sink
+or serializer is written here — so a Flink result is Flink's.
 
 ## What runs
 
@@ -16,9 +16,12 @@ serializer is written here, so a Flink result is Flink's.
 | PyFlink | `apache-flink==1.20.1`, `pyyaml==6.0.2` |
 
 The image is amd64 because **PyFlink publishes no Linux aarch64 wheel in any
-release**; on an arm64 machine the stack runs emulated, which checks a run end
-to end but does not measure one. `job.sql` holds the catalog's credentials
-verbatim — it is a config file, not the publishable record; `facts.json` is.
+release**; on arm64 the stack runs emulated, which checks a run end to end but
+does not measure one. `job.sql` holds the catalog's credentials verbatim: it
+is a config file, not the publishable record — `facts.json` is that.
+
+The `flink` profile starts the cluster; `flink-job` then submits one run with
+`RUN_DIR` set to its staged directory, detached, so it exits on acceptance.
 
 ## Knobs
 
@@ -41,36 +44,33 @@ verbatim — it is a config file, not the publishable record; `facts.json` is.
 
 `execution.checkpointing.mode` is always `EXACTLY_ONCE`: it is the promise
 duplication is scored against, so it is not a knob. `tm_cpu`, `jm_cpu` and
-`machine_type` are carried, not consumed — the stack sizes containers from
-`flink.env` (`TASKMANAGERS`, `SLOTS`, `TM_MEM_MB`, `JM_MEM_MB`).
+`machine_type` are carried, not consumed — `flink.env` sizes the containers.
 
 ## Source parallelism: the path taken
 
 `flink-sql-connector-kafka:3.4.0-1.20` **has no `scan.parallelism` option**
 (verified against the jar: `KafkaConnectorOptions` declares `SINK_PARALLELISM`
-and no `SCAN_PARALLELISM`; FLINK-33262 is not in this release). An unsupported
-`WITH` key fails table validation, so the fallback is taken:
+and no `SCAN_PARALLELISM`; FLINK-33262 is not in this release), and an
+unsupported `WITH` key fails validation. So the fallback is taken:
 
 - `parallelism.default` = `source_parallelism`, which the readers inherit.
 - The sink carries `'write-parallelism' = taskmanagers * slots`, emitted only
-  when it differs from `parallelism.default`, so the writers use the whole
-  fleet instead of inheriting the reader count.
+  when it differs from the default, so the writers use the whole fleet.
 
 The hint reaches the table through `table.dynamic-table-options.enabled`,
-`true` by default in Flink 1.20.1 (verified in `TableConfigOptions`).
-
-Two things to confirm on the first live job: the graph at
+`true` by default in 1.20.1 (verified in `TableConfigOptions`). Two things to
+confirm on the first live job: the graph at
 `http://<jobmanager>:8081` should show the source at `source_parallelism` and
-the Iceberg writer at `taskmanagers * slots` (a writer at the reader count
-means the hint did not apply), and `GET /jobs/<id>/checkpoints/config` should
-report the interval asked for. The cluster-shaped keys in `flink-conf.yaml`
-are informational on a job config; the stack applies them from `flink.env`.
+the writer at `taskmanagers * slots` (a writer at the reader count means the
+hint did not apply), and `GET /jobs/<id>/checkpoints/config` should report the
+interval asked for. `flink-conf.yaml`'s cluster-shaped keys are informational
+on a job config; the stack applies them from `flink.env`.
 
 ## Catalog properties
 
-The leg needs an Iceberg **REST** catalog; a `site.catalog.props` naming any
-other `type` is refused at stage time. pyiceberg's names carry through
-unchanged except one, and `type` is translated rather than passed on:
+The leg needs an Iceberg **REST** catalog; any other `type` in
+`site.catalog.props` is refused at stage time. pyiceberg's names carry through
+unchanged bar one, and `type` is translated rather than passed on:
 
 | `site.catalog.props` | Rendered |
 |---|---|

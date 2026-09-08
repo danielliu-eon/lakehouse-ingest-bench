@@ -45,10 +45,20 @@ services:
         s3.access-key: admin
         s3.secret-key: password
     depends_on: [flink-jobmanager]
+  # The submitter, run once against a cluster the `flink` profile already
+  # started. It names no `depends_on`: a dependency on a service in another
+  # profile makes the project invalid unless that profile is also activated,
+  # and the ordering it would express is worthless here anyway — the two
+  # profiles are separate commands, and `depends_on` waits for a container to
+  # start rather than for a jobmanager to accept a job.
+  #
+  # `-d` so submission returns as soon as the cluster accepts the job. A
+  # streaming insert never completes, so an attached submission would hold
+  # this container open for the whole run. Pair `--wait` with an attached
+  # submission if a caller ever wants the opposite.
   flink-job:
     profiles: [flink-job]
     image: lakehouse-ingest-bench/flink:local
     volumes: ["${RUN_DIR:?set RUN_DIR to the staged run directory}:/run:ro"]
     environment: [AWS_REGION=us-east-1]
-    command: ["flink", "run", "-m", "flink-jobmanager:8081", "-py", "/opt/bench/job.py", "--sql", "/run/job.sql", "--conf", "/run/flink-conf.yaml"]
-    depends_on: [flink-jobmanager]
+    command: ["flink", "run", "-d", "-m", "flink-jobmanager:8081", "-py", "/opt/bench/job.py", "--sql", "/run/job.sql", "--conf", "/run/flink-conf.yaml"]
