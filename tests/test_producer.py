@@ -204,6 +204,23 @@ def test_done_trailer_marks_the_shard_finished(tmp_path: Path, corpus_uri: str) 
     assert not publish_log.shard_done(tmp_path / "publish_log-9.jsonl")
 
 
+def test_shards_done_names_the_finished_shards(tmp_path: Path) -> None:
+    assert publish_log.shards_done(str(tmp_path / "absent")) == set()
+    for shard in (0, 1):
+        publish_log.append(
+            tmp_path / f"publish_log-{shard}.jsonl", publish_log.PublishRecord(shard, 0, 5, 50, 10, 100, 0)
+        )
+    assert publish_log.shards_done(str(tmp_path)) == set()
+    publish_log.append_done(tmp_path / "publish_log-1.jsonl", 1, 1)
+    assert publish_log.shards_done(str(tmp_path)) == {1}
+    publish_log.append_done(tmp_path / "publish_log-0.jsonl", 0, 1)
+    assert publish_log.shards_done(str(tmp_path)) == {0, 1}
+
+    publish_log.append_done(tmp_path / "publish_log-x.jsonl", 0, 1)
+    with pytest.raises(ValueError, match="does not name a shard index"):
+        publish_log.shards_done(str(tmp_path))
+
+
 def test_upload_prefix_publishes_the_log(tmp_path: Path, corpus_uri: str) -> None:
     clock = FakeClock(1_700_000_000_000)
     uploads = tmp_path / "uploads"

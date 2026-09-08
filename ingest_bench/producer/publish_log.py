@@ -101,6 +101,14 @@ def read(path: Path) -> list[PublishRecord]:
     return _parse(path.read_text(encoding="utf-8"), str(path))
 
 
+def _trailed(text: str) -> bool:
+    """Whether a log's last line is the trailer rather than a batch."""
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return _DONE_KEY in cast(dict[str, object], json.loads(line))
+    return False
+
+
 def shard_done(path: Path) -> bool:
     """Whether the shard that owns ``path`` published everything it selected.
 
@@ -109,16 +117,40 @@ def shard_done(path: Path) -> bool:
     """
     if not path.exists():
         return False
-    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-        if line.strip():
-            return _DONE_KEY in cast(dict[str, object], json.loads(line))
-    return False
+    return _trailed(path.read_text(encoding="utf-8"))
 
 
 def log_names(uri_prefix: str) -> list[str]:
     return [
         name for name in uri.listdir(uri_prefix) if name.startswith(LOG_NAME_PREFIX) and name.endswith(LOG_NAME_SUFFIX)
     ]
+
+
+def _shard_index(name: str) -> int:
+    """The shard a log file name belongs to.
+
+    A name carrying no index is refused rather than skipped: the scorer decides
+    the offer is over by comparing the finished shards against the shards it
+    expects, and a log it cannot attribute would leave that comparison waiting
+    on a shard nobody can name.
+    """
+    raw = name[len(LOG_NAME_PREFIX) : -len(LOG_NAME_SUFFIX)]
+    if not raw.isdigit():
+        raise ValueError(f"publish log {name!r} does not name a shard index")
+    return int(raw)
+
+
+def shards_done(uri_prefix: str) -> set[int]:
+    """The shards whose logs under ``uri_prefix`` carry the done trailer.
+
+    This is how the scorer learns the offer is over, and it is a set rather
+    than a count because shards do not finish in order. A shard that stopped
+    early never writes its trailer, so a run that died mid-offer is never read
+    as one that finished.
+    """
+    if not uri.exists(uri_prefix):
+        return set()
+    return {_shard_index(name) for name in log_names(uri_prefix) if _trailed(uri.read_text(uri.join(uri_prefix, name)))}
 
 
 def read_all(uri_prefix: str) -> list[PublishRecord]:
