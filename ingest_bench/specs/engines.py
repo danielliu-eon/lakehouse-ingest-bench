@@ -13,11 +13,16 @@ from __future__ import annotations
 import importlib
 from types import ModuleType
 
+from ingest_bench.specs.kubernetes import EngineKubernetes
+
 MANAGED: dict[str, str] = {"flink": "engines.flink.knobs", "spark": "engines.spark.knobs"}
 
 KNOBS_MODULE = "knobs"
 FLEET_MODULE = "fleet"
 VERIFY_MODULE = "verify"
+
+# The attribute a knobs module declares its cluster shape under.
+KUBERNETES = "KUBERNETES"
 
 
 def _engine_module(engine: str, submodule: str) -> ModuleType:
@@ -64,8 +69,28 @@ def fleet_for(engine: str) -> ModuleType:
 def verify_for(engine: str) -> ModuleType:
     """The verify module of a managed engine.
 
-    Every such module exposes ``verify(spec, run_id, fetch) -> list[str]``:
+    Every such module exposes ``verify(spec, run_id, fetch, ...) -> list[str]``:
     one line per setting the running engine does not honour, and an empty list
-    for a run it does.
+    for a run it does. An engine whose descriptor names a `pods_selector` takes
+    the pod list as a further argument, since some of what it checks is the
+    shape of the pods rather than anything the engine reports about itself.
     """
     return _engine_module(engine, VERIFY_MODULE)
+
+
+def kubernetes_for(engine: str) -> EngineKubernetes:
+    """The Kubernetes shape of a managed engine, as its knobs module declares it.
+
+    On the knobs module because that is what renders the two documents the
+    descriptor names, so the filenames a driver applies and the ones the
+    renderer writes are one declaration rather than two to keep in step.
+    """
+    module = knobs_for(engine)
+    if not hasattr(module, KUBERNETES):
+        raise ValueError(
+            f"managed engine {engine!r} declares no {KUBERNETES}, so nothing here knows how to address it on a cluster"
+        )
+    declared = getattr(module, KUBERNETES)
+    if not isinstance(declared, EngineKubernetes):
+        raise ValueError(f"managed engine {engine!r} declares {KUBERNETES} as {type(declared).__name__}")
+    return declared

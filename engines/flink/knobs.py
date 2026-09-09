@@ -23,6 +23,7 @@ from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.kafka_auth import REGION_KEY
 from ingest_bench.specs.derive import Derived
+from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
 from ingest_bench.specs.model import VALUE_ENCODING_CONFLUENT, KubernetesConfig, RunSpec, SiteConfig
 
 # The names inside the submitted script. Nothing outside the script refers to
@@ -71,6 +72,31 @@ _FLINK_CONTAINER = "flink-main-container"
 _ARCH_PIN = {"kubernetes.io/arch": "amd64"}
 
 REST = "rest"
+
+# How a driver addresses a Flink run on a cluster. The names are the operator's
+# rather than ours: it publishes the JobManager's REST endpoint as a Service
+# called `<deployment>-rest` and labels the pods it creates `app` and
+# `component`, and the FlinkDeployment rendered below declares neither.
+#
+# The jobmanager is the pod provenance is read off because it is the one of the
+# two whose image is the engine's for every submission mode. No pods selector:
+# everything `verify` compares is reported by the job itself.
+KUBERNETES = EngineKubernetes(
+    kind="flinkdeployment",
+    running_state="RUNNING",
+    # A job that finished or was cancelled before the run started is as far
+    # from runnable as one that failed, and its fleet is gone either way — so
+    # waiting any of the three out would only postpone the same refusal.
+    failed_states=("FAILED", "CANCELED", "FINISHED"),
+    state_jsonpath="{.status.jobStatus.state}",
+    rest_service_suffix="-rest",
+    rest_port=8081,
+    log_target=f"deploy/{NAME}",
+    provenance_selector=f"app={NAME},component=jobmanager",
+    pods_selector="",
+    document_file=FLINKDEPLOYMENT_FILE,
+    configmap_file=CONFIGMAP_FILE,
+)
 
 # The type each knob is declared as. This is also the accepted surface: a key
 # that is not here is refused, so a misspelled knob costs one error message

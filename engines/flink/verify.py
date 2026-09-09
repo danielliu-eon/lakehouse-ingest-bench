@@ -18,15 +18,23 @@ against recorded answers instead of a cluster.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
-import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import cast
 
 from engines.flink.knobs import SOURCE_TABLE, Knobs, read
+from ingest_bench.readings import (
+    DRIFT_EXIT,
+    UNVERIFIED_EXIT,
+    document,
+    documents,
+    fetch_json,
+    field,
+    int_field,
+    line,
+    str_field,
+)
 from ingest_bench.specs.model import RunSpec, load_run_spec
 
 # The two resources whose paths hold no job id. The other two are built per
@@ -65,16 +73,6 @@ COMMITTER_PARALLELISM = 1
 _INTERVAL_KEY = "execution.checkpointing.interval"
 _MIN_PAUSE_KEY = "execution.checkpointing.min-pause"
 
-# Long enough for a jobmanager under a cold job graph, short enough that an
-# endpoint nothing is listening on is answered in one breath rather than held
-# until a driver's own timeout.
-REST_TIMEOUT_S = 5.0
-
-# A verdict and a refusal to give one are different answers: staging retries
-# the second and fails on the first, so they cannot share an exit status.
-DRIFT_EXIT = 3
-UNVERIFIED_EXIT = 2
-
 # Flink's duration grammar, as `TimeUtils.parseDuration` reads it: an integer,
 # optional whitespace, and a unit label that is milliseconds when there is
 # none. Only the four labels a commit cadence is written in are accepted — a
@@ -96,54 +94,8 @@ def duration_ms(value: str, where: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Reading a REST answer
-# ---------------------------------------------------------------------------
-#
-# A document that does not hold what it is read for is unreadable and says so.
-# The alternative is an empty drift list, which reads as a verified run — the
-# one answer nobody may be given without having looked.
-
-
-def _document(value: object, where: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{where} answered {type(value).__name__} rather than a JSON object")
-    return {str(key): entry for key, entry in cast(dict[object, object], value).items()}
-
-
-def _documents(value: object, where: str) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        raise ValueError(f"{where} answered {type(value).__name__} rather than a JSON array")
-    return [_document(entry, f"{where}[{index}]") for index, entry in enumerate(cast(list[object], value))]
-
-
-def _field(document: dict[str, object], key: str, where: str) -> object:
-    if key not in document:
-        raise ValueError(f"{where} answered no {key!r}; it holds {sorted(document)}")
-    return document[key]
-
-
-def _int_field(document: dict[str, object], key: str, where: str) -> int:
-    value = _field(document, key, where)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{where} answered {key} {value!r}, which is not a whole number")
-    return value
-
-
-def _str_field(document: dict[str, object], key: str, where: str) -> str:
-    value = _field(document, key, where)
-    if not isinstance(value, str):
-        raise ValueError(f"{where} answered {key} {value!r}, which is not a string")
-    return value
-
-
-# ---------------------------------------------------------------------------
 # The readings
 # ---------------------------------------------------------------------------
-
-
-def _line(what: str, spec: object, engine: object) -> str:
-    """One drift, in the shape every line of the report takes."""
-    return f"{what}: spec {spec}, engine {engine}"
 
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
@@ -158,7 +110,7 @@ def _effective(knobs: Knobs, key: str, knob: str) -> str:
     return knob
 
 
-def _job(run_id: str, document: object) -> tuple[str, str]:
+def _job(run_id: str, overview: object) -> tuple[str, str]:
     """The run's job state, and the id the other readings are made against.
 
     A job the cluster restarted keeps the run's name, and the jobmanager
@@ -167,19 +119,19 @@ def _job(run_id: str, document: object) -> tuple[str, str]:
     can be attributed to. The id is empty for every state but RUNNING, which
     is the only one anything further is read under.
     """
-    jobs = _documents(_field(_document(document, JOBS_OVERVIEW), "jobs", JOBS_OVERVIEW), f"{JOBS_OVERVIEW}.jobs")
-    named = [job for job in jobs if _str_field(job, "name", JOBS_OVERVIEW) == run_id]
+    jobs = documents(field(document(overview, JOBS_OVERVIEW), "jobs", JOBS_OVERVIEW), f"{JOBS_OVERVIEW}.jobs")
+    named = [job for job in jobs if str_field(job, "name", JOBS_OVERVIEW) == run_id]
     if not named:
         return NOT_FOUND, ""
     for job in named:
-        if _str_field(job, "state", JOBS_OVERVIEW) == RUNNING:
-            return RUNNING, _str_field(job, "jid", JOBS_OVERVIEW)
-    return _str_field(named[0], "state", JOBS_OVERVIEW), ""
+        if str_field(job, "state", JOBS_OVERVIEW) == RUNNING:
+            return RUNNING, str_field(job, "jid", JOBS_OVERVIEW)
+    return str_field(named[0], "state", JOBS_OVERVIEW), ""
 
 
 def _checkpoint_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> list[str]:
     where = f"/jobs/{jid}/checkpoints/config"
-    document = _document(fetch(where), where)
+    config = document(fetch(where), where)
     durations: tuple[tuple[str, str, str, str], ...] = (
         ("checkpoint interval ms", _INTERVAL_KEY, knobs.checkpoint_interval, "interval"),
         ("checkpoint min pause ms", _MIN_PAUSE_KEY, knobs.min_pause, "min_pause"),
@@ -187,16 +139,16 @@ def _checkpoint_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) ->
     lines: list[str] = []
     for what, key, knob, reported in durations:
         expected = duration_ms(_effective(knobs, key, knob), key)
-        actual = _int_field(document, reported, where)
+        actual = int_field(config, reported, where)
         if expected != actual:
-            lines.append(_line(what, expected, actual))
+            lines.append(line(what, expected, actual))
     # Against the constant and not against the submitted configuration:
     # exactly once is the promise duplication is scored against rather than a
     # knob, so a run that relaxed it through `extra_flink_conf` is precisely
     # what this line exists to catch.
-    mode = _str_field(document, "mode", where)
+    mode = str_field(config, "mode", where)
     if mode != EXACTLY_ONCE:
-        lines.append(_line("checkpoint mode", EXACTLY_ONCE, mode))
+        lines.append(line("checkpoint mode", EXACTLY_ONCE, mode))
     return lines
 
 
@@ -208,7 +160,7 @@ def _vertex_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> lis
     not the submitted configuration, that says what the engine was told.
     """
     where = f"/jobs/{jid}"
-    vertices = _documents(_field(_document(fetch(where), where), "vertices", where), f"{where}.vertices")
+    vertices = documents(field(document(fetch(where), where), "vertices", where), f"{where}.vertices")
     roles: tuple[tuple[str, Callable[[str], bool], int], ...] = (
         ("source", lambda name: name.startswith(_SOURCE_PREFIX), knobs.parallelism_default()),
         ("writer", lambda name: _WRITER in name, knobs.slots_total()),
@@ -216,17 +168,17 @@ def _vertex_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> lis
     )
     lines: list[str] = []
     for label, matches, expected in roles:
-        matched = [vertex for vertex in vertices if matches(_str_field(vertex, "name", where))]
+        matched = [vertex for vertex in vertices if matches(str_field(vertex, "name", where))]
         if not matched:
             # A graph missing a role is not a graph the spec describes, and
             # the parallelism it would have been sized at cannot be read from
             # a vertex that is not there.
-            lines.append(_line(f"{label} vertices", "at least 1", 0))
+            lines.append(line(f"{label} vertices", "at least 1", 0))
             continue
         for vertex in matched:
-            actual = _int_field(vertex, "parallelism", where)
+            actual = int_field(vertex, "parallelism", where)
             if actual != expected:
-                lines.append(_line(f"{label} vertex parallelism", expected, actual))
+                lines.append(line(f"{label} vertex parallelism", expected, actual))
     return lines
 
 
@@ -237,11 +189,11 @@ def _fleet_drift(knobs: Knobs, fetch: Callable[[str], object]) -> list[str]:
     sizes the containers from the same knob, so the knob is the whole of what
     the spec asked for here.
     """
-    document = _document(fetch(CLUSTER_OVERVIEW), CLUSTER_OVERVIEW)
-    taskmanagers = _int_field(document, "taskmanagers", CLUSTER_OVERVIEW)
+    overview = document(fetch(CLUSTER_OVERVIEW), CLUSTER_OVERVIEW)
+    taskmanagers = int_field(overview, "taskmanagers", CLUSTER_OVERVIEW)
     if taskmanagers == knobs.taskmanagers:
         return []
-    return [_line("taskmanagers", knobs.taskmanagers, taskmanagers)]
+    return [line("taskmanagers", knobs.taskmanagers, taskmanagers)]
 
 
 def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object]) -> list[str]:
@@ -257,7 +209,7 @@ def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object]) -> list[s
         # The only reading worth making about a job that is not running. The
         # vertices of a failed one report the parallelism it had, which says
         # nothing about the run being staged.
-        return [_line("job state", RUNNING, state)]
+        return [line("job state", RUNNING, state)]
     return [
         *_checkpoint_drift(knobs, fetch, jid),
         *_vertex_drift(knobs, fetch, jid),
@@ -266,29 +218,8 @@ def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object]) -> list[s
 
 
 # ---------------------------------------------------------------------------
-# The endpoint, and the command line
+# The command line
 # ---------------------------------------------------------------------------
-
-
-def fetch_json(base_url: str) -> Callable[[str], object]:
-    """A reader of the JobManager's REST documents by path.
-
-    Every failure — a refused connection, a timeout, an answer that is not
-    JSON — is one message naming the URL. The endpoint is reached through a
-    tunnel on a cluster and through a service name on the local stack, so
-    which address did not answer is the whole of what a caller needs.
-    """
-    root = base_url.rstrip("/")
-
-    def fetch(path: str) -> object:
-        url = f"{root}{path}"
-        try:
-            with urllib.request.urlopen(url, timeout=REST_TIMEOUT_S) as answer:
-                return cast(object, json.loads(answer.read()))
-        except (OSError, ValueError) as error:
-            raise ValueError(f"could not read {url}: {error}") from error
-
-    return fetch
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,8 +250,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # answers by looking again rather than by refusing the run.
         print(error, file=sys.stderr)
         return UNVERIFIED_EXIT
-    for line in drift:
-        print(line)
+    for drifted in drift:
+        print(drifted)
     if drift:
         return DRIFT_EXIT
     # On stderr, because the drift lines are this command's answer and a

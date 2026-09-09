@@ -19,6 +19,7 @@ import pytest
 
 from engines.flink import verify as verify_module
 from engines.flink.verify import duration_ms, verify
+from ingest_bench.readings import DRIFT_EXIT, UNVERIFIED_EXIT
 from ingest_bench.specs import engines
 from ingest_bench.specs.model import RunSpec, load_run_spec
 
@@ -273,7 +274,7 @@ def test_the_console_script_separates_drift_from_not_having_looked(
     assert verify_module.main(arguments) == 0
 
     monkeypatch.setattr(verify_module, "fetch_json", _reader(_answers(taskmanagers=1)))
-    assert verify_module.main(arguments) == verify_module.DRIFT_EXIT
+    assert verify_module.main(arguments) == DRIFT_EXIT
     assert capsys.readouterr().out.splitlines() == ["taskmanagers: spec 2, engine 1"]
 
     def refuse(base_url: str) -> Callable[[str], object]:
@@ -283,5 +284,5 @@ def test_the_console_script_separates_drift_from_not_having_looked(
         return fetch
 
     monkeypatch.setattr(verify_module, "fetch_json", refuse)
-    assert verify_module.main(arguments) == verify_module.UNVERIFIED_EXIT
+    assert verify_module.main(arguments) == UNVERIFIED_EXIT
     assert "could not read http://localhost:18081/jobs/overview" in capsys.readouterr().err
