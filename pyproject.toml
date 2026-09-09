@@ -33,6 +33,7 @@ drop-table = "ingest_bench.table.cli:drop"
 score = "ingest_bench.scorer.cli:score"
 gate = "ingest_bench.scorer.cli:gate"
 stage = "ingest_bench.stage:main"
+drop-topic = "ingest_bench.kafka_admin:main"
 render-k8s = "ingest_bench.k8s.render:main"
 
 [dependency-groups]
