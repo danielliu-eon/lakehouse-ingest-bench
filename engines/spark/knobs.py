@@ -636,13 +636,16 @@ def _placement(cluster: KubernetesConfig) -> dict[str, object]:
 
 
 def _region_env(cluster: KubernetesConfig) -> list[dict[str, str]]:
-    """The region under both names an SDK reads it as, or nothing off AWS.
+    """The region under both names an SDK reads it as, as its own copy.
 
     Both halves of an MSK IAM connection need one — the token signer in the
     Kafka client and S3 under the table's FileIO — and the SDKs disagree about
     which name carries it: this image's Java client reads `AWS_REGION`, while
     botocore reads `AWS_DEFAULT_REGION` alone and is left with no region at all
     when only the other is set.
+
+    A copy per caller, like the mount and the placement above: one list
+    reached twice renders as an anchor and an alias.
     """
     if cluster.aws_region is None:
         return []
@@ -676,9 +679,6 @@ def render_sparkapplication(
         "volumeMounts": _mount(),
         **_placement(cluster),
     }
-    region = _region_env(cluster)
-    if region:
-        driver["env"] = region
     executor: dict[str, object] = {
         "instances": knobs.executors,
         "cores": knobs.executor_cores,
@@ -687,7 +687,11 @@ def render_sparkapplication(
         "volumeMounts": _mount(),
         **_placement(cluster),
     }
-    if region:
+    # The same environment on both halves, and the region is the whole of it:
+    # the executors do the reading and the writing, and the driver signs the
+    # commits. Off AWS there is no region to carry and neither gets an `env`.
+    if cluster.aws_region is not None:
+        driver["env"] = _region_env(cluster)
         executor["env"] = _region_env(cluster)
     document: dict[str, object] = {
         "apiVersion": "sparkoperator.k8s.io/v1beta2",
