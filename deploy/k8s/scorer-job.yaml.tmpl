@@ -1,0 +1,42 @@
+# The scorer, one pod for the whole run. It reads the table's commits and the
+# producers' publish logs from the moment the offer starts until the table
+# drains, and publishes every artifact as it goes — so a run that dies part way
+# through still says how far it got.
+#
+# One pod, and never more: two readers of one table would disagree about when a
+# commit became visible, and the run's freshness figures come from exactly one
+# of those judgements.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  backoffLimit: 0
+  completions: 1
+  template:
+    metadata:
+      labels:
+        lakehouse-ingest-bench: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: __SERVICE_ACCOUNT__
+      nodeSelector: __NODE_SELECTOR__
+      tolerations: __TOLERATIONS__
+      containers:
+        - name: harness
+          image: __IMAGE__
+          args: ["__COMMAND__"]
+          env: __ENV__
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir: {}

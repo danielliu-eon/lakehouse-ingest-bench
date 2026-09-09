@@ -1,0 +1,43 @@
+# The corpus generator, one pod per shard. Indexed completion is what gives each
+# pod its shard number: `$JOB_COMPLETION_INDEX` reaches the command line through
+# the image's shell entrypoint, so one rendered command serves every shard.
+#
+# Every shard writes under its own `--out` prefix. The generator names a corpus
+# directory after its preset and hash, so shards pointed at one prefix would
+# write their batches into the same directory and each would publish metadata
+# describing only its own — which is what `merge-corpus` exists to combine.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  backoffLimit: 0
+  completionMode: Indexed
+  completions: __COUNT__
+  parallelism: __COUNT__
+  template:
+    metadata:
+      labels:
+        lakehouse-ingest-bench: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: __SERVICE_ACCOUNT__
+      nodeSelector: __NODE_SELECTOR__
+      tolerations: __TOLERATIONS__
+      containers:
+        - name: harness
+          image: __IMAGE__
+          args: ["__COMMAND__"]
+          env: __ENV__
+          # The generator holds one whole batch in memory while it encodes it,
+          # so its peak is set by the preset's batch bytes and not by the shard
+          # count: sharding buys throughput, never headroom. This request fits
+          # the smoke preset; see "Generating a corpus" in docs/running.md for
+          # what the larger ones need, and raise it before running one.
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"

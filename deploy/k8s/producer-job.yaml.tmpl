@@ -1,0 +1,43 @@
+# One producer shard per pod. The shards of a run share the corpus, the topic
+# and the epoch and differ only in their index, which indexed completion gives
+# them: `$JOB_COMPLETION_INDEX` reaches the command line through the image's
+# shell entrypoint.
+#
+# The publish log is written to an `emptyDir` and uploaded to the run's prefix
+# as it goes, because it is the scorer's input and the scorer is another pod.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  backoffLimit: 0
+  completionMode: Indexed
+  completions: __COUNT__
+  parallelism: __COUNT__
+  template:
+    metadata:
+      labels:
+        lakehouse-ingest-bench: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: __SERVICE_ACCOUNT__
+      nodeSelector: __NODE_SELECTOR__
+      tolerations: __TOLERATIONS__
+      containers:
+        - name: harness
+          image: __IMAGE__
+          args: ["__COMMAND__"]
+          env: __ENV__
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: work
+          emptyDir: {}

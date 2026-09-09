@@ -1,0 +1,41 @@
+# One harness command as a Job: `stage`, `drop-topic`, `merge-corpus` — anything
+# that runs once and has to run inside the cluster, because the broker and the
+# catalog are reachable from the VPC and not from an operator's machine.
+#
+# Rendered by ingest_bench/k8s/render.py, which is also what refuses a marker
+# nobody gave a value for. See the templating note in deploy/aws/README.md.
+#
+# The whole command line is one argument, because the image's entrypoint is
+# `/bin/sh -c`: that shell splits the string and expands any variable in it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  # No retry, here and in every Job beside this one. By the time one of these
+  # commands can fail it has already created a topic, published rows or written
+  # an artifact, so a second attempt is not a repeat of the first — it is a
+  # second run of a command whose first run left state behind.
+  backoffLimit: 0
+  completions: 1
+  template:
+    metadata:
+      labels:
+        lakehouse-ingest-bench: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: __SERVICE_ACCOUNT__
+      nodeSelector: __NODE_SELECTOR__
+      tolerations: __TOLERATIONS__
+      containers:
+        - name: harness
+          image: __IMAGE__
+          args: ["__COMMAND__"]
+          env: __ENV__
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
