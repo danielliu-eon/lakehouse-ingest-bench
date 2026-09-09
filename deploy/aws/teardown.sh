@@ -3,10 +3,10 @@
 # the workloads first, then the identity they ran as, then the broker, then the
 # security group the broker's network interfaces were holding.
 #
-# By default the bucket, the ECR repositories and the Flink operator stay: the
-# corpus is the expensive thing to rebuild, the images are the slow thing to
-# push, and the operator is shared with whatever else runs on the cluster.
-# `--all` removes those three as well, corpus included.
+# By default the bucket, the ECR repositories and both engine operators stay:
+# the corpus is the expensive thing to rebuild, the images are the slow thing to
+# push, and an operator is shared with whatever else runs on the cluster.
+# `--all` removes those as well, corpus included.
 #
 # Like `setup.sh` it never creates, deletes or reconfigures the EKS cluster, and
 # it leaves the eks-pod-identity-agent add-on installed — the add-on is free and
@@ -24,8 +24,8 @@ usage() {
 	cat <<'USAGE'
 usage: deploy/aws/teardown.sh [--all]
 
-  --all   also delete the bucket and everything in it, the two ECR
-          repositories and the Flink Kubernetes Operator release
+  --all   also delete the bucket and everything in it, the three ECR
+          repositories and both engine operators' releases
 
 Environment: AWS_REGION and CLUSTER_NAME are required. BUCKET, MSK_NAME,
 NAMESPACE and KUBE_CONTEXT mean what they mean to setup.sh and must match the
@@ -66,9 +66,12 @@ ROLE_NAME=lakehouse-ingest-bench-harness
 POLICY_NAME=lakehouse-ingest-bench-harness
 HARNESS_SERVICE_ACCOUNT=ingest-bench-harness
 FLINK_SERVICE_ACCOUNT=ingest-bench-flink
+SPARK_SERVICE_ACCOUNT=ingest-bench-spark
 FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
 FLINK_OPERATOR_NAMESPACE=flink-operator
-ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink"
+SPARK_OPERATOR_RELEASE=spark-operator
+SPARK_OPERATOR_NAMESPACE=spark-operator
+ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink lakehouse-ingest-bench/spark"
 
 require_host_tools aws kubectl
 if ((ALL == 1)); then
@@ -99,9 +102,9 @@ fi
 # The workloads
 # ---------------------------------------------------------------------------
 
-# First, and waited on: the namespace holds the FlinkDeployments and the harness
-# Jobs, and a pod still running would keep speaking to MSK and to the role while
-# the rest of this deletes them.
+# First, and waited on: the namespace holds every engine of a run and the
+# harness Jobs, and a pod still running would keep speaking to MSK and to the
+# role while the rest of this deletes them.
 if ((CLUSTER_PRESENT == 1)); then
 	if kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1; then
 		log "deleting namespace $NAMESPACE and everything in it"
@@ -116,7 +119,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if ((CLUSTER_PRESENT == 1)); then
-	for service_account in "$HARNESS_SERVICE_ACCOUNT" "$FLINK_SERVICE_ACCOUNT"; do
+	for service_account in "$HARNESS_SERVICE_ACCOUNT" "$FLINK_SERVICE_ACCOUNT" "$SPARK_SERVICE_ACCOUNT"; do
 		association_ids="$(aws eks list-pod-identity-associations --cluster-name "$CLUSTER_NAME" \
 			--namespace "$NAMESPACE" --service-account "$service_account" \
 			--query 'associations[].associationId' --output text)"
@@ -202,7 +205,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if ((ALL == 0)); then
-	log "kept: s3://$BUCKET, the ECR repositories and the Flink operator. --all removes them too."
+	log "kept: s3://$BUCKET, the ECR repositories and both engine operators. --all removes them too."
 	exit 0
 fi
 
@@ -242,5 +245,14 @@ if ((CLUSTER_PRESENT == 1)); then
 		kubectl --context "$KUBE_CONTEXT" delete namespace "$FLINK_OPERATOR_NAMESPACE" --ignore-not-found --wait
 	else
 		log "the Flink Kubernetes Operator is not a helm release here; leaving it alone"
+	fi
+	if helm --kube-context "$KUBE_CONTEXT" status "$SPARK_OPERATOR_RELEASE" \
+		--namespace "$SPARK_OPERATOR_NAMESPACE" >/dev/null 2>&1; then
+		log "uninstalling the Kubeflow spark-operator"
+		helm --kube-context "$KUBE_CONTEXT" uninstall "$SPARK_OPERATOR_RELEASE" \
+			--namespace "$SPARK_OPERATOR_NAMESPACE" --wait
+		kubectl --context "$KUBE_CONTEXT" delete namespace "$SPARK_OPERATOR_NAMESPACE" --ignore-not-found --wait
+	else
+		log "the Kubeflow spark-operator is not a helm release here; leaving it alone"
 	fi
 fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the harness and engine images and push them to the site's registry,
+# Build the harness and the engine images and push them to the site's registry,
 # each tagged with the commit it was built from.
 #
 # The tag is the commit and never `latest`: a run publishes the image
@@ -20,12 +20,13 @@ usage() {
 usage: scripts/push-images.sh [options]
 
   --site PATH        the site config naming the registry (default: ./site.yaml)
-  --platform PLAT    what to build the harness image for (default: linux/amd64).
-                     Two, comma-separated, builds a manifest list with buildx
+  --platform PLAT    what to build the harness and Spark images for (default:
+                     linux/amd64). Two, comma-separated, builds a manifest list
+                     with buildx. The Flink image is amd64 whatever this says
   --allow-dirty      push from a tree with uncommitted changes, whose tag then
                      names a commit that is not what is in the image
 
-It prints the two image references it pushed, and nothing else, on stdout.
+It prints the image references it pushed, and nothing else, on stdout.
 USAGE
 }
 
@@ -75,6 +76,7 @@ fi
 
 HARNESS_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 FLINK_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/flink:$TAG"
+SPARK_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/spark:$TAG"
 
 log "signing in to $REGISTRY"
 # Explicit, because a failure inside a pipeline under `pipefail` would
@@ -84,23 +86,27 @@ if ! aws ecr get-login-password --region "$REGION" |
 	die "could not sign in to $REGISTRY; check that your credentials reach that account in $REGION"
 fi
 
-log "building the harness image for $PLATFORM"
-if [[ $PLATFORM == *,* ]]; then
-	# A manifest list cannot be loaded into the local daemon, so buildx pushes
-	# it as it builds rather than leaving an image behind to push afterwards.
-	docker buildx build --platform "$PLATFORM" \
-		-f "$REPO_ROOT/Dockerfile" -t "$HARNESS_REF" --push "$REPO_ROOT" >&2
-else
-	docker build --platform "$PLATFORM" -f "$REPO_ROOT/Dockerfile" -t "$HARNESS_REF" "$REPO_ROOT" >&2
-	docker push "$HARNESS_REF" >&2
-fi
+# build_and_push <dockerfile> <reference> <platform>
+build_and_push() {
+	log "building $2 for $3"
+	if [[ $3 == *,* ]]; then
+		# A manifest list cannot be loaded into the local daemon, so buildx
+		# pushes it as it builds rather than leaving an image behind to push
+		# afterwards.
+		docker buildx build --platform "$3" -f "$1" -t "$2" --push "$REPO_ROOT" >&2
+	else
+		docker build --platform "$3" -f "$1" -t "$2" "$REPO_ROOT" >&2
+		docker push "$2" >&2
+	fi
+}
 
-# amd64 whatever the harness was built for: PyFlink publishes no aarch64 wheel
-# in any release, so there is no other architecture to build this one for.
-log "building the engine image for linux/amd64"
-docker build --platform linux/amd64 \
-	-f "$REPO_ROOT/engines/flink/Dockerfile" -t "$FLINK_REF" "$REPO_ROOT" >&2
-docker push "$FLINK_REF" >&2
+build_and_push "$REPO_ROOT/Dockerfile" "$HARNESS_REF" "$PLATFORM"
+# amd64 whatever the rest was built for: PyFlink publishes no aarch64 wheel in
+# any release, so there is no other architecture to build this one for.
+build_and_push "$REPO_ROOT/engines/flink/Dockerfile" "$FLINK_REF" linux/amd64
+# Whatever the harness was built for: nothing added to the stock Spark image is
+# native, so this one runs wherever the cluster's nodes do.
+build_and_push "$REPO_ROOT/engines/spark/Dockerfile" "$SPARK_REF" "$PLATFORM"
 
-log "pushed both images at tag $TAG"
-printf '%s\n%s\n' "$HARNESS_REF" "$FLINK_REF"
+log "pushed every image at tag $TAG"
+printf '%s\n%s\n%s\n' "$HARNESS_REF" "$FLINK_REF" "$SPARK_REF"

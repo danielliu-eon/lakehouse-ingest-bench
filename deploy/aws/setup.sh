@@ -54,9 +54,10 @@ MSK_ACTIVE_WAIT_S="${MSK_ACTIVE_WAIT_S:-3600}"
 # report can both find them by one key.
 TAG_KEY=lakehouse-ingest-bench
 
-# 100 GiB per broker: an offer of a few hundred GB has to sit on the brokers
-# for as long as the engine is behind, and MSK's smallest volume would fill.
-MSK_VOLUME_GIB=100
+# Per broker. An offer of a few hundred GB has to sit on the brokers for as long
+# as the engine is behind, so the default holds a smoke corpus and an hour run
+# needs raising — which is why this is a parameter rather than a constant.
+MSK_VOLUME_GIB="${MSK_VOLUME_GIB:-100}"
 # MSK's IAM listener. IAM decides who may connect; the security group only
 # scopes the network.
 MSK_IAM_PORT=9098
@@ -68,6 +69,15 @@ FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-1.15.0}"
 FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
 FLINK_OPERATOR_NAMESPACE=flink-operator
 
+# Pinned for the same reason as the Flink operator's: the CRD version and the
+# SparkApplication fields the harness renders have to agree, and `latest` would
+# move under a run. 2.5.2 is the newest release on the chart repository's index,
+# and `spark.jobNamespaces` is the values key it watches namespaces by.
+SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-2.5.2}"
+SPARK_OPERATOR_RELEASE=spark-operator
+SPARK_OPERATOR_NAMESPACE=spark-operator
+SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator
+
 ROLE_NAME=lakehouse-ingest-bench-harness
 # One inline policy on the role rather than a managed one: it names this
 # account's bucket and this cluster's MSK ARN, so it is not reusable anyway and
@@ -75,11 +85,13 @@ ROLE_NAME=lakehouse-ingest-bench-harness
 POLICY_NAME=lakehouse-ingest-bench-harness
 HARNESS_SERVICE_ACCOUNT=ingest-bench-harness
 FLINK_SERVICE_ACCOUNT=ingest-bench-flink
+SPARK_SERVICE_ACCOUNT=ingest-bench-spark
 
-ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink"
+ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink lakehouse-ingest-bench/spark"
 
 (($# == 0)) || die "setup.sh takes no arguments; every parameter is an environment variable (see $PREREQ_DOC)"
 [[ $MSK_BROKERS =~ ^[1-9][0-9]*$ ]] || die "MSK_BROKERS must be a positive integer, got '$MSK_BROKERS'"
+[[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -275,6 +287,40 @@ for cidr in $VPC_CIDRS; do
 	fi
 done
 
+# The brokers' volumes raised to MSK_VOLUME_GIB, and left alone at or above it.
+#
+# A broker volume can be grown and never shrunk, so those are the only two
+# answers. Growing it is what lets a campaign move from a smoke corpus to an
+# hour run without recreating the cluster: an hour's offer sits on the brokers
+# for as long as the engine is behind, and a volume that fills stops the offer
+# rather than the engine — which is the run's own rate, measured against a
+# broker that ran out of room.
+grow_broker_volume() {
+	local current version
+	current="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
+		--query 'ClusterInfo.BrokerNodeGroupInfo.StorageInfo.EbsStorageInfo.VolumeSize' --output text)"
+	# `--output text` prints `None` for a field the API left out, which an
+	# arithmetic comparison would read as zero and then grow a cluster whose
+	# shape nobody knows.
+	if [[ -z $current || $current == None ]]; then
+		die "$MSK_NAME reports no broker volume size, so this cannot tell whether it holds ${MSK_VOLUME_GIB} GiB"
+	fi
+	if ((current >= MSK_VOLUME_GIB)); then
+		log "msk broker volumes are ${current} GiB, at or above the ${MSK_VOLUME_GIB} GiB asked for"
+		return 0
+	fi
+	# The version MSK reports rather than a guess: an update carrying the wrong
+	# one is refused, and the refusal is minutes into a setup.
+	version="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
+		--query ClusterInfo.CurrentVersion --output text)"
+	log "growing the msk broker volumes from ${current} to ${MSK_VOLUME_GIB} GiB"
+	# The cluster leaves ACTIVE while it applies this, and everything below that
+	# needs the cluster waits on ACTIVE anyway — so this only has to be
+	# requested, and the wait at the end of the script covers it.
+	aws kafka update-broker-storage --cluster-arn "$MSK_ARN" --current-version "$version" \
+		--target-broker-ebs-volume-info "KafkaBrokerNodeId=All,VolumeSizeGB=$MSK_VOLUME_GIB" >/dev/null
+}
+
 # `list-clusters --cluster-name-filter` matches on a prefix, so the exact name
 # is asserted in the query as well; a longer-named cluster is not this one.
 MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
@@ -330,6 +376,7 @@ if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
 		--query ClusterArn --output text)"
 else
 	log "MSK cluster $MSK_NAME exists"
+	grow_broker_volume
 fi
 log "msk cluster $MSK_ARN"
 
@@ -373,7 +420,7 @@ aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME" \
 log "iam policy $POLICY_NAME applied to $ROLE_NAME"
 
 ROLE_ARN="arn:aws:iam::$ACCOUNT:role/$ROLE_NAME"
-for service_account in "$HARNESS_SERVICE_ACCOUNT" "$FLINK_SERVICE_ACCOUNT"; do
+for service_account in "$HARNESS_SERVICE_ACCOUNT" "$FLINK_SERVICE_ACCOUNT" "$SPARK_SERVICE_ACCOUNT"; do
 	if ASSOCIATE_ERROR="$(aws eks create-pod-identity-association \
 		--cluster-name "$CLUSTER_NAME" --namespace "$NAMESPACE" \
 		--service-account "$service_account" --role-arn "$ROLE_ARN" \
@@ -392,9 +439,40 @@ done
 # ---------------------------------------------------------------------------
 
 export NAMESPACE
-log "applying the namespace, both service accounts and the flink RBAC"
+log "applying the namespace, all three service accounts and the engine RBAC"
 envsubst '${NAMESPACE}' <"$AWS_DIR/k8s/namespace.yaml.tmpl" |
 	kubectl --context "$KUBE_CONTEXT" apply -f -
+
+# After the namespace and not in the preflight beside the Flink operator's: the
+# chart grants its controller a Role in each namespace named by
+# `spark.jobNamespaces`, which is what makes the harness namespace eligible at
+# all, and a Role cannot be created in a namespace that does not exist yet.
+if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
+	log "the sparkapplications CRD is present"
+else
+	log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
+	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
+	# The chart's own spark identity and RBAC are off: a run's driver runs as
+	# $SPARK_SERVICE_ACCOUNT, because a Pod Identity association is made per
+	# (namespace, service account) and that name is the one bound to the role
+	# above. The chart would bind its Role to an account of its own naming
+	# instead, so the namespace manifest grants ours the same rules.
+	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
+		"$SPARK_OPERATOR_RELEASE/spark-operator" \
+		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
+		--version "$SPARK_OPERATOR_VERSION" \
+		--set "spark.jobNamespaces={$NAMESPACE}" \
+		--set spark.serviceAccount.create=false \
+		--set spark.rbac.create=false \
+		--wait
+fi
+# Recorded in the log because a run's engine behaviour belongs to the operator's
+# version, and a cluster that had the CRD already may be running any of them.
+if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
+	--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
+	die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
+fi
+log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"' <<<"$SPARK_OPERATOR_RELEASES")"
 
 if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	log "applying the schema registry"
@@ -454,6 +532,37 @@ cat <<SITE
   kubernetes.registry:            $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
   kubernetes.aws_region:          $AWS_REGION
 SITE
+# After the namespace and not in the preflight beside the Flink operator's: the
+# chart grants its controller a Role in each namespace named by
+# `spark.jobNamespaces`, which is what makes the harness namespace eligible at
+# all, and a Role cannot be created in a namespace that does not exist yet.
+if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
+	log "the sparkapplications CRD is present"
+else
+	log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
+	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
+	# The chart's own spark identity and RBAC are off: a run's driver runs as
+	# $SPARK_SERVICE_ACCOUNT, because a Pod Identity association is made per
+	# (namespace, service account) and that name is the one bound to the role
+	# above. The chart would bind its Role to an account of its own naming
+	# instead, so the namespace manifest grants ours the same rules.
+	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
+		"$SPARK_OPERATOR_RELEASE/spark-operator" \
+		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
+		--version "$SPARK_OPERATOR_VERSION" \
+		--set "spark.jobNamespaces={$NAMESPACE}" \
+		--set spark.serviceAccount.create=false \
+		--set spark.rbac.create=false \
+		--wait
+fi
+# Recorded in the log because a run's engine behaviour belongs to the operator's
+# version, and a cluster that had the CRD already may be running any of them.
+if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
+	--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
+	die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
+fi
+log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"' <<<"$SPARK_OPERATOR_RELEASES")"
+
 if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	cat <<SITE
   kafka.schema_registry.url:      http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7

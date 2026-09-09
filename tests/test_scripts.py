@@ -122,6 +122,20 @@ def _version_choice_block() -> str:
     return "\n".join(lines[starts[0] : ends[0] + 1])
 
 
+def _shell_function(path: Path, name: str) -> str:
+    """One shell function out of a script, to be run on its own.
+
+    Lifted rather than copied for the same reason as the block above: a copy
+    would keep passing after the script's own version of it broke.
+    """
+    lines = path.read_text().splitlines()
+    starts = [index for index, line in enumerate(lines) if line == f"{name}() {{"]
+    assert len(starts) == 1, f"{path.name} does not hold exactly one {name}"
+    ends = [index for index, line in enumerate(lines) if line == "}" and index > starts[0]]
+    assert ends, f"{path.name}'s {name} does not close"
+    return "\n".join(lines[starts[0] : ends[0] + 1])
+
+
 def _mapping(value: object) -> dict[str, object]:
     """``value`` as a mapping, for reading parsed YAML and JSON under strict typing."""
     assert isinstance(value, dict), f"expected a mapping, got {type(value).__name__}"
@@ -333,6 +347,107 @@ def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str 
         assert f"chose {chosen}" in out.stdout, out.stdout + out.stderr
 
 
+@needs_bash
+@pytest.mark.parametrize(
+    ("current", "asked", "grown"),
+    [
+        # Smaller: an hour's offer needs the room, and a volume that fills stops
+        # the offer rather than the engine.
+        (100, 1000, True),
+        # Equal, and larger: a broker volume cannot shrink, so the only two
+        # answers are grow it and leave it alone.
+        (1000, 1000, False),
+        (2000, 1000, False),
+    ],
+)
+def test_an_existing_broker_volume_is_grown_and_never_shrunk(current: int, asked: int, grown: bool) -> None:
+    """Run `setup.sh`'s own growth lines against a fixed answer from MSK.
+
+    The path sits behind a live account, so the block is lifted out and run on
+    its own. Worth running rather than reading, because an unguarded comparison
+    would either re-issue the update on every setup — each of which takes the
+    cluster out of ACTIVE for minutes — or ask MSK to shrink a volume, which it
+    refuses with the whole script's exit status.
+    """
+    # The trace on stderr, because this stub's stdout is what the script reads
+    # the volume size out of.
+    stub = f"""
+        printf 'aws %s\n' "$*" >&2
+        case "$*" in
+        *VolumeSize*) printf '{current}\n' ;;
+        *CurrentVersion*) printf 'K3AEGXETSR30VB\n' ;;
+        esac
+    """
+    harness = f"""
+        set -euo pipefail
+        log() {{ printf 'log %s\n' "$*"; }}
+        die() {{ printf 'die %s\n' "$*"; exit 3; }}
+        aws() {{{stub}}}
+        MSK_NAME=a-cluster
+        MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
+        MSK_VOLUME_GIB={asked}
+{_shell_function(AWS_SETUP, "grow_broker_volume")}
+        grow_broker_volume
+    """
+    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    issued = "update-broker-storage" in out.stderr
+    assert issued is grown, out.stderr
+    if grown:
+        assert f"VolumeSizeGB={asked}" in out.stderr, out.stderr
+        # The version MSK reported, not a guess: an update carrying the wrong
+        # one is refused, and the refusal is minutes into a setup.
+        assert "--current-version K3AEGXETSR30VB" in out.stderr, out.stderr
+
+
+@needs_bash
+def test_a_broker_volume_size_msk_would_not_report_is_refused() -> None:
+    """No answer is not "it is big enough": an unread size cannot be compared.
+
+    `--output text` prints `None` for a field the API left out, which an
+    arithmetic comparison would read as zero and then try to grow a cluster
+    whose shape nobody knows.
+    """
+    harness = f"""
+        set -euo pipefail
+        log() {{ printf 'log %s\n' "$*"; }}
+        die() {{ printf 'die %s\n' "$*"; exit 3; }}
+        aws() {{ printf 'None\n'; }}
+        MSK_NAME=a-cluster
+        MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
+        MSK_VOLUME_GIB=1000
+{_shell_function(AWS_SETUP, "grow_broker_volume")}
+        grow_broker_volume
+    """
+    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert out.returncode == 3, out.stdout + out.stderr
+    assert "die a-cluster reports no broker volume size" in out.stdout, out.stdout
+
+
+def test_the_spark_operator_comes_from_the_kubeflow_chart_at_the_pinned_version() -> None:
+    """The chart repository, the pin, and the one values key that makes it watch us.
+
+    `spark.jobNamespaces` is what tells the controller which namespaces to
+    reconcile SparkApplications in; without the harness namespace in it, a
+    staged run's object is created and never looked at, and staging waits out
+    its whole timeout on a state nobody was going to report.
+
+    Its own spark ServiceAccount and RBAC are off, because a run's driver runs
+    as the account Pod Identity is bound to and the namespace manifest grants
+    that one the rules.
+    """
+    setup = AWS_SETUP.read_text()
+    assert "SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator" in setup
+    assert 'SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-' in setup, "the pin should be overridable"
+    assert '--version "$SPARK_OPERATOR_VERSION"' in setup
+    assert '--set "spark.jobNamespaces={$NAMESPACE}"' in setup
+    for off in ("spark.serviceAccount.create=false", "spark.rbac.create=false"):
+        assert f"--set {off}" in setup, off
+    # Installed only when the CRD is absent, like the Flink operator's, so a
+    # cluster that already carries one is left as it is.
+    assert "get crd sparkapplications.sparkoperator.k8s.io" in setup
+
+
 def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:
     """`downloads.apache.org` carries only the current releases, so a pin 404s there.
 
@@ -450,7 +565,7 @@ def test_the_msk_topic_statement_allows_idempotent_writes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_namespace_manifest_renders_both_identities_and_the_flink_rbac() -> None:
+def test_the_namespace_manifest_renders_every_identity_and_each_engine_s_rbac() -> None:
     template = AWS_DEPLOY / "k8s" / "namespace.yaml.tmpl"
     rendered = Template(template.read_text()).substitute({"NAMESPACE": "a-namespace"})
     objects = [document for document in yaml.safe_load_all(rendered) if document is not None]
@@ -471,34 +586,50 @@ def test_the_namespace_manifest_renders_both_identities_and_the_flink_rbac() -> 
     # a ServiceAccount nobody created.
     site = _mapping(_mapping(yaml.safe_load(SITE_AWS_EXAMPLE.read_text()))["kubernetes"])
     accounts = {str(_mapping(document["metadata"])["name"]) for document in by_kind["ServiceAccount"]}
-    assert accounts == {site["harness_service_account"], site["flink_service_account"]}
-
-    # The JobManager creates its own TaskManager pods and the ConfigMaps that
-    # configure them, so these are the resources a FlinkDeployment cannot start
-    # without. The verbs are enumerated rather than `*`, so a Role that widens
-    # to a wildcard is a failure and not a silent grant of everything the API
-    # group ever gains.
-    role = by_kind["Role"][0]
-    granted: set[tuple[str, str]] = set()
-    for entry in _sequence(role["rules"]):
-        rule = _mapping(entry)
-        verbs = {str(verb) for verb in _sequence(rule["verbs"])}
-        assert verbs == {"get", "list", "watch", "create", "update", "patch", "delete"}, verbs
-        for group in _sequence(rule["apiGroups"]):
-            for resource in _sequence(rule["resources"]):
-                granted.add((str(group), str(resource)))
-    assert granted == {
-        ("", "pods"),
-        ("", "configmaps"),
-        ("apps", "deployments"),
-        ("apps", "deployments/finalizers"),
+    assert accounts == {
+        site["harness_service_account"],
+        site["flink_service_account"],
+        site["spark_service_account"],
     }
 
-    binding = by_kind["RoleBinding"][0]
-    assert _mapping(binding["roleRef"])["name"] == _mapping(role["metadata"])["name"]
-    subject = _mapping(_sequence(binding["subjects"])[0])
-    assert subject["name"] == site["flink_service_account"]
-    assert subject["namespace"] == "a-namespace"
+    # Each engine raises its own fleet: a JobManager creates its TaskManager
+    # pods and the ConfigMaps that configure them, and a Spark driver creates
+    # its executors, their configuration and the Service they find it by. So
+    # these are the resources a run cannot start without. The verbs are
+    # enumerated rather than `*`, so a Role that widens to a wildcard is a
+    # failure and not a silent grant of everything the API group ever gains.
+    expected: dict[str, tuple[set[str], set[tuple[str, str]]]] = {
+        str(site["flink_service_account"]): (
+            {"get", "list", "watch", "create", "update", "patch", "delete"},
+            {("", "pods"), ("", "configmaps"), ("apps", "deployments"), ("apps", "deployments/finalizers")},
+        ),
+        str(site["spark_service_account"]): (
+            {"get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"},
+            {("", "pods"), ("", "configmaps"), ("", "persistentvolumeclaims"), ("", "services")},
+        ),
+    }
+    roles = {str(_mapping(role["metadata"])["name"]): role for role in by_kind["Role"]}
+    assert set(roles) == set(expected)
+    for name, (verbs, resources) in expected.items():
+        granted: set[tuple[str, str]] = set()
+        for entry in _sequence(roles[name]["rules"]):
+            rule = _mapping(entry)
+            assert {str(verb) for verb in _sequence(rule["verbs"])} == verbs, name
+            for group in _sequence(rule["apiGroups"]):
+                for resource in _sequence(rule["resources"]):
+                    granted.add((str(group), str(resource)))
+        assert granted == resources, name
+
+    # Each binding names its own Role and the account of the same name: a
+    # binding pointing at the other engine's would grant a driver the rules a
+    # JobManager needs and none of its own.
+    bindings = {str(_mapping(binding["metadata"])["name"]): binding for binding in by_kind["RoleBinding"]}
+    assert set(bindings) == set(expected)
+    for name, binding in bindings.items():
+        assert _mapping(binding["roleRef"])["name"] == name
+        subject = _mapping(_sequence(binding["subjects"])[0])
+        assert subject["name"] == name
+        assert subject["namespace"] == "a-namespace"
 
 
 def test_the_schema_registry_manifest_renders_a_deployment_and_a_service() -> None:

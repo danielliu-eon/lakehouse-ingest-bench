@@ -1,6 +1,6 @@
-# The namespace every harness Job and every Flink deployment of a run lives in,
-# and the two identities they run as. Rendered by deploy/aws/setup.sh with
-# envsubst; ${NAMESPACE} is the only variable in it.
+# The namespace every harness Job and every engine of a run lives in, and the
+# three identities they run as. Rendered by deploy/aws/setup.sh with envsubst;
+# ${NAMESPACE} is the only variable in it.
 #
 # The ServiceAccount names are fixed rather than derived: an EKS Pod Identity
 # association is made per (namespace, ServiceAccount), so a name that varied
@@ -63,4 +63,47 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: ingest-bench-flink
+    namespace: ${NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingest-bench-spark
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+---
+# A Spark driver creates its own executor pods, their configuration ConfigMap
+# and the headless Service they find it by, so without these rules a
+# SparkApplication is submitted and the driver then fails to raise a fleet. The
+# rules are the ones the spark-operator's own chart grants the account it would
+# have created — which is not the account a run uses, because a Pod Identity
+# association is made per (namespace, service account) and the name above is
+# the one bound to the harness role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ingest-bench-spark
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps", "persistentvolumeclaims", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ingest-bench-spark
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingest-bench-spark
+subjects:
+  - kind: ServiceAccount
+    name: ingest-bench-spark
     namespace: ${NAMESPACE}
