@@ -1256,10 +1256,15 @@ RUN_ID = "smoke-flink-20260908T120000Z"
 RUN_OBJECT = RUN_ID.lower()
 BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
 
-# The corpus root the filled example declares, and a sharded generation under
-# it: a corpus directory is its preset's name and the hash of that preset, so
-# every shard of one generation writes a directory of this one name.
-CORPUS_ROOT = f"s3://{SITE_AWS_FILLINGS['YOUR_BUCKET']}/corpus"
+# The corpus root the filled example declares, spelled out rather than built
+# from the filling above it: the bucket is a fixture name the tree is allowed
+# to hold, and a URI assembled around an expression is one the guard on what
+# this repository may name cannot read.
+#
+# Then a sharded generation under it. A corpus directory is its preset's name
+# and the hash of that preset, so every shard of one generation writes a
+# directory of this one name.
+CORPUS_ROOT = "s3://a-bucket/corpus"
 SHARDED_PRESET = "events-100mbs-skew"
 CORPUS_DIR = f"{SHARDED_PRESET}-7aa0f164"
 
