@@ -453,6 +453,36 @@ def test_the_cli_takes_the_codec_and_refuses_one_no_client_has(
         producer_cli.main([*base, "--compression", "brotli"])
 
 
+def test_a_kafka_prop_may_not_choose_the_wire_codec(tmp_path: Path, corpus_uri: str) -> None:
+    """The second gate: a client property naming the codec stops the offer.
+
+    Client properties are applied over the producer's configuration, so this one
+    would frame the wire with a codec the run's published facts do not name. It
+    reaches the producer from a site or from a command line, and either way the
+    offer does not start.
+    """
+    clock = FakeClock(1_700_000_000_000)
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9092",
+        topic="t",
+        epoch_ms=clock.now_ms(),
+        speed=1000.0,
+        shard=0,
+        shards=1,
+        seconds=None,
+        key_column=None,
+        value_prefix=b"",
+        publish_log_path=tmp_path / "publish_log-0.jsonl",
+        behind_max_ms=5000,
+        upload_prefix=None,
+        compression="zstd",
+        kafka_props={"security.protocol": "SASL_SSL", "compression.type": "gzip"},
+    )
+    with pytest.raises(ValueError, match=r"compression\.type.*producer\.compression"):
+        produce.run(args, lambda cfg: FakeProducer(clock), clock, io.StringIO())
+
+
 def test_the_cli_resolves_a_kafka_prop_reference(
     tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

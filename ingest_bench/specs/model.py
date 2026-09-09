@@ -11,6 +11,7 @@ that the published spec is the run that happened.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -41,6 +42,14 @@ VALUE_ENCODINGS = frozenset({VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT})
 # no records at all — so a run states its codec and two runs compare at one.
 COMPRESSION_DEFAULT = "zstd"
 COMPRESSIONS = frozenset({"gzip", "lz4", "none", "snappy", COMPRESSION_DEFAULT})
+
+# librdkafka client properties are applied over the producer's own
+# configuration, so a `compression.*` property would frame the wire with a codec
+# the run's `facts.json` and `run.json` do not name. The codec is the run's, and
+# a client property that states one is a conflict rather than a preference — so
+# it is refused wherever such properties are read, rather than silently losing
+# to, or beating, `producer.compression`.
+_COMPRESSION_PROP_PREFIX = "compression."
 
 # The offsets, in seconds from the run's start, at which the scorer measures
 # the table's file geometry. Every run reports the same ladder unless it says
@@ -120,6 +129,16 @@ def _as_string_maps(value: object, where: str) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise ValueError(f"{where} must be a list of mappings, got {value!r}")
     return [_as_string_map(entry, f"{where}[{index}]") for index, entry in enumerate(cast(list[object], value))]
+
+
+def refuse_compression_props(props: Mapping[str, str], where: str) -> None:
+    """Refuse a client property that would choose the wire codec behind the spec."""
+    named = sorted(key for key in props if key.startswith(_COMPRESSION_PROP_PREFIX))
+    if named:
+        raise ValueError(
+            f"{where} sets {named}, which would choose the wire codec instead of the run's spec; "
+            f"set producer.compression (one of {sorted(COMPRESSIONS)}) and leave the property out"
+        )
 
 
 def _refuse_unknown(block: dict[str, object], allowed: frozenset[str], where: str) -> None:
@@ -583,12 +602,15 @@ def load_site(path: Path) -> SiteConfig:
     pricing = _as_mapping(_required(raw, "pricing", "site"), "site.pricing")
     _refuse_unknown(pricing, frozenset({"vcpu_hour_usd", "gib_hour_usd"}), "site.pricing")
 
+    kafka_security = {} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security")
+    refuse_compression_props(kafka_security, "site.kafka.security")
+
     return SiteConfig(
         corpus_root=_as_str(_required(raw, "corpus_root", "site"), "site.corpus_root"),
         runs_root=_as_str(_required(raw, "runs_root", "site"), "site.runs_root"),
         warehouse=_as_str(_required(raw, "warehouse", "site"), "site.warehouse"),
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
-        kafka_security={} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security"),
+        kafka_security=kafka_security,
         schema_registry=_schema_registry_config(kafka),
         catalog_props=_as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props"),
         kubernetes=_kubernetes_config(raw),

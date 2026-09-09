@@ -242,6 +242,8 @@ refused when the spec loads. It is a property of the offer, not of the
 producer: it decides how many bytes cross the link, and a consumer that cannot
 decode the codec reads no records at all. The run's `facts.json` carries it,
 and so does `run.json`, so two results are only comparable at the same codec.
+This is the only way to choose one: a `compression.*` client property is
+refused, since it would frame a wire the published facts do not name.
 
 ## Credentials
 
@@ -252,6 +254,12 @@ verbatim, as librdkafka properties. A producer shard reads no site config, so a
 driver carries the same properties to it with `produce --kafka-prop key=value`,
 applied over the producer's own defaults. Nothing about SASL, mTLS or a
 proprietary broker is implemented here; configuration is the whole interface.
+
+Neither may carry a `compression.*` property. Those win that merge, so one
+would decide the wire codec while the run's `facts.json` and `run.json` publish
+`producer.compression`'s. A site declaring one is refused when the site config
+loads, and the producer refuses it again before it opens a connection — a
+stated conflict is an error, not a preference.
 
 The one exception is a mechanism no property can express: `sasl.mechanism:
 OAUTHBEARER` against Amazon MSK wants a token signed from the caller's own

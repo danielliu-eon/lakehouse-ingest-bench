@@ -24,6 +24,7 @@ from ingest_bench import kafka_auth, uri
 from ingest_bench.clock import Clock
 from ingest_bench.corpus import frames, metadata
 from ingest_bench.producer import pacing, publish_log
+from ingest_bench.specs.model import refuse_compression_props
 
 PROGRESS_INTERVAL_MS = 60_000
 UPLOAD_INTERVAL_MS = 5_000
@@ -208,6 +209,9 @@ def run(
             "regenerate the corpus with it or choose another key"
         )
     selected = pacing.select_batches(metadata.read_manifest(args.corpus_uri), args.shard, args.shards, args.seconds)
+    # The second gate on the codec: these properties win the merge below, and
+    # they reach here from a command line as well as from a site.
+    refuse_compression_props(args.kafka_props, "--kafka-prop")
     producer = producer_factory(
         kafka_auth.librdkafka_config({**default_producer_config(args.bootstrap, args.compression), **args.kafka_props})
     )

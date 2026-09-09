@@ -78,6 +78,23 @@ def test_the_producer_compression_defaults_to_zstd_and_refuses_a_codec_it_does_n
         model.load_run_spec(path)
 
 
+def test_a_site_may_not_choose_the_wire_codec_with_a_client_property(tmp_path: Path) -> None:
+    """A `compression.*` client property is refused, and named, at site load.
+
+    Site properties are applied over the producer's own configuration, so such a
+    key would decide the wire while `facts.json` and `run.json` publish the
+    codec the spec asked for. The codec belongs to the run; a site that states
+    one is a conflict rather than a preference.
+    """
+    with pytest.raises(ValueError, match=r"compression\.type.*producer\.compression"):
+        model.load_site(_site_file(tmp_path, "file:///corpus", security={"compression.type": "gzip"}))
+    with pytest.raises(ValueError, match=r"compression\.level.*producer\.compression"):
+        model.load_site(_site_file(tmp_path, "file:///corpus", security={"compression.level": "9"}))
+    # The properties beside it are what the site is for, and still reach a client.
+    loaded = model.load_site(_site_file(tmp_path, "file:///corpus", security={"security.protocol": "SASL_SSL"}))
+    assert loaded.kafka_security == {"security.protocol": "SASL_SSL"}
+
+
 def test_the_site_reads_a_schema_registry_and_keeps_its_reference(tmp_path: Path) -> None:
     """The registry is optional, and its credential stays the reference the file wrote.
 

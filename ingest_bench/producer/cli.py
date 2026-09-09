@@ -81,7 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         help="a librdkafka client property (security.protocol=..., sasl.username=...), repeatable. Applied over "
         "the producer's own defaults; a ${env:NAME} value is read from the environment of this process. "
-        "aws.region is taken here too, to sign an Amazon MSK IAM token with",
+        "aws.region is taken here too, to sign an Amazon MSK IAM token with. A compression.* property is "
+        "refused: the wire codec is --compression's, which the run's facts.json publishes",
     )
     return parser
 
