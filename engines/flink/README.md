@@ -9,7 +9,8 @@ or serializer is written here — so a Flink result is Flink's.
 | Piece | What it is |
 |---|---|
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
-| Source | `flink-sql-connector-kafka:3.4.0-1.20`, Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
+| Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
+| Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
@@ -36,6 +37,15 @@ classpath, and installing it initializes `UserGroupInformation` — which needs
 commons-configuration2, guava and re2j behind it. `hadoop-client-api` and
 `hadoop-client-runtime` are one shading run over exactly that closure, so the
 transitive set never has to be enumerated jar by jar.
+
+The Kafka client is the **plain connector plus an unshaded `kafka-clients`**
+and not the SQL uber jar, which is the same connector with
+`org.apache.kafka` relocated to `org.apache.flink.kafka.shaded.org.apache.kafka`
+and no unshaded copy left. Amazon MSK's `IAMClientCallbackHandler` implements
+the unshaded `AuthenticateCallbackHandler`, so a shaded client can never load
+it — the two class names never meet. Unshading costs the codec jars, which the
+uber jar bundled: the producer picks the compression and the consumer has to
+decompress it.
 
 The `flink` profile starts the cluster; `flink-job` submits one run detached,
 mounting `$RUN_DIR` — set it to the staged run directory, or the mount fails.
@@ -65,7 +75,7 @@ duplication is scored against, so it is not a knob. `tm_cpu`, `jm_cpu` and
 
 ## Source parallelism: the path taken
 
-`flink-sql-connector-kafka:3.4.0-1.20` **has no `scan.parallelism` option**
+`flink-connector-kafka:3.4.0-1.20` **has no `scan.parallelism` option**
 (verified against the jar: `KafkaConnectorOptions` declares `SINK_PARALLELISM`
 and no `SCAN_PARALLELISM`; FLINK-33262 is not in this release), and an
 unsupported `WITH` key fails validation. So the fallback is taken:

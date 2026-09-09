@@ -8,6 +8,15 @@ FROM --platform=${IMAGE_PLATFORM} flink:1.20.1-scala_2.12-java17
 
 ARG ICEBERG_VERSION=1.9.2
 ARG KAFKA_CONNECTOR_VERSION=3.4.0-1.20
+ARG KAFKA_CLIENTS_VERSION=3.4.0
+ARG MSK_IAM_AUTH_VERSION=2.3.8
+# The compression codecs kafka-clients declares, at the versions its own pom
+# declares them at: the codec is chosen by the producer and decompressed by the
+# consumer, so a missing one surfaces as an unreadable record rather than as a
+# configuration error.
+ARG ZSTD_JNI_VERSION=1.5.2-1
+ARG LZ4_JAVA_VERSION=1.8.0
+ARG SNAPPY_JAVA_VERSION=1.1.8.4
 ARG FLINK_VERSION=1.20.1
 ARG HADOOP_VERSION=3.3.6
 
@@ -29,7 +38,23 @@ ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-flink-runtime-1.20
 # SDKs it calls, which is what these two bundles are.
 ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar .
 ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-gcp-bundle/${ICEBERG_VERSION}/iceberg-gcp-bundle-${ICEBERG_VERSION}.jar .
-ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar .
+# The plain connector and an unshaded Kafka client rather than the SQL uber
+# jar, which is the same connector shaded: it relocates `org.apache.kafka` to
+# `org.apache.flink.kafka.shaded.org.apache.kafka` and carries no unshaded
+# copy. Amazon MSK's `IAMClientCallbackHandler` implements the unshaded
+# `org.apache.kafka.common.security.auth.AuthenticateCallbackHandler`, so a
+# shaded client cannot load it whatever it is configured with — the two class
+# names never meet. The plain connector registers the same
+# `KafkaDynamicTableFactory`, so `connector = 'kafka'` resolves either way.
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/${KAFKA_CONNECTOR_VERSION}/flink-connector-kafka-${KAFKA_CONNECTOR_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/${KAFKA_CLIENTS_VERSION}/kafka-clients-${KAFKA_CLIENTS_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/com/github/luben/zstd-jni/${ZSTD_JNI_VERSION}/zstd-jni-${ZSTD_JNI_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/lz4/lz4-java/${LZ4_JAVA_VERSION}/lz4-java-${LZ4_JAVA_VERSION}.jar .
+ADD https://repo1.maven.org/maven2/org/xerial/snappy/snappy-java/${SNAPPY_JAVA_VERSION}/snappy-java-${SNAPPY_JAVA_VERSION}.jar .
+# The `all` classifier, which bundles the AWS SDK v2 the signer needs. The SDK
+# resolves the pod's own credentials, so an MSK IAM connection needs a region
+# and no secret anywhere.
+ADD https://repo1.maven.org/maven2/software/amazon/msk/aws-msk-iam-auth/${MSK_IAM_AUTH_VERSION}/aws-msk-iam-auth-${MSK_IAM_AUTH_VERSION}-all.jar .
 ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro/${FLINK_VERSION}/flink-sql-avro-${FLINK_VERSION}.jar .
 # Iceberg's Flink runtime resolves a table through Hadoop's `Configuration`
 # whichever FileIO then reads it, so Hadoop is needed even for object storage.
