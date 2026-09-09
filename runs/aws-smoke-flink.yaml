@@ -1,0 +1,27 @@
+name: aws-smoke-flink
+engine: flink
+corpus: smoke
+table:
+  partition: identity(partition_key)
+kafka:
+  partitions: 4
+  key: user_id
+producer:
+  shards: 1
+scoring:
+  freshness_bound_s: 60
+  warmup_s: 60
+flink:
+  # The same eight slots as the local smoke, on real amd64 nodes rather than an
+  # emulated laptop; the memory is doubled because a 4 GiB taskmanager leaves
+  # Flink's managed memory a workable share after the JVM's own overhead.
+  taskmanagers: 2
+  slots: 4
+  tm_cpu: 2
+  tm_mem_mb: 4096
+  jm_cpu: 1
+  jm_mem_mb: 2048
+  checkpoint_interval: 10s
+  min_pause: 2s
+  source_parallelism: 4
+  distribution_mode: hash
