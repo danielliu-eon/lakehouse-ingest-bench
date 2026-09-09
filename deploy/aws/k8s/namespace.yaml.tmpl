@@ -1,0 +1,66 @@
+# The namespace every harness Job and every Flink deployment of a run lives in,
+# and the two identities they run as. Rendered by deploy/aws/setup.sh with
+# envsubst; ${NAMESPACE} is the only variable in it.
+#
+# The ServiceAccount names are fixed rather than derived: an EKS Pod Identity
+# association is made per (namespace, ServiceAccount), so a name that varied
+# per run would need an association per run.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingest-bench-harness
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingest-bench-flink
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+---
+# The JobManager runs under this identity and creates the TaskManager pods and
+# the ConfigMaps that carry the cluster's configuration itself — the operator
+# does not create them on its behalf — so without these rules a FlinkDeployment
+# reaches RUNNING with a JobManager that can never raise a fleet. The rules are
+# the ones the operator's own chart grants the `flink` role it installs for the
+# namespaces it watches.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ingest-bench-flink
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/finalizers"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ingest-bench-flink
+  namespace: ${NAMESPACE}
+  labels:
+    lakehouse-ingest-bench: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ingest-bench-flink
+subjects:
+  - kind: ServiceAccount
+    name: ingest-bench-flink
+    namespace: ${NAMESPACE}

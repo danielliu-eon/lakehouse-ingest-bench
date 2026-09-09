@@ -1,0 +1,35 @@
+# The AWS shape of site.example.yaml: one S3 bucket, Amazon MSK with IAM auth,
+# the Glue Iceberg REST catalog and an EKS cluster. Copy to site.yaml and fill
+# in. Every YOUR_ placeholder must go; loading refuses otherwise.
+#
+# deploy/aws/setup.sh prints every value below when it finishes.
+corpus_root: s3://YOUR_BUCKET/corpus
+runs_root: s3://YOUR_BUCKET/runs
+warehouse: s3://YOUR_BUCKET/warehouse
+kafka:
+  # The IAM bootstrap string, from
+  # `aws kafka get-bootstrap-brokers --query BootstrapBrokerStringSaslIam`.
+  bootstrap_servers: YOUR_MSK_IAM_BOOTSTRAP:9098
+  security:
+    security.protocol: SASL_SSL
+    sasl.mechanism: OAUTHBEARER          # librdkafka side; Flink renders AWS_MSK_IAM
+    aws.region: YOUR_REGION              # harness pseudo-key: signs the MSK token; stripped before librdkafka
+catalog:
+  props:
+    uri: https://glue.YOUR_REGION.amazonaws.com/iceberg
+    warehouse: "YOUR_ACCOUNT_ID"         # Glue's warehouse is a catalog id, not a path
+    rest.sigv4-enabled: "true"
+    rest.signing-name: glue
+    rest.signing-region: YOUR_REGION
+    s3.region: YOUR_REGION
+kubernetes:
+  context: YOUR_KUBE_CONTEXT
+  namespace: ingest-bench
+  harness_service_account: ingest-bench-harness
+  flink_service_account: ingest-bench-flink
+  service_account_annotations: {}      # only for IRSA users; Pod Identity needs none
+  registry: YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
+  aws_region: YOUR_REGION              # rendered as AWS_REGION on every pod
+  node_selector: {}
+  tolerations: []
+pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}

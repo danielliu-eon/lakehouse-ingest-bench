@@ -11,6 +11,11 @@ _LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$_LIB_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/deploy/compose/local/docker-compose.yml"
 
+# Where a caller's prerequisites are written down, for the one message that has
+# to point at them. Set before sourcing this file: the cloud setup scripts under
+# deploy/ share these functions and have their own list of tools.
+PREREQ_DOC="${PREREQ_DOC:-docs/running.md}"
+
 # The jobmanager's REST endpoint, as the compose file publishes it.
 FLINK_REST="${FLINK_REST:-http://localhost:8081}"
 
@@ -53,7 +58,7 @@ require_host_tools() {
 	for tool in "$@"; do
 		command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 	done
-	[[ -z $missing ]] || die "missing host tool(s):$missing — see docs/running.md for what the stack needs"
+	[[ -z $missing ]] || die "missing host tool(s):$missing — see $PREREQ_DOC for what this needs"
 }
 
 # A non-numeric or absent REST answer reads as zero rather than as an error: the
