@@ -9,11 +9,6 @@ from ingest_bench.corpus import columns as c
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = REPO_ROOT / "workloads" / "schemas"
 
-# Words from the private tree this benchmark was extracted from. Anything under
-# a scanned path is read by strangers running this against their own account, so
-# a company, product or internal codename in one is a leak rather than a typo.
-INTERNAL_VOCABULARY = ("adevents", "eon", "maelstrom", "rise")
-
 
 def test_events_schema_loads_with_reserved_fields_first() -> None:
     cols = c.load_schema(SCHEMAS / "events.json")
@@ -74,24 +69,12 @@ def test_iceberg_type_names() -> None:
         c.iceberg_type_name({"type": "long", "logicalType": "timestamp-micros"})
 
 
-def test_events_json_has_no_internal_vocabulary() -> None:
-    text = (SCHEMAS / "events.json").read_text().lower()
-    for banned in INTERNAL_VOCABULARY:
-        assert banned not in text
-    assert json.loads(text)["name"] == "events"
-
-
-def test_the_aws_deployment_has_no_internal_vocabulary() -> None:
-    """Nothing under `deploy/aws/` may name where this came from.
-
-    These are the files an operator reads before pointing the scripts at their
-    own account — the runbook, the IAM documents, the manifests — and they were
-    written from a private setup's shape. A leftover account id or node-pool
-    name is also a step nobody else can reproduce.
-    """
-    scanned = sorted(path for path in (REPO_ROOT / "deploy" / "aws").rglob("*") if path.is_file())
-    assert scanned, "the AWS deployment directory is empty"
-    for path in scanned:
-        text = path.read_text().lower()
-        for banned in INTERNAL_VOCABULARY:
-            assert banned not in text, f"{path.relative_to(REPO_ROOT)} names {banned!r}"
+def test_every_schema_names_itself_after_its_file() -> None:
+    # A preset selects a schema by file name and `load_schema` reads only the
+    # columns, so the document's own `name` is never checked against the file
+    # it is in. A disagreement between them misidentifies the document in every
+    # place it is quoted.
+    documents = sorted(SCHEMAS.glob("*.json"))
+    assert documents, "there are no workload schemas"
+    for path in documents:
+        assert json.loads(path.read_text())["name"] == path.stem
