@@ -332,3 +332,19 @@ def test_a_ladder_that_does_not_ascend_is_refused(tmp_path: Path) -> None:
         geometry.geometry_report(metadata, table.io, EPOCH_MS, (1200, 600))
     with pytest.raises(SystemExit):
         cli.file_sizes(["--metadata", "m", "--epoch", "0", "--offsets", "1200,600", "--out", str(tmp_path)])
+
+
+def test_file_sizes_reads_through_fsspec_unless_told_otherwise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, str]] = []
+
+    def capture(location: str, props: dict[str, str]) -> tuple[TableMetadata, FileIO]:
+        seen.append(dict(props))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(geometry, "open_metadata_document", capture)
+    argv = ["--metadata", "s3://bucket/doc.json", "--epoch", "0", "--out", str(tmp_path)]
+    with pytest.raises(SystemExit):
+        cli.file_sizes(argv)
+    with pytest.raises(SystemExit):
+        cli.file_sizes([*argv, "--catalog-prop", "py-io-impl=x.Y"])
+    assert [props["py-io-impl"] for props in seen] == [cli.FSSPEC_FILE_IO, "x.Y"]

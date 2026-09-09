@@ -32,6 +32,8 @@ from ingest_bench.scorer.snapshots import load_table, read_metadata
 from ingest_bench.specs.model import DEFAULT_GEOMETRY_OFFSETS_S
 from ingest_bench.table.cli import add_catalog_arguments
 
+FSSPEC_FILE_IO = "pyiceberg.io.fsspec.FsspecFileIO"
+
 # A verdict is an exit code so a shell driver can branch on it without parsing
 # output. They are distinct and non-adjacent to keep an undersized fleet from
 # being read as a scorer that failed.
@@ -277,6 +279,11 @@ def file_sizes(argv: Sequence[str] | None = None) -> int:
             table_identifier(table)
     except ValueError as error:
         parser.error(str(error))
+    # Default the file IO to fsspec: its botocore credential chain resolves the
+    # profile shapes pyarrow's bundled SDK does not (`credential_process`, SSO),
+    # and `file-sizes` is the one harness read of the bucket that runs on an
+    # operator's machine rather than in the cluster. An explicit property wins.
+    props.setdefault("py-io-impl", FSSPEC_FILE_IO)
     if metadata_location is not None:
         document, io = geometry.open_metadata_document(metadata_location, props)
     else:
