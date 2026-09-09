@@ -96,6 +96,27 @@ services:
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
     depends_on:
       minio-init: {condition: service_completed_successfully}
+  # A Confluent-API schema registry, for a run whose spec says
+  # `kafka.value_encoding: confluent`. Apicurio because it is Apache-2.0 and
+  # serves that API at `/apis/ccompat/v7`; its default storage is in-memory,
+  # which is what a stack that is torn down after every run wants.
+  #
+  # Up for every local run rather than behind a profile: a run that needs it
+  # needs it at staging, before any engine exists, and one container that
+  # registers nothing costs less than a profile every command has to remember.
+  #
+  # Its port is not published. Nothing on the host talks to it — the harness
+  # registers and the engine reads over the compose network — and 8080 is the
+  # one port a developer's machine is most likely to have taken already, which
+  # would fail `up` for every run rather than only for a `confluent` one.
+  # `docker compose exec schema-registry curl localhost:8080/...` reaches it.
+  schema-registry:
+    image: quay.io/apicurio/apicurio-registry:3.0.15
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   # Not a server: one container per command, as
   # `docker compose run --rm harness "gen-corpus --preset smoke --out s3://corpus"`.
   # The image's shell entrypoint is what makes that single quoted string a
@@ -114,10 +135,12 @@ services:
       - ./site.yaml:/site.yaml:ro
       - ./catalog.props:/catalog.props:ro
       - ../../../runs:/runs
-    # Both healthy rather than started: a table create against a catalog whose
-    # port is open but whose handler is not yet serving fails as a connection
-    # error, and the fixture image ships a `/v1/config` healthcheck that says
-    # exactly when that stops being possible.
+    # Healthy rather than started, all three: a table create against a catalog
+    # whose port is open but whose handler is not yet serving fails as a
+    # connection error, and the fixture image ships a `/v1/config` healthcheck
+    # that says exactly when that stops being possible. The registry is the
+    # same story — `stage` registers a schema against it before the run exists.
     depends_on:
       kafka: {condition: service_healthy}
       iceberg-rest: {condition: service_healthy}
+      schema-registry: {condition: service_healthy}

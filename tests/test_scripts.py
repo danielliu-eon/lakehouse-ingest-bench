@@ -33,6 +33,7 @@ from typing import cast
 import pytest
 import yaml
 
+from ingest_bench.k8s.render import MARKER_RE, render_template
 from ingest_bench.specs.derive import TABLE_NAMESPACE
 from ingest_bench.specs.model import KubernetesConfig, load_site
 
@@ -497,6 +498,70 @@ def test_the_namespace_manifest_renders_both_identities_and_the_flink_rbac() -> 
     assert subject["namespace"] == "a-namespace"
 
 
+def test_the_schema_registry_manifest_renders_a_deployment_and_a_service() -> None:
+    """The two objects a `confluent` run reaches by service name.
+
+    The Service's name is half of the URL `setup.sh` prints and an operator
+    pastes into `site.yaml`, and its selector is what makes that name resolve
+    to the registry pod rather than to nothing.
+    """
+    template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
+    rendered = render_template(
+        template,
+        {"NAMESPACE": "a-namespace", "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}', "TOLERATIONS": "[]"},
+    )
+    objects = [_mapping(document) for document in yaml.safe_load_all(rendered) if document is not None]
+    by_kind = {str(document["kind"]): document for document in objects}
+    assert sorted(by_kind) == ["Deployment", "Service"]
+    for kind, document in by_kind.items():
+        metadata = _mapping(document["metadata"])
+        assert metadata["name"] == "schema-registry", kind
+        assert metadata["namespace"] == "a-namespace", kind
+
+    deployment = _mapping(by_kind["Deployment"]["spec"])
+    pod = _mapping(_mapping(deployment["template"])["spec"])
+    assert pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"} and pod["tolerations"] == []
+    container = _mapping(_sequence(pod["containers"])[0])
+    # Both probes, because the registry answers on its port before it will
+    # serve a registration: readiness is what holds the endpoint back until a
+    # `stage` against it can succeed.
+    assert _mapping(_mapping(container["readinessProbe"])["httpGet"])["path"] == "/health/ready"
+    assert _mapping(_mapping(container["livenessProbe"])["httpGet"])["path"] == "/health/live"
+
+    service = _mapping(by_kind["Service"]["spec"])
+    selector = _mapping(service["selector"])
+    labels = _mapping(_mapping(_mapping(deployment["template"])["metadata"])["labels"])
+    assert selector.items() <= labels.items(), "the Service selects labels the pod does not carry"
+    assert _mapping(_sequence(service["ports"])[0])["port"] == 8080
+
+
+def test_the_setup_script_substitutes_every_marker_the_registry_template_carries() -> None:
+    """`setup.sh` renders that template with `sed`, so its list and the markers are one.
+
+    A marker the template gains and the script does not substitute reaches the
+    API server verbatim, which is refused there rather than here.
+    """
+    template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
+    setup = AWS_SETUP.read_text()
+    markers = {match[2:-2] for match in MARKER_RE.findall(template.read_text())}
+    assert markers == {"NAMESPACE", "NODE_SELECTOR", "TOLERATIONS"}
+    for marker in markers:
+        assert f"s|__{marker}__|$" in setup, f"setup.sh never substitutes __{marker}__"
+    assert "WITH_SCHEMA_REGISTRY" in setup
+    assert "schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7" in setup, "setup.sh never prints the registry URL"
+
+
+def test_the_stack_and_the_cluster_run_the_same_registry_image() -> None:
+    """One image in both places, so a local `confluent` run proves the cluster's.
+
+    Two pins drift, and the one nobody rereads is the one a cluster runs.
+    """
+    template = (REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl").read_text()
+    compose = yaml.safe_load((REPO_ROOT / "deploy" / "compose" / "local" / "docker-compose.yml").read_text())
+    image = str(_mapping(_mapping(_mapping(compose)["services"])["schema-registry"])["image"])
+    assert f"image: {image}" in template
+
+
 def test_the_eksctl_example_parses_and_holds_its_placeholders() -> None:
     """The example is copied and edited, so it has to parse before it is edited.
 
@@ -651,6 +716,29 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
     for flag in ("--speed $SPEED", "--seconds $REPLAY_SECONDS", "--behind-max-ms $BEHIND_MAX_MS"):
         assert flag in text, f"smoke.sh reads a producer key but never passes {flag.split()[0]}"
     assert "--speed 1" not in text, "smoke.sh still hardcodes a replay speed"
+
+
+@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
+def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None:
+    """The encoding and the schema id come off `facts.json`, not off the spec.
+
+    Staging is what registered the schema, so the id it was given is a fact
+    about the run and not something a driver could derive. A driver that read
+    the encoding and dropped the id would offer records whose header names
+    schema zero.
+    """
+    text = script.read_text()
+    for fact in ("value_encoding", "schema_id"):
+        assert f"jq -r '.{fact} // empty'" in text, f"{script.name} never reads {fact} out of facts.json"
+    assert "--value-encoding $VALUE_ENCODING" in text and "--schema-id $SCHEMA_ID" in text
+
+
+def test_the_smoke_stages_the_spec_it_was_given() -> None:
+    """`--spec` names a file under `runs/`, which is what the container mounts."""
+    text = SMOKE.read_text()
+    assert "--spec)" in text and 'SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"' in text
+    assert '--spec /runs/$(basename "$SPEC_FILE")' in text
+    assert (REPO_ROOT / "runs" / "smoke-flink-confluent.yaml").exists()
 
 
 # ---------------------------------------------------------------------------

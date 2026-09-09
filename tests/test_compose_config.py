@@ -56,6 +56,7 @@ def test_compose_config_renders() -> None:
         "kafka",
         "minio",
         "iceberg-rest",
+        "schema-registry",
         "harness",
         "flink-jobmanager",
         "flink-taskmanager",
@@ -109,6 +110,10 @@ def test_local_site_addresses_the_compose_services() -> None:
     services = set(yaml.safe_load(COMPOSE.read_text())["services"])
     assert site.kafka_bootstrap.split(":")[0] in services
     assert site.catalog_props["uri"].split("//")[1].split(":")[0] in services
+    # The registry is reached by service name over the compose network, by the
+    # harness that registers a schema and by the engine that reads it back.
+    assert site.schema_registry is not None
+    assert site.schema_registry.url.split("//")[1].split(":")[0] in services
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")

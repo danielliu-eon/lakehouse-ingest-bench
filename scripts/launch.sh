@@ -94,6 +94,11 @@ TABLE="$(jq -r .table "$FACTS")"
 # `key_column` is null when the spec asked for unkeyed records, and the flag is
 # then left off rather than passed empty.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$FACTS")"
+# What the producer frames each value as, and the id its header names, both
+# settled at stage time. `schema_id` is null for a raw-Avro run and the flag is
+# then left off rather than passed empty.
+VALUE_ENCODING="$(jq -r '.value_encoding // empty' "$FACTS")"
+SCHEMA_ID="$(jq -r '.schema_id // empty' "$FACTS")"
 
 # Every knob the spec sets about the offer, so the run that happens is the run
 # the copied spec claims. A key the spec leaves out is left out here too, and
@@ -183,6 +188,8 @@ PRODUCE="$PRODUCE --publish-log /work/publish_log-\$JOB_COMPLETION_INDEX.jsonl"
 PRODUCE="$PRODUCE --upload-prefix $RUNS_ROOT/$RUN_ID"
 PRODUCE="$PRODUCE$(site_flags '.kafka.security' --kafka-prop)"
 [[ -z $KEY_COLUMN ]] || PRODUCE="$PRODUCE --key-column $KEY_COLUMN"
+[[ -z $VALUE_ENCODING ]] || PRODUCE="$PRODUCE --value-encoding $VALUE_ENCODING"
+[[ -z $SCHEMA_ID ]] || PRODUCE="$PRODUCE --schema-id $SCHEMA_ID"
 [[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
 [[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
 [[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"

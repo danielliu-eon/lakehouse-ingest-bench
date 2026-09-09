@@ -8,6 +8,9 @@ kafka:
   bootstrap_servers: YOUR_BOOTSTRAP:9092
   security: {}                      # optional librdkafka security.* / sasl.* keys, passed to every client
                                     # verbatim. Use ${env:NAME} for a secret; see docs/running.md.
+  # schema_registry:                # only for a run whose spec says kafka.value_encoding: confluent
+  #   url: http://YOUR_REGISTRY:8080/apis/ccompat/v7
+  #   basic_auth_user_info: ${env:NAME}   # optional, where the registry authenticates
 catalog:
   props:                            # passed to pyiceberg and rendered into engine configs; ${env:NAME} works here too
     uri: http://YOUR_CATALOG:8181

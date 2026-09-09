@@ -59,6 +59,11 @@ _ONE_OFF = frozenset(
 _INDEXED = _ONE_OFF | {"COUNT"}
 _MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
 
+# The one shipped template that is not a harness Job: a Deployment and a
+# Service, applied by deploy/aws/setup.sh rather than by a run driver, and
+# checked in tests/test_scripts.py beside the script that applies it.
+NOT_A_JOB = frozenset({"schema-registry.yaml.tmpl"})
+
 EXPECTATIONS = {
     "harness-job.yaml.tmpl": Expectation(_ONE_OFF, "500m", "1Gi", indexed=False, work_volume=False),
     "stage-job.yaml.tmpl": Expectation(_MOUNTED, "500m", "1Gi", indexed=False, work_volume=True),
@@ -145,7 +150,7 @@ def test_the_console_script_prints_the_rendered_document(tmp_path: Path, capsys:
 
 
 def test_every_shipped_template_is_expected_here() -> None:
-    shipped = {path.name for path in TEMPLATES.glob("*.yaml.tmpl")}
+    shipped = {path.name for path in TEMPLATES.glob("*.yaml.tmpl")} - NOT_A_JOB
     assert shipped == set(EXPECTATIONS), "a template was added or renamed and this file does not know about it"
 
 

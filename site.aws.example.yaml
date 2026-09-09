@@ -14,6 +14,12 @@ kafka:
     security.protocol: SASL_SSL
     sasl.mechanism: OAUTHBEARER          # librdkafka side; Flink renders AWS_MSK_IAM
     aws.region: YOUR_REGION              # harness pseudo-key: signs the MSK token; stripped before librdkafka
+  # Only for a run whose spec says kafka.value_encoding: confluent. This is
+  # the in-cluster registry deploy/aws/setup.sh applies with
+  # WITH_SCHEMA_REGISTRY=true; a hosted registry goes here instead, with
+  # basic_auth_user_info: ${env:NAME} where it authenticates.
+  # schema_registry:
+  #   url: http://schema-registry.ingest-bench.svc:8080/apis/ccompat/v7
 catalog:
   props:
     uri: https://glue.YOUR_REGION.amazonaws.com/iceberg

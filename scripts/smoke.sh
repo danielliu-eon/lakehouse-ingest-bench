@@ -30,6 +30,8 @@ usage: scripts/smoke.sh [options]
                               which run spec to stage; `flink` and `spark` also
                               start the engine, `external` waits for you to
                               start yours (default: flink)
+  --spec PATH                 a run spec under runs/ to stage instead of
+                              runs/smoke-<engine>.yaml
   --set KEY=VALUE             override a corpus preset key, repeatable
                               (e.g. --set duration_s=30 for a 30 s corpus)
   --keep                      leave the stack up afterwards
@@ -45,6 +47,7 @@ USAGE
 ENGINE=flink
 KEEP=0
 READY_FILE=""
+SPEC_FILE=""
 # A string rather than an array: these are passed inside the single command
 # string the harness image's entrypoint splits, so they are already subject to
 # one round of word splitting and an array would buy nothing.
@@ -53,6 +56,10 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--engine)
 		ENGINE="${2:?--engine needs flink, spark or external}"
+		shift 2
+		;;
+	--spec)
+		SPEC_FILE="${2:?--spec needs a path}"
 		shift 2
 		;;
 	--set)
@@ -81,8 +88,13 @@ done
 
 require_host_tools docker jq yq curl
 
-SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"
-[[ -f $SPEC_FILE ]] || die "no run spec at $SPEC_FILE; --engine takes flink, spark or external"
+[[ -n $SPEC_FILE ]] || SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"
+[[ -f $SPEC_FILE ]] || die "no run spec at $SPEC_FILE; --engine takes flink, spark or external, or name one with --spec"
+# The harness container mounts this checkout's `runs/` as `/runs` and the stage
+# command names the spec inside it, so a spec anywhere else is not a file that
+# container can open.
+[[ "$(cd -- "$(dirname -- "$SPEC_FILE")" && pwd)" == "$REPO_ROOT/runs" ]] ||
+	die "--spec must name a file under $REPO_ROOT/runs, which is what the harness container mounts as /runs"
 [[ $ENGINE == external || -z $READY_FILE ]] || die "--external-ready-file only applies to --engine external"
 
 STAGE_OUT=""
@@ -217,6 +229,12 @@ TABLE="$(jq -r .table "$RUN_DIR/facts.json")"
 # `key_column` is null when the spec asked for unkeyed records, and the flag is
 # then left off rather than passed empty.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$RUN_DIR/facts.json")"
+# What the producer frames each value as, and the id its header names. The
+# schema is registered at stage time, so this is the id every reader of the run
+# resolves the writer schema by; it is null for a raw-Avro run, and the flag is
+# then left off rather than passed empty.
+VALUE_ENCODING="$(jq -r '.value_encoding // empty' "$RUN_DIR/facts.json")"
+SCHEMA_ID="$(jq -r '.schema_id // empty' "$RUN_DIR/facts.json")"
 
 SHARDS="$(yq '.producer.shards' "$SPEC_FILE")"
 [[ $SHARDS == null || $SHARDS == 1 ]] ||
@@ -250,6 +268,8 @@ compose run -d --name "scorer-$RUN_ID" harness "$SCORE" >/dev/null
 PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $RUN_ID --epoch $EPOCH"
 PRODUCE="$PRODUCE --publish-log /runs/$RUN_ID/publish_log-0.jsonl --upload-prefix s3://runs/$RUN_ID"
 [[ -z $KEY_COLUMN ]] || PRODUCE="$PRODUCE --key-column $KEY_COLUMN"
+[[ -z $VALUE_ENCODING ]] || PRODUCE="$PRODUCE --value-encoding $VALUE_ENCODING"
+[[ -z $SCHEMA_ID ]] || PRODUCE="$PRODUCE --schema-id $SCHEMA_ID"
 [[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
 [[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
 [[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"

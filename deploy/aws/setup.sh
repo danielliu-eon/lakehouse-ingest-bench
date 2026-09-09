@@ -30,6 +30,21 @@ MSK_NAME="${MSK_NAME:-lakehouse-ingest-bench}"
 NAMESPACE="${NAMESPACE:-ingest-bench}"
 MSK_BROKER_TYPE="${MSK_BROKER_TYPE:-kafka.m5.large}"
 MSK_BROKERS="${MSK_BROKERS:-2}"
+# Whether the namespace also gets a schema registry, which only a run offered
+# in the Confluent wire format needs. Off by default: it is another Deployment
+# to keep alive, and a site that brings its own registry names that one in
+# site.yaml instead.
+WITH_SCHEMA_REGISTRY="${WITH_SCHEMA_REGISTRY:-false}"
+# Where the registry Deployment is placed, for a cluster whose nodes are
+# tainted or labelled. The same two values site.kubernetes carries for the
+# harness Jobs, as the one-line JSON a manifest takes.
+NODE_SELECTOR="${NODE_SELECTOR:-}"
+TOLERATIONS="${TOLERATIONS:-[]}"
+# An empty selector is `{}`, which cannot be written as a `${VAR:-...}` default
+# without escaping the brace that would close the expansion.
+if [[ -z $NODE_SELECTOR ]]; then
+	NODE_SELECTOR='{}'
+fi
 # A cluster that has not reached ACTIVE in this long is reported rather than
 # waited on forever; the script is idempotent, so re-running it resumes the
 # wait without recreating anything.
@@ -381,6 +396,23 @@ log "applying the namespace, both service accounts and the flink RBAC"
 envsubst '${NAMESPACE}' <"$AWS_DIR/k8s/namespace.yaml.tmpl" |
 	kubectl --context "$KUBE_CONTEXT" apply -f -
 
+if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
+	log "applying the schema registry"
+	# `sed` and not the harness's own renderer: this script needs no Python
+	# toolchain, and the markers are three. A marker the template gains and
+	# this list does not would reach the API server verbatim and be refused
+	# there, which is what the render test in tests/test_scripts.py pins.
+	sed -e "s|__NAMESPACE__|$NAMESPACE|g" \
+		-e "s|__NODE_SELECTOR__|$NODE_SELECTOR|g" \
+		-e "s|__TOLERATIONS__|$TOLERATIONS|g" \
+		<"$AWS_DIR/../k8s/schema-registry.yaml.tmpl" |
+		kubectl --context "$KUBE_CONTEXT" apply --namespace "$NAMESPACE" -f -
+	kubectl --context "$KUBE_CONTEXT" rollout status deployment/schema-registry \
+		--namespace "$NAMESPACE" --timeout 300s
+else
+	log "no schema registry (WITH_SCHEMA_REGISTRY is '$WITH_SCHEMA_REGISTRY')"
+fi
+
 # ---------------------------------------------------------------------------
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
@@ -422,4 +454,9 @@ cat <<SITE
   kubernetes.registry:            $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
   kubernetes.aws_region:          $AWS_REGION
 SITE
+if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
+	cat <<SITE
+  kafka.schema_registry.url:      http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7
+SITE
+fi
 log "MSK bills by the hour whether or not a run is using it — deploy/aws/teardown.sh when you are done."

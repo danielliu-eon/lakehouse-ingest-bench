@@ -12,6 +12,10 @@ warehouse: s3://warehouse
 kafka:
   bootstrap_servers: kafka:9092
   security: {}
+  # Apicurio's Confluent-compatible API, which is what a `confluent` run
+  # registers its corpus schema with and what the engine reads it back from.
+  schema_registry:
+    url: http://schema-registry:8080/apis/ccompat/v7
 catalog:
   props:
     uri: http://iceberg-rest:8181

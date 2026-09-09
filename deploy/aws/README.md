@@ -36,6 +36,8 @@ this repository names an account, a region, a cluster or a bucket.
 | `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version, printed either way |
 | `FLINK_OPERATOR_VERSION` | `1.15.0` | The operator chart installed when the CRD is absent, from `archive.apache.org` — it keeps every release, where the download mirror serves only current ones |
 | `NAMESPACE` | `ingest-bench` | The Kubernetes namespace the harness Jobs and the Flink deployments run in |
+| `WITH_SCHEMA_REGISTRY` | `false` | `true` also applies `deploy/k8s/schema-registry.yaml.tmpl` — one Apicurio Deployment and Service in the namespace, at `http://schema-registry.<namespace>.svc:8080/apis/ccompat/v7`. Only a run whose spec says `kafka.value_encoding: confluent` needs one; the namespace delete in `teardown.sh` removes it |
+| `NODE_SELECTOR` / `TOLERATIONS` | `{}` / `[]` | One-line JSON placing the registry Deployment, for a cluster whose nodes are labelled or tainted. The harness Jobs read the same two values out of `site.yaml` instead |
 | `MSK_ACTIVE_WAIT_S` | `3600` | How long `setup.sh` waits for MSK to reach `ACTIVE` |
 | `MSK_DELETED_WAIT_S` | `1800` | How long `teardown.sh` waits for MSK to disappear before deleting its security group |
 
@@ -69,7 +71,9 @@ version is printed either way). Then:
   associations bind it to both ServiceAccounts.
 - **Kubernetes** — the namespace, the `ingest-bench-harness` and
   `ingest-bench-flink` ServiceAccounts, and the Role and RoleBinding the
-  JobManager needs to raise its own TaskManagers.
+  JobManager needs to raise its own TaskManagers. With
+  `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry` Deployment and Service
+  (Apicurio, in-memory storage), waited on until its rollout completes.
 
 It ends by printing the values to fill into `site.yaml` (copy
 `site.aws.example.yaml`), the IAM bootstrap string among them.
