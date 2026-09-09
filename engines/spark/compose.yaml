@@ -1,0 +1,42 @@
+# Included by the local stack, which owns the broker, the object store and the
+# catalog this service depends on.
+#
+# One service, because `--master local[N]` is the whole fleet: the driver runs
+# the executors as threads in its own JVM, so the knobs' executor count and
+# core count reach it as one core count and there is no second container to
+# scale. What that costs is a cluster-shaped run; what it buys is a stack that
+# fits on a laptop, which is all the local smoke is for.
+#
+# `RUN_DIR` carries a default rather than being required. Interpolation runs
+# over the whole model before profiles are filtered, so a required variable
+# here would make every command in the stack — `up kafka` included — fail
+# without it. The default is a path that cannot hold a run, so only an actual
+# submission without `RUN_DIR` fails, and it names what is missing. The two
+# sizing variables come from the run's own `job.env`; their defaults are only
+# what makes the model render.
+services:
+  spark-job:
+    profiles: [spark]
+    build:
+      context: ../..
+      dockerfile: engines/spark/Dockerfile
+    image: lakehouse-ingest-bench/spark:local
+    # The driver's web UI, which is the only thing that reports whether the
+    # query is running. There is no submission endpoint to ask instead: the
+    # driver is the process this service runs.
+    ports: ["4040:4040"]
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    volumes: ["${RUN_DIR:-/nonexistent/run}:/opt/bench/run:ro"]
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[${LOCAL_CORES:-4}]
+      - --driver-memory
+      - ${DRIVER_MEM_MB:-2048}m
+      - --properties-file
+      - /opt/bench/run/spark-defaults.conf
+      - /opt/bench/engines/spark/stream_to_iceberg.py
+    depends_on: [kafka, minio-init, iceberg-rest]

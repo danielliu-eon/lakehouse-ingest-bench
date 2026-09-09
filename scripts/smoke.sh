@@ -26,9 +26,10 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/smoke.sh [options]
 
-  --engine flink|external     which run spec to stage; `flink` also starts the
-                              engine, `external` waits for you to start yours
-                              (default: flink)
+  --engine flink|spark|external
+                              which run spec to stage; `flink` and `spark` also
+                              start the engine, `external` waits for you to
+                              start yours (default: flink)
   --set KEY=VALUE             override a corpus preset key, repeatable
                               (e.g. --set duration_s=30 for a 30 s corpus)
   --keep                      leave the stack up afterwards
@@ -36,7 +37,8 @@ usage: scripts/smoke.sh [options]
                               instead of reading a newline from stdin
 
 Environment: EPOCH_LEAD_S, IDLE_STOP_S, EXTERNAL_READY_WAIT_S,
-FLINK_REST, FLINK_SLOT_WAIT_S, FLINK_JOB_WAIT_S.
+FLINK_REST, FLINK_SLOT_WAIT_S, FLINK_JOB_WAIT_S, SPARK_UI, SPARK_APP_WAIT_S,
+SPARK_QUERY_WAIT_S.
 USAGE
 }
 
@@ -50,7 +52,7 @@ SETS=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--engine)
-		ENGINE="${2:?--engine needs flink or external}"
+		ENGINE="${2:?--engine needs flink, spark or external}"
 		shift 2
 		;;
 	--set)
@@ -80,7 +82,7 @@ done
 require_host_tools docker jq yq curl
 
 SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"
-[[ -f $SPEC_FILE ]] || die "no run spec at $SPEC_FILE; --engine takes flink or external"
+[[ -f $SPEC_FILE ]] || die "no run spec at $SPEC_FILE; --engine takes flink, spark or external"
 [[ $ENGINE == external || -z $READY_FILE ]] || die "--external-ready-file only applies to --engine external"
 
 STAGE_OUT=""
@@ -94,15 +96,21 @@ cleanup() {
 			log "--- last 30 lines of scorer-$RUN_ID ---"
 			docker logs --tail 30 "scorer-$RUN_ID" >&2 || true
 		fi
-		if [[ $ENGINE == flink ]]; then
+		case "$ENGINE" in
+		flink)
 			log "--- last 40 lines of flink-jobmanager ---"
 			compose logs --tail 40 --no-log-prefix flink-jobmanager >&2 || true
-		fi
+			;;
+		spark)
+			log "--- last 40 lines of spark-job ---"
+			compose logs --tail 40 --no-log-prefix spark-job >&2 || true
+			;;
+		esac
 	fi
 	[[ -z $STAGE_OUT ]] || rm -f "$STAGE_OUT"
 	if ((KEEP == 1)); then
 		log "--keep: the stack is still up. Tear it down with:"
-		log "  docker compose -f $COMPOSE_FILE --profile flink --profile flink-job --profile tools down -v"
+		log "  docker compose -f $COMPOSE_FILE --profile flink --profile flink-job --profile spark --profile tools down -v"
 	else
 		log "tearing the stack down"
 		compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -120,6 +128,9 @@ compose build harness
 if [[ $ENGINE == flink ]]; then
 	log "building the engine image (amd64; emulated on an arm64 machine)"
 	compose build flink-jobmanager
+elif [[ $ENGINE == spark ]]; then
+	log "building the engine image"
+	compose build spark-job
 fi
 
 log "starting the broker, the object store and the catalog"
@@ -159,6 +170,18 @@ if [[ $ENGINE == flink ]]; then
 	log "submitting the job"
 	compose run --rm -T flink-job
 	wait_for_flink_job_running "$RUN_ID"
+elif [[ $ENGINE == spark ]]; then
+	# The submission line's shape, as the engine's renderer wrote it. Exported
+	# so compose interpolates the driver's cores and its heap. There is no
+	# separate submitter: under `--master local[N]` this one container is the
+	# driver, its executors and the job.
+	set -a
+	# shellcheck source=/dev/null
+	source "$RUN_DIR/job.env"
+	set +a
+	log "starting spark: local[$LOCAL_CORES], ${DRIVER_MEM_MB}m driver"
+	compose up -d spark-job
+	wait_for_spark_query "$RUN_ID"
 else
 	log "start your engine now against these facts:"
 	cat "$RUN_DIR/facts.json"

@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from engines.spark import knobs, stream_to_iceberg
 from ingest_bench.catalog import load_catalog_props
 from ingest_bench.specs.model import load_site
 
-LOCAL = Path(__file__).resolve().parents[1] / "deploy" / "compose" / "local"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL = REPO_ROOT / "deploy" / "compose" / "local"
 COMPOSE = LOCAL / "docker-compose.yml"
 
 
@@ -35,6 +37,8 @@ def test_compose_config_renders() -> None:
             "--profile",
             "flink-job",
             "--profile",
+            "spark",
+            "--profile",
             "tools",
             "config",
         ],
@@ -48,8 +52,38 @@ def test_compose_config_renders() -> None:
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "RUN_DIR": "/tmp"},
     )
     assert out.returncode == 0, out.stderr
-    for service in ("kafka", "minio", "iceberg-rest", "harness", "flink-jobmanager", "flink-taskmanager", "flink-job"):
+    for service in (
+        "kafka",
+        "minio",
+        "iceberg-rest",
+        "harness",
+        "flink-jobmanager",
+        "flink-taskmanager",
+        "flink-job",
+        "spark-job",
+    ):
         assert f"  {service}:" in out.stdout
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not installed")
+def test_the_spark_service_submits_the_files_the_renderer_writes() -> None:
+    """The submission line names the mount, the properties file and the job.
+
+    Three of the four are the renderer's own constants and the fourth is the
+    path the job reads its documents from, so a rename on either side leaves
+    this command line pointing at a file nothing writes — which surfaces as a
+    driver that exits before the run, minutes after a topic was created.
+    """
+    service = yaml.safe_load((REPO_ROOT / "engines" / "spark" / "compose.yaml").read_text())["services"]["spark-job"]
+    mount = str(stream_to_iceberg.RUN_DIR)
+    assert service["volumes"] == [f"${{RUN_DIR:-/nonexistent/run}}:{mount}:ro"]
+    command = service["command"]
+    assert command[-1] == "/opt/bench/engines/spark/stream_to_iceberg.py"
+    assert command[command.index("--properties-file") + 1] == f"{mount}/{knobs.CONF_FILE}"
+    # The two variables the driver is sized by are the ones `job.env` sets.
+    rendered = " ".join(command)
+    for variable in (knobs.LOCAL_CORES_VAR, knobs.DRIVER_MEM_VAR):
+        assert f"${{{variable}:-" in rendered
 
 
 def test_catalog_props_file_matches_the_site_catalog_block() -> None:

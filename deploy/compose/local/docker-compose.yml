@@ -6,10 +6,12 @@
 #   (none)      kafka, minio, minio-init, iceberg-rest — the site
 #   flink       the engine cluster, scaled by `--scale flink-taskmanager=N`
 #   flink-job   the one-shot submitter, needing RUN_DIR
+#   spark       the Spark driver, which is the whole Spark fleet, needing RUN_DIR
 #   tools       the harness, run with `docker compose run --rm harness "<cmd>"`
 #
-# Nothing here is measured. The engine image is amd64 (PyFlink ships no Linux
-# aarch64 wheel), so on an arm64 machine it runs emulated.
+# Nothing here is measured. The Flink image is amd64 (PyFlink ships no Linux
+# aarch64 wheel), so on an arm64 machine it runs emulated; the Spark image is
+# multi-arch and runs natively.
 #
 # RUN_DIR has to be set for *every* command against this project, not only the
 # one that mounts it: compose interpolates the whole model before it filters
@@ -23,6 +25,7 @@ name: ingest-bench
 # whichever stack includes it.
 include:
   - path: ../../../engines/flink/compose.yaml
+  - path: ../../../engines/spark/compose.yaml
 
 services:
   kafka:
