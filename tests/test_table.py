@@ -56,6 +56,39 @@ def test_create_and_drop(tmp_path: Path, corpus: metadata.CorpusMetadata) -> Non
     create.drop_table(props, "bench.t1")  # idempotent
 
 
+def test_a_table_location_places_the_namespace_a_warehouse_cannot(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    """A catalog whose warehouse is not a storage URI needs both locations.
+
+    `--location` exists for exactly that catalog — AWS Glue's Iceberg REST
+    endpoint reads an account id in `warehouse` — and a namespace created with
+    no location is refused by some of them, so the directory the table was put
+    in is where the namespace goes. A warehouse that can carry a namespace
+    still does: it is the root every later table goes under, and one table's
+    location is not.
+    """
+    unusable = {"type": "sql", "uri": f"sqlite:///{tmp_path}/catalog.db", "warehouse": "123456789012"}
+    location = f"file://{tmp_path}/wh/bench/t_placed"
+    table = create.create_table(
+        unusable, "bench.t_placed", corpus, create.parse_partition("unpartitioned"), {}, location=location
+    )
+    assert table.location() == location
+    assert cat.open_catalog(unusable).load_namespace_properties("bench")["location"] == f"file://{tmp_path}/wh/bench"
+
+    storage = sqlite_props(tmp_path / "storage")
+    (tmp_path / "storage").mkdir()
+    create.create_table(
+        storage,
+        "bench.t_under_warehouse",
+        corpus,
+        create.parse_partition("unpartitioned"),
+        {},
+        location=f"file://{tmp_path}/elsewhere/t_under_warehouse",
+    )
+    assert cat.open_catalog(storage).load_namespace_properties("bench")["location"] == storage["warehouse"] + "/bench"
+
+
 def test_bucket_and_unpartitioned(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
     props = sqlite_props(tmp_path)
     t = create.create_table(props, "bench.b", corpus, create.parse_partition("bucket(4, user_id)"), {})

@@ -148,7 +148,9 @@ def partition_spec(meta: CorpusMetadata, partition: Partition) -> PartitionSpec:
     )
 
 
-def _namespace_properties(props: dict[str, str], namespace: str, namespace_location: str | None) -> dict[str, str]:
+def _namespace_properties(
+    props: dict[str, str], namespace: str, namespace_location: str | None, location: str | None
+) -> dict[str, str]:
     """What the namespace is created with, which is a location or nothing.
 
     Some catalogs reject a namespace that names no location, so one is derived
@@ -157,12 +159,20 @@ def _namespace_properties(props: dict[str, str], namespace: str, namespace_locat
     catalog identifier instead (AWS Glue's Iceberg REST endpoint reads an
     account id there) would yield a location in no bucket — which is why a
     caller that knows the storage warehouse passes the location itself.
+
+    Failing both, the directory this table was placed in is the answer: a
+    caller names a table location for exactly the catalog whose warehouse
+    cannot place one, and that directory is then the only root anything here
+    knows of. A warehouse that can place one still wins — it is the root every
+    later table in the namespace goes under, and one table's location is not.
     """
     if namespace_location is not None:
         return {"location": namespace_location}
     warehouse = props.get("warehouse")
     if warehouse is not None and "://" in warehouse:
         return {"location": f"{warehouse}/{namespace}"}
+    if location is not None:
+        return {"location": location.rstrip("/").rsplit("/", 1)[0]}
     return {}
 
 
@@ -185,14 +195,18 @@ def create_table(
     table in the namespace goes under. They are separate because the second
     outlives this call: the namespace is created once and holds every later
     run's table, so giving it one run's table location would place the runs
-    after it under a directory named for the first.
+    after it under a directory named for the first. A caller that names only
+    the first gets the namespace placed in the directory it points at — see
+    `_namespace_properties`.
     """
     catalog = open_catalog(props)
     namespace, name = table_identifier(table)
     schema = iceberg_schema(meta)
     spec = partition_spec(meta, partition)
     try:
-        catalog.create_namespace(namespace, properties=_namespace_properties(props, namespace, namespace_location))
+        catalog.create_namespace(
+            namespace, properties=_namespace_properties(props, namespace, namespace_location, location)
+        )
     except NamespaceAlreadyExistsError:
         pass
     return catalog.create_table(
