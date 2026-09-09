@@ -39,16 +39,40 @@ _TWELVE_DIGIT = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _CLOUD_URI = re.compile(r'(?:s3|gs)://[^\s"]+')
 
 
-def _scan_text(path: Path, text: str) -> list[str]:
-    failures = [
-        f"{path}: account_id: a 12-digit number ({match.group()}) appears in the file"
-        for match in _TWELVE_DIGIT.finditer(text)
-    ]
-    failures.extend(
+def _uri_failures(path: Path, text: str) -> list[str]:
+    return [
         f"{path}: uri: an unredacted URI ({match.group()!r}) was not rewritten to a placeholder root"
         for match in _CLOUD_URI.finditer(text)
-    )
-    return failures
+    ]
+
+
+def _account_id_failures(path: Path, value: object) -> list[str]:
+    """Every 12-digit number inside a JSON *string* of the parsed document —
+    a key or a value, never a number.
+
+    An account id can only leak inside a string: an ARN, a bucket name, a
+    path. A byte total or a millisecond timestamp is a JSON number that can
+    just as easily land on twelve digits by coincidence — an hour at
+    100 MB/s is close to 3.6·10^11 bytes — and scanning the raw file text
+    cannot tell the two apart. Walking the parsed value can.
+    """
+    if isinstance(value, str):
+        return [
+            f"{path}: account_id: a 12-digit number ({match.group()}) appears in a string"
+            for match in _TWELVE_DIGIT.finditer(value)
+        ]
+    if isinstance(value, dict):
+        failures = [
+            f"{path}: account_id: a 12-digit number ({match.group()}) appears in a key"
+            for key in value
+            for match in _TWELVE_DIGIT.finditer(key)
+        ]
+        for inner in value.values():
+            failures.extend(_account_id_failures(path, inner))
+        return failures
+    if isinstance(value, list):
+        return [failure for inner in value for failure in _account_id_failures(path, inner)]
+    return []
 
 
 def _fleet_failures(fleet: list[dict[str, object]]) -> list[str]:
@@ -131,13 +155,14 @@ def validate(results_dir: Path, *, workloads: Path) -> list[str]:
 
     for path in sorted(results_dir.glob("**/*.json")):
         text = path.read_text(encoding="utf-8")
-        failures.extend(_scan_text(path, text))
+        failures.extend(_uri_failures(path, text))
         try:
             document = cast(dict[str, object], json.loads(text))
         except json.JSONDecodeError as err:
             failures.append(f"{path}: json: {err}")
             all_schema_version_2 = False
             continue
+        failures.extend(_account_id_failures(path, document))
         schema_version = document["schema_version"] if "schema_version" in document else None
         if schema_version != SCHEMA_VERSION:
             failures.append(f"{path}: schema_version: must be {SCHEMA_VERSION}, got {schema_version!r}")

@@ -61,7 +61,7 @@ def test_validate_results_passes_on_an_empty_directory(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_validate_results_fails_on_a_twelve_digit_number(tmp_path: Path) -> None:
+def test_validate_results_fails_on_a_twelve_digit_number_in_a_string(tmp_path: Path) -> None:
     def mutate(document: dict[str, object]) -> None:
         run = document["run"]
         assert isinstance(run, dict)
@@ -70,6 +70,31 @@ def test_validate_results_fails_on_a_twelve_digit_number(tmp_path: Path) -> None
     result = _run(_mutated(tmp_path, mutate))
     assert result.returncode == 1
     assert "account_id" in result.stdout
+
+
+def test_validate_results_passes_on_a_twelve_digit_numeric_byte_total(tmp_path: Path) -> None:
+    """A JSON *number* landing on twelve digits — an hour at 100 MB/s is close
+    to 3.6e11 bytes — is not an account id and must not be flagged; only a
+    twelve-digit run inside a JSON string is a credential-shaped leak.
+    """
+
+    def mutate(document: dict[str, object]) -> None:
+        document["geometry"] = {"final": {"live": {"bytes": 360_000_000_000, "size_quantiles": {"p50": 33_554_432.0}}}}
+
+    result = _run(_mutated(tmp_path, mutate))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validate_results_fails_on_a_twelve_digit_number_inside_a_uri(tmp_path: Path) -> None:
+    def mutate(document: dict[str, object]) -> None:
+        run = document["run"]
+        assert isinstance(run, dict)
+        run["table"] = "s3://some-bucket-123456789012/path"
+
+    result = _run(_mutated(tmp_path, mutate))
+    assert result.returncode == 1
+    assert "account_id" in result.stdout
+    assert ": uri:" in result.stdout
 
 
 def test_validate_results_fails_on_a_non_placeholder_uri(tmp_path: Path) -> None:
