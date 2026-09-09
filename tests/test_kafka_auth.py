@@ -1,9 +1,13 @@
-"""The one authentication the harness cannot pass a file's properties through for.
+"""The one authentication the harness signs rather than passes through.
 
 Every assertion here runs without an AWS account: the token provider is
-injected, and the two tests that exercise the real import path bind the signer
-in `sys.modules` themselves. That is deliberate — a test suite that needed a
-cloud to check the arithmetic of an expiry would not be run.
+injected, and the two tests of the real import path bind the signer in
+`sys.modules` themselves. That is deliberate — a suite that needed a cloud to
+check the arithmetic of an expiry would not be run.
+
+The admin client's token priming is tested here too, against a fake client that
+serves the callback from `poll` as librdkafka does. `tests/test_kafka_admin.py`
+holds the half of that behaviour a real broker is needed for.
 """
 
 from __future__ import annotations
