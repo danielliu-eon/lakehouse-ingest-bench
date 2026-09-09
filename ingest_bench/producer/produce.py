@@ -79,6 +79,12 @@ class ProduceArgs:
     shards: int
     seconds: int | None
     key_column: str | None
+    # Prepended to every value, and empty for the corpus's own raw Avro. The
+    # header rather than the encoding's name because the loop has nothing else
+    # to decide: which five bytes a `confluent` run carries is settled once, by
+    # the caller that knows the schema id, and a run with no header is the same
+    # loop with nothing to prepend.
+    value_prefix: bytes
     publish_log_path: Path
     behind_max_ms: int
     upload_prefix: str | None
@@ -117,6 +123,7 @@ def produce_batch(
     keys: Iterable[bytes] | None,
     clock: Clock,
     queue_full_backoff_s: float = 0.005,
+    value_prefix: bytes = b"",
 ) -> BatchOutcome:
     """Send one batch and wait for every frame in it to be acknowledged.
 
@@ -124,6 +131,11 @@ def produce_batch(
     blocks on `flush` rather than letting the next batch overlap: an overlapping
     batch would make the offered timeline the producer's queue depth instead of
     the corpus's schedule.
+
+    ``value_prefix`` is prepended to each frame and counted in the bytes
+    reported: a frame is already the value's Avro binary, so a header is the
+    only thing between the corpus's bytes and the wire, and what was offered is
+    what the broker was actually sent.
     """
     state = {"acked": 0, "errors": 0, "first": 0, "last": 0}
 
@@ -147,16 +159,17 @@ def produce_batch(
                 raise ValueError(
                     f"the key sidecar ran out at frame {rows}; it holds fewer keys than the batch has rows"
                 )
+        value = value_prefix + frame if value_prefix else frame
         while True:
             try:
-                producer.produce(topic, frame, key, on_delivery=on_delivery)
+                producer.produce(topic, value, key, on_delivery=on_delivery)
                 break
             except BufferError:
                 # librdkafka's queue is bounded; draining delivery reports frees it.
                 producer.poll(queue_full_backoff_s)
                 clock.sleep(queue_full_backoff_s)
         rows += 1
-        total += len(frame)
+        total += len(value)
         if rows % POLL_EVERY_ROWS == 0:
             producer.poll(0)
     if key_iter is not None and next(key_iter, None) is not None:
@@ -205,7 +218,9 @@ def run(
         if delay_ms > 0:
             clock.sleep(delay_ms / 1000)
         keys = None if args.key_column is None else _batch_frames(batch_record.key_uris[args.key_column])
-        outcome = produce_batch(producer, args.topic, _batch_frames(batch_record.uri), keys, clock)
+        outcome = produce_batch(
+            producer, args.topic, _batch_frames(batch_record.uri), keys, clock, value_prefix=args.value_prefix
+        )
         record = publish_log.PublishRecord(
             batch=batch_record.batch,
             scheduled_ms=due_ms,

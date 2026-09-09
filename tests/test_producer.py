@@ -107,6 +107,7 @@ def test_run_writes_publish_log_and_fails_on_delivery_error(tmp_path: Path, corp
         shards=1,
         seconds=None,
         key_column="user_id",
+        value_prefix=b"",
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
@@ -153,6 +154,7 @@ def test_key_column_must_have_a_sidecar(tmp_path: Path, corpus_uri: str) -> None
         shards=1,
         seconds=None,
         key_column="country",
+        value_prefix=b"",
         publish_log_path=tmp_path / "p.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
@@ -160,6 +162,92 @@ def test_key_column_must_have_a_sidecar(tmp_path: Path, corpus_uri: str) -> None
     )
     with pytest.raises(ValueError, match="kafka_key_columns"):
         produce.run(args, lambda cfg: FakeProducer(clock), clock, io.StringIO())
+
+
+def test_the_confluent_header_precedes_every_value_and_is_counted(tmp_path: Path, corpus_uri: str) -> None:
+    """The corpus's bytes, unchanged, behind five bytes that name the schema.
+
+    Nothing is re-encoded: a frame is already one value's Avro binary, so the
+    header is a prefix and the row's bytes are what the broker was sent.
+    """
+    clock = FakeClock(1_700_000_000_000)
+    header = b"\x00\x00\x00\x00\x07"
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9092",
+        topic="t",
+        epoch_ms=clock.now_ms(),
+        speed=1000.0,
+        shard=0,
+        shards=1,
+        seconds=None,
+        key_column=None,
+        value_prefix=header,
+        publish_log_path=tmp_path / "publish_log-0.jsonl",
+        behind_max_ms=5000,
+        upload_prefix=None,
+        kafka_props={},
+    )
+    prefixed = FakeProducer(clock)
+    assert produce.run(args, lambda cfg: prefixed, clock, io.StringIO()) == 0
+    values = [value for _, value, _ in prefixed.sent]
+    assert values and all(value.startswith(header) for value in values)
+
+    raw = FakeProducer(clock)
+    plain = produce.ProduceArgs(
+        **{**args.__dict__, "value_prefix": b"", "publish_log_path": tmp_path / "publish_log-1.jsonl"}
+    )
+    assert produce.run(plain, lambda cfg: raw, clock, io.StringIO()) == 0
+    assert [value for _, value, _ in raw.sent] == [value[len(header) :] for value in values]
+
+    # The publish log counts the wire bytes, which are five more per row.
+    prefixed_rows = publish_log.read(tmp_path / "publish_log-0.jsonl")
+    raw_rows = publish_log.read(tmp_path / "publish_log-1.jsonl")
+    assert [record.rows for record in prefixed_rows] == [record.rows for record in raw_rows]
+    assert [record.bytes for record in prefixed_rows] == [
+        record.bytes + len(header) * record.rows for record in raw_rows
+    ]
+
+
+def test_the_cli_builds_the_header_and_refuses_a_pair_that_cannot_mean_anything(
+    tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[produce.ProduceArgs] = []
+
+    def capture(
+        args: produce.ProduceArgs,
+        factory: Callable[[dict[str, object]], produce.FrameProducer],
+        clock: object,
+        log: object,
+    ) -> int:
+        seen.append(args)
+        return 0
+
+    monkeypatch.setattr(producer_cli, "run", capture)
+    base = [
+        "--corpus",
+        corpus_uri,
+        "--bootstrap",
+        "fake:9092",
+        "--topic",
+        "t",
+        "--epoch",
+        "1700000000",
+        "--publish-log",
+        str(tmp_path / "publish_log-0.jsonl"),
+    ]
+    assert producer_cli.main(base) == 0
+    assert seen[-1].value_prefix == b""
+
+    assert producer_cli.main([*base, "--value-encoding", "confluent", "--schema-id", "7"]) == 0
+    assert seen[-1].value_prefix == b"\x00\x00\x00\x00\x07"
+
+    with pytest.raises(ValueError, match="needs --schema-id"):
+        producer_cli.main([*base, "--value-encoding", "confluent"])
+    with pytest.raises(ValueError, match="only sent in the Confluent wire format"):
+        producer_cli.main([*base, "--schema-id", "7"])
+    with pytest.raises(SystemExit):
+        producer_cli.main([*base, "--value-encoding", "protobuf"])
 
 
 def test_read_all_merges_shards(tmp_path: Path) -> None:
@@ -188,6 +276,7 @@ def test_done_trailer_marks_the_shard_finished(tmp_path: Path, corpus_uri: str) 
         shards=4,
         seconds=None,
         key_column=None,
+        value_prefix=b"",
         publish_log_path=finished,
         behind_max_ms=5000,
         upload_prefix=None,
@@ -238,6 +327,7 @@ def test_upload_prefix_publishes_the_log(tmp_path: Path, corpus_uri: str) -> Non
         shards=1,
         seconds=None,
         key_column="partition_key",
+        value_prefix=b"",
         publish_log_path=tmp_path / "local" / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=str(uploads),
@@ -262,6 +352,7 @@ def test_kafka_props_apply_over_the_producer_defaults(tmp_path: Path, corpus_uri
         shards=1,
         seconds=None,
         key_column=None,
+        value_prefix=b"",
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
@@ -360,6 +451,7 @@ def test_the_region_pseudo_key_never_reaches_the_producer(
         shards=1,
         seconds=None,
         key_column=None,
+        value_prefix=b"",
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,

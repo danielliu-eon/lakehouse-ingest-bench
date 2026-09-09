@@ -17,7 +17,9 @@ from pathlib import Path
 from ingest_bench.catalog import parse_key_values
 from ingest_bench.clock import SystemClock
 from ingest_bench.producer.produce import FrameProducer, ProduceArgs, run
+from ingest_bench.schema_registry import confluent_header
 from ingest_bench.specs.env import resolve_env_placeholders
+from ingest_bench.specs.model import VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT, VALUE_ENCODINGS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--seconds", type=int, help="send only the batches due in the first SECONDS of the corpus")
     parser.add_argument("--key-column", metavar="NAME", help="a corpus key column to send as the Kafka message key")
+    parser.add_argument(
+        "--value-encoding",
+        choices=sorted(VALUE_ENCODINGS),
+        default=VALUE_ENCODING_AVRO,
+        help="how each value is framed: the corpus's Avro binary as it stands, or the Confluent wire format, "
+        "which prepends the magic byte and a schema id. The run's facts.json says which the run offers",
+    )
+    parser.add_argument(
+        "--schema-id",
+        type=int,
+        metavar="N",
+        help=f"the registry id the Confluent header names, from the run's facts.json. Required with, and only "
+        f"with, --value-encoding {VALUE_ENCODING_CONFLUENT}",
+    )
     parser.add_argument("--publish-log", required=True, metavar="PATH", help="where to write this shard's publish log")
     parser.add_argument(
         "--behind-max-ms", type=int, default=5000, help="report once the producer falls this far behind"
@@ -56,6 +72,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _value_prefix(encoding: str, schema_id: int | None) -> bytes:
+    """The bytes that precede every value, and a refusal for a flag pair that cannot mean anything.
+
+    A `confluent` run with no id would publish records whose header names
+    schema zero, which a reader resolves to whatever was registered first — so
+    the pair is checked here rather than being given a default.
+    """
+    if encoding == VALUE_ENCODING_CONFLUENT:
+        if schema_id is None:
+            raise ValueError(
+                f"--value-encoding {VALUE_ENCODING_CONFLUENT} needs --schema-id: the id the run's facts.json "
+                "carries as schema_id, which every record's header names"
+            )
+        return confluent_header(schema_id)
+    if schema_id is not None:
+        raise ValueError(f"--schema-id is only sent in the Confluent wire format, and --value-encoding is {encoding}")
+    return b""
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parsed = build_parser().parse_args(argv)
     args = ProduceArgs(
@@ -68,6 +103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         shards=int(parsed.shards),
         seconds=None if parsed.seconds is None else int(parsed.seconds),
         key_column=None if parsed.key_column is None else str(parsed.key_column),
+        value_prefix=_value_prefix(
+            str(parsed.value_encoding), None if parsed.schema_id is None else int(parsed.schema_id)
+        ),
         publish_log_path=Path(str(parsed.publish_log)),
         behind_max_ms=int(parsed.behind_max_ms),
         upload_prefix=None if parsed.upload_prefix is None else str(parsed.upload_prefix),
