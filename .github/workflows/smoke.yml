@@ -1,0 +1,28 @@
+# Manual dispatch only, not on a schedule or per PR: each engine builds its
+# own image and runs the full Compose stack for 20-30 minutes, which is more
+# than this repo's traffic justifies running automatically yet.
+name: smoke
+on:
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [flink, spark]
+    # The Spark image build (a full Spark distribution plus connector jars)
+    # is the long pole; Flink finishes well inside this too.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Same pinned yq as ci.yml — snap is not available on every runner
+      # image, and a channel's version drifts under the smoke.
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: |
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+      - run: scripts/smoke.sh --engine ${{ matrix.engine }} --set duration_s=30

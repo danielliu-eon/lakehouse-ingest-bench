@@ -69,6 +69,16 @@ with a ten-second checkpoint interval there is barely one commit inside a
 thirty-second offer. It still checks that the table drains and that exactness is
 clean; only the freshness bound and the keep-up fraction need a longer corpus.
 
+## CI
+
+`ci.yml` runs on every push and pull request: ruff, mypy, the pytest suite
+(this is also where the doc-size and licence-header tests run, alongside
+everything else under `tests/`) and `scripts/validate-results.py`. It does not
+run the smoke — Compose and two engine images are too slow for every push.
+`smoke.yml` covers that instead, running `scripts/smoke.sh` once for Flink and
+once for Spark, but only on `workflow_dispatch`: until this repo has enough
+traffic to justify it running automatically, someone triggers it by hand.
+
 ## On a cloud
 
 A measured run needs a cluster: the engine, the offer and the reader each get
