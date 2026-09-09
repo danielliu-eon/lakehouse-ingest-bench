@@ -95,29 +95,43 @@ IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 BOOTSTRAP="$(jq -r .bootstrap "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
 
+# The copied spec, because which engine a run started is what says how to stop
+# it — and the run directory is the record of what was asked for, so it is read
+# rather than guessed from the documents that happen to be beside it.
+SPEC="$RUN_DIR/spec.yaml"
+[[ -f $SPEC ]] || die "no spec at $SPEC, so nothing here knows which engine $RUN_ID started"
+ENGINE="$(yq '.engine' "$SPEC")"
+[[ -n $ENGINE && $ENGINE != null ]] || die "$SPEC sets no engine, so nothing here knows what to stop"
+
 # ---------------------------------------------------------------------------
 # 1. The engine
 # ---------------------------------------------------------------------------
 
-# Provenance before the deletion that ends the chance of reading it. `stage.sh`
-# records this when the fleet reaches RUNNING and this is the fallback to that:
-# a run staged by a driver that failed after the engine started still gets the
-# digest of the image that ran. The wait is nought seconds, because the answer
-# is either already reported or gone — nothing here starts a pod.
-if [[ -f $RUN_DIR/flinkdeployment.yaml && ! -f $RUN_DIR/$ENGINE_IMAGE_FILE ]]; then
-	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "app=$(k8s_object_name "$RUN_ID"),component=jobmanager" 0
-fi
+if [[ $ENGINE == external ]]; then
+	log "an external run's engine is yours, so there is none of ours to delete"
+else
+	k8s_read_engine "$ENGINE" "$(k8s_object_name "$RUN_ID")"
 
-# The deployment before the ConfigMap it mounts: a JobManager that restarted
-# between the two would find no volume and report that instead of stopping.
-# An external run rendered neither document, and there is then nothing here of
-# ours to delete.
-for document in flinkdeployment.yaml flink-job-configmap.yaml; do
-	if [[ -f $RUN_DIR/$document ]]; then
-		log "deleting what $document declares"
-		k8s_delete_file "$RUN_DIR/$document"
+	# Provenance before the deletion that ends the chance of reading it.
+	# `stage.sh` records this when the fleet reaches its running state and this
+	# is the fallback to that: a run staged by a driver that failed after the
+	# engine started still gets the digest of the image that ran. The wait is
+	# nought seconds, because the answer is either already reported or gone —
+	# nothing here starts a pod.
+	if [[ ! -f $RUN_DIR/$ENGINE_IMAGE_FILE ]]; then
+		k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "$ENGINE_PROVENANCE_SELECTOR" 0
 	fi
-done
+
+	# The engine's own document before the ConfigMap it mounts: a pod that
+	# restarted between the two would find no volume and report that instead of
+	# stopping.
+	for document in "$ENGINE_DOCUMENT_FILE" "$ENGINE_CONFIGMAP_FILE"; do
+		if [[ -f $RUN_DIR/$document ]]; then
+			log "deleting what $document declares"
+			k8s_delete_file "$RUN_DIR/$document"
+		fi
+	done
+fi
 
 # ---------------------------------------------------------------------------
 # 2. The producer and the scorer

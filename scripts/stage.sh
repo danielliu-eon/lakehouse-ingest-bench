@@ -4,8 +4,8 @@
 # Staging runs as a Job because it creates the topic, and a managed broker is
 # reachable from inside its own network rather than from an operator's machine.
 # The Job publishes its run directory to the runs prefix; everything after that
-# — fetching the directory, applying the engine's two documents, waiting for the
-# job to run — is `kubectl` and `aws` work, and stays here.
+# — fetching the directory, applying the engine's two documents, waiting for it
+# to run — is `kubectl` and `aws` work, and stays here.
 #
 # It prints the run id, and nothing else, on stdout.
 set -euo pipefail
@@ -19,9 +19,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 # Staging resolves a corpus, reads its metadata, creates a topic and creates a
 # table. Minutes at most, but on a cold node behind an image pull.
 STAGE_WAIT_S="${STAGE_WAIT_S:-600}"
-# How long the engine's job may take to reach RUNNING. Long: the operator has
-# to schedule a JobManager and its TaskManagers, each of which pulls an image
-# of a few hundred megabytes onto a node that may not exist yet.
+# How long the engine may take to reach its running state. Long: the operator
+# has to schedule the whole fleet, each pod of which pulls an image of a few
+# hundred megabytes onto a node that may not exist yet.
 ENGINE_RUNNING_WAIT_S="${ENGINE_RUNNING_WAIT_S:-600}"
 ENGINE_POLL_S="${ENGINE_POLL_S:-10}"
 
@@ -150,50 +150,55 @@ if [[ $ENGINE == external ]]; then
 	cat "$RUN_DIR/facts.json" >&2
 	log "then: scripts/launch.sh $RUN_ID"
 else
-	# The ConfigMap first: the deployment mounts it, and a JobManager scheduled
-	# before it exists waits on a volume rather than starting.
-	log "starting the engine"
-	k8s_apply_file "$RUN_DIR/flink-job-configmap.yaml"
-	k8s_apply_file "$RUN_DIR/flinkdeployment.yaml"
+	# Every name below — the kind of object a run is, where its state sits, the
+	# Service that carries its API — comes from the engine's own module, so a
+	# third engine adds no line to this script.
+	k8s_read_engine "$ENGINE" "$RUN_OBJECT"
 
-	# The deployment is named after the run, so this also confirms that the job
-	# reaching RUNNING is the one just applied.
-	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for flinkdeployment/$RUN_OBJECT to reach RUNNING"
+	# The ConfigMap first: the engine's pods mount it, and one scheduled before
+	# it exists waits on a volume rather than starting.
+	log "starting the engine"
+	k8s_apply_file "$RUN_DIR/$ENGINE_CONFIGMAP_FILE"
+	k8s_apply_file "$RUN_DIR/$ENGINE_DOCUMENT_FILE"
+
+	# The object is named after the run, so this also confirms that what
+	# reaches the running state is what was just applied.
+	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for $ENGINE_KIND/$RUN_OBJECT to reach $ENGINE_RUNNING_STATE"
 	waited=0
 	while :; do
-		state="$(k8s_flinkdeployment_state "$RUN_OBJECT")"
-		case "$state" in
-		RUNNING)
-			log "flinkdeployment/$RUN_OBJECT is RUNNING"
+		state="$(k8s_engine_state "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_STATE_JSONPATH")"
+		if [[ $state == "$ENGINE_RUNNING_STATE" ]]; then
+			log "$ENGINE_KIND/$RUN_OBJECT is $state"
 			break
-			;;
-		FAILED | CANCELED | FINISHED)
-			k8s_deployment_tail "$RUN_OBJECT"
-			die "flinkdeployment/$RUN_OBJECT went to $state before it ran; the lines above are the jobmanager's own log"
-			;;
-		esac
+		fi
+		# Comma-delimited on both sides of the match, so a state whose name is
+		# another's prefix cannot pass for it.
+		if [[ -n $state && ",$ENGINE_FAILED_STATES," == *",$state,"* ]]; then
+			k8s_engine_tail "$ENGINE_LOG_TARGET"
+			die "$ENGINE_KIND/$RUN_OBJECT went to $state before it ran; the lines above are the engine's own log"
+		fi
 		if ((waited >= ENGINE_RUNNING_WAIT_S)); then
-			k8s_deployment_tail "$RUN_OBJECT"
-			die "flinkdeployment/$RUN_OBJECT did not reach RUNNING within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported})"
+			k8s_engine_tail "$ENGINE_LOG_TARGET"
+			die "$ENGINE_KIND/$RUN_OBJECT did not reach $ENGINE_RUNNING_STATE within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported})"
 		fi
 		sleep "$ENGINE_POLL_S"
 		waited=$((waited + ENGINE_POLL_S))
 	done
 
-	# RUNNING says the operator started something, not that what it started is
-	# the run this spec asked for: Flink drops a configuration key it does not
-	# know, a connector ignores a hint it does not implement, and a vertex is
-	# sized by whatever configuration reached it — none of which fails a
-	# submission. So the settings a result would be attributed to are read back
-	# off the jobmanager before the run is ever offered a corpus.
+	# A running state says the operator started something, not that what it
+	# started is the run this spec asked for: an engine drops a configuration
+	# key it does not know, a connector ignores a hint it does not implement,
+	# and each half of a fleet is sized by whatever configuration reached it —
+	# none of which fails a submission. So the settings a result would be
+	# attributed to are read back off the engine before the run is ever offered
+	# a corpus.
 	#
-	# A high local port for the tunnel, so it cannot collide with a jobmanager
-	# an operator is already running on this machine.
+	# A high local port for the tunnel, so it cannot collide with an engine an
+	# operator is already running on this machine.
 	VERIFY_PORT=18081
-	# What `verify-flink` exits with having found drift, as against having been
-	# unable to read the endpoint — which is worth another look, since a tunnel
-	# and a jobmanager can both be a moment behind the state that reported the
-	# job running.
+	# What a check exits with having found drift, as against having been unable
+	# to read the endpoint — which is worth another look, since a tunnel and an
+	# engine can both be a moment behind the state that reported it running.
 	VERIFY_DRIFT_STATUS=3
 	VERIFY_TRIES=3
 	# Absolute, because `harness_local`'s checkout fallback runs from the
@@ -201,30 +206,40 @@ else
 	VERIFY_SPEC="$(cd -- "$RUN_DIR" && pwd)/spec.yaml" || die "could not resolve $RUN_DIR to check the engine against"
 	[[ -f $VERIFY_SPEC ]] ||
 		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"
+	# A reading and not an artifact, so it goes to a temporary file the trap
+	# below removes along with the tunnel.
+	VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
+		die "could not make a temporary file to read the run's pods into"
 
 	# Trapped before the tunnel is opened, so no path out of the readings below
-	# — `die` included — leaves one behind. The operator names a deployment's
-	# REST Service `<deployment>-rest`.
-	trap k8s_port_forward_stop EXIT
-	k8s_port_forward "svc/$RUN_OBJECT-rest" "$VERIFY_PORT:8081"
+	# — `die` included — leaves one behind.
+	trap 'k8s_port_forward_stop; rm -f "$VERIFY_PODS"' EXIT
+	k8s_port_forward "svc/$RUN_OBJECT$ENGINE_REST_SERVICE_SUFFIX" "$VERIFY_PORT:$ENGINE_REST_PORT"
 
-	log "checking flinkdeployment/$RUN_OBJECT against $VERIFY_SPEC"
+	log "checking $ENGINE_KIND/$RUN_OBJECT against $VERIFY_SPEC"
 	verify_tries=0
 	while :; do
+		verify_args=(--spec "$VERIFY_SPEC" --run-id "$RUN_ID" --rest "http://localhost:$VERIFY_PORT")
+		# Re-read on every try, because an executor still being scheduled is
+		# one of the things a retry is waiting for. An engine that names no
+		# selector is one whose check reads nothing off the pods.
+		if [[ -n $ENGINE_PODS_SELECTOR ]]; then
+			k8s_write_pods "$VERIFY_PODS" "$ENGINE_PODS_SELECTOR"
+			verify_args+=(--pods "$VERIFY_PODS")
+		fi
 		# On stderr: this script's stdout is the run id, and the drift lines are
 		# for the operator reading the refusal below.
 		verify_status=0
-		harness_local verify-flink --spec "$VERIFY_SPEC" --run-id "$RUN_ID" \
-			--rest "http://localhost:$VERIFY_PORT" >&2 || verify_status=$?
+		harness_local "verify-$ENGINE" "${verify_args[@]}" >&2 || verify_status=$?
 		if ((verify_status == 0)); then
 			break
 		fi
 		if ((verify_status == VERIFY_DRIFT_STATUS)); then
-			die "flinkdeployment/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the job can be read before it is torn down"
+			die "$ENGINE_KIND/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the engine can be read before it is torn down"
 		fi
 		verify_tries=$((verify_tries + 1))
 		if ((verify_tries >= VERIFY_TRIES)); then
-			die "could not read flinkdeployment/$RUN_OBJECT's REST endpoint in $VERIFY_TRIES tries (last exit $verify_status), so nothing this run measures could be attributed to the spec it was staged from"
+			die "could not read $ENGINE_KIND/$RUN_OBJECT's own endpoint in $VERIFY_TRIES tries (last exit $verify_status), so nothing this run measures could be attributed to the spec it was staged from"
 		fi
 		sleep "$ENGINE_POLL_S"
 	done
@@ -233,12 +248,7 @@ else
 	# Recorded here because this is the last moment the fleet is certain to
 	# exist: a teardown reads the same thing, but only as a fallback, and by
 	# then the pods it would read are the ones it has just deleted.
-	#
-	# `app` and `component` are the operator's own labels on the pods it creates
-	# — the FlinkDeployment this run applied declares none of its own — and the
-	# jobmanager is the one pod of the two whose image is the engine's for every
-	# submission mode.
-	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "app=$RUN_OBJECT,component=jobmanager"
+	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "$ENGINE_PROVENANCE_SELECTOR"
 fi
 
 printf 'run_id: %s\n' "$RUN_ID"

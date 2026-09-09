@@ -34,7 +34,9 @@ import pytest
 import yaml
 
 from ingest_bench.k8s.render import MARKER_RE, render_template
+from ingest_bench.specs import engines
 from ingest_bench.specs.derive import TABLE_NAMESPACE
+from ingest_bench.specs.kubernetes import NAME, for_name
 from ingest_bench.specs.model import KubernetesConfig, load_site
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -764,7 +766,8 @@ case "$*" in
 *"get job/"*) printf 'Complete\\n' ;;
 *"logs job/scorer-"*) printf 'POLL t=0.1 prefix=0/0\\n' ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
-*"get flinkdeployment/"*) printf '%s\\n' "${STUB_FLINK_STATE:-RUNNING}" ;;
+*"get pods -l"*) printf '%s\\n' "${STUB_PODS:-}" ;;
+*"jsonpath={.status."*) printf '%s\\n' "${STUB_ENGINE_STATE:-RUNNING}" ;;
 esac
 """
 
@@ -787,9 +790,22 @@ printf '%s\\n' "$*" >>"$STUB_CURL_LOG"
 """
 
 # The engine check, whose answer the driver branches on: 0 verified, 3 drift,
-# anything else an endpoint it could not read.
-VERIFY_FLINK_STUB = """
+# anything else an endpoint it could not read. One body for every engine's, since
+# what a driver does with it is the same.
+VERIFY_STUB = """
 printf '%s\\n' "$*" >>"$STUB_VERIFY_LOG"
+# The pod list too, and not only its path: the driver writes it to a temporary
+# file and removes it on the way out, so what the check was handed is only
+# readable from inside the check.
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--pods)
+		cat "$2" >>"$STUB_VERIFY_LOG"
+		shift 2
+		;;
+	*) shift ;;
+	esac
+done
 exit "${STUB_VERIFY_STATUS:-0}"
 """
 
@@ -860,14 +876,22 @@ RUN_ID = "smoke-flink-20260908T120000Z"
 RUN_OBJECT = RUN_ID.lower()
 BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
 
-# What the stage Job printed, in the shape `stage` prints it: the run id first,
-# because that is the line the driver reads.
-STAGE_JOB_LOG = f"""run_id: {RUN_ID}
-bootstrap: {BOOTSTRAP}
-topic: {RUN_ID}
-table: ingest_bench.t_smoke_flink_20260908T120000Z
-run_dir: /work/runs/{RUN_ID}
-"""
+
+def _stage_job_log(run_id: str) -> str:
+    """What the stage Job printed, in the shape `stage` prints it.
+
+    The run id first, because that is the line the driver reads.
+    """
+    return (
+        f"run_id: {run_id}\n"
+        f"bootstrap: {BOOTSTRAP}\n"
+        f"topic: {run_id}\n"
+        f"table: ingest_bench.t_{run_id.replace('-', '_')}\n"
+        f"run_dir: /work/runs/{run_id}\n"
+    )
+
+
+STAGE_JOB_LOG = _stage_job_log(RUN_ID)
 
 FACTS = {
     "run_id": RUN_ID,
@@ -914,13 +938,15 @@ def _run_driver(
     environment: dict[str, str],
     site: str | None = None,
     programs: dict[str, str] | None = None,
+    job_log: str | None = None,
 ) -> DriverRun:
     """Run one driver in its own working directory with `kubectl` and `aws` stubbed.
 
     The working directory is the operator's: `./site.yaml` and `./runs` are
     resolved against it, so nothing here writes into the checkout. ``programs``
     stubs a harness command as well, which shadows the installed one because
-    the stub directory is first on `PATH`.
+    the stub directory is first on `PATH`, and ``job_log`` is what the stage
+    Job printed — the run id a driver reads is only ever that Job's answer.
     """
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
@@ -931,8 +957,8 @@ def _run_driver(
     calls.touch()
     aws_calls = tmp_path / "aws-calls.log"
     aws_calls.touch()
-    job_log = tmp_path / "job.log"
-    job_log.write_text(STAGE_JOB_LOG)
+    job_log_file = tmp_path / "job.log"
+    job_log_file.write_text(job_log if job_log is not None else STAGE_JOB_LOG)
     stubs = _stub_bin(tmp_path / "bin", {"kubectl": KUBECTL_STUB, "aws": AWS_STUB, **(programs or {})})
 
     result = subprocess.run(
@@ -950,7 +976,7 @@ def _run_driver(
             "STUB_LOG": str(calls),
             "STUB_AWS_LOG": str(aws_calls),
             "STUB_APPLIED_DIR": str(applied_dir),
-            "STUB_JOB_LOG": str(job_log),
+            "STUB_JOB_LOG": str(job_log_file),
             **environment,
         },
     )
@@ -997,7 +1023,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
             "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
             "STUB_VERIFY_LOG": str(verify_calls),
         },
-        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
     assert run.result.stdout.splitlines()[-1] == f"run_id: {RUN_ID}"
@@ -1079,7 +1105,7 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
             # minute to prove the same thing.
             "ENGINE_POLL_S": "0",
         },
-        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
     )
     assert run.result.returncode != 0
     assert refusal in run.result.stderr, run.result.stderr
@@ -1237,6 +1263,9 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    # The copied spec, because a teardown reads which engine a run started out
+    # of it rather than guessing from the documents beside it.
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
     (run_dir / "flink-job-configmap.yaml").write_text("# flink-job-configmap.yaml\n")
     metadata_calls = tmp_path / "table-metadata-calls.log"
@@ -1289,6 +1318,9 @@ def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    # The copied spec, because a teardown reads which engine a run started out
+    # of it rather than guessing from the documents beside it.
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
 
     run = _run_driver(
@@ -1313,6 +1345,75 @@ def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -
 
 
 @needs_shell_tools
+@pytest.mark.parametrize("engine", ["flink", "spark"])
+def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path: Path, engine: str) -> None:
+    """No engine's names are in the shell, so a third engine adds no line to it.
+
+    The kind of object a run is, where its state sits, the Service that carries
+    its API, the pods provenance is read off and whether its check is handed a
+    pod list at all: each comes from the engine's descriptor, and each is what
+    the driver would otherwise have had to hardcode per engine.
+    """
+    descriptor = engines.kubernetes_for(engine)
+    run_id = f"smoke-{engine}-20260908T120000Z"
+    run_object = run_id.lower()
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps({**FACTS, "run_id": run_id, "topic": run_id}))
+    for name in ("spec.yaml", descriptor.document_file, descriptor.configmap_file):
+        (staged / name).write_text(f"# {name}\n")
+    verify_calls = tmp_path / "verify-calls.log"
+    verify_calls.touch()
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / f"smoke-{engine}.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
+            "STUB_VERIFY_LOG": str(verify_calls),
+            "STUB_PODS": json.dumps({"items": [{"metadata": {"name": f"{run_object}-driver"}}]}),
+        },
+        programs={"curl": CURL_STUB, f"verify-{engine}": VERIFY_STUB},
+        job_log=_stage_job_log(run_id),
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert run.result.stdout.splitlines()[-1] == f"run_id: {run_id}"
+
+    # Both documents the engine's own renderer wrote, the ConfigMap first
+    # because the other one mounts it.
+    applied = [line.rsplit("/", 1)[-1] for line in run.calls.splitlines() if " apply -f ./runs/" in line]
+    assert applied == [descriptor.configmap_file, descriptor.document_file]
+
+    assert f"get {descriptor.kind}/{run_object} -o jsonpath={descriptor.state_jsonpath}" in run.calls
+    assert f"port-forward svc/{run_object}{descriptor.rest_service_suffix} 18081:{descriptor.rest_port}" in run.calls
+    assert f"get pod -l {for_name(descriptor.provenance_selector, run_object)}" in run.calls
+
+    checked = verify_calls.read_text()
+    assert f"--run-id {run_id} --rest http://localhost:18081" in checked
+    if descriptor.pods_selector:
+        assert f"get pods -l {for_name(descriptor.pods_selector, run_object)} -o json" in run.calls
+        # The document itself, echoed by the check: the driver writes it to a
+        # temporary file it removes on the way out, so a path alone would not
+        # say the pods had been read by the time the check ran.
+        assert "--pods " in checked
+        assert json.loads(checked.splitlines()[1])["items"][0]["metadata"]["name"] == f"{run_object}-driver"
+    else:
+        assert "get pods -l" not in run.calls
+        assert "--pods" not in checked
+
+
+def test_the_shell_and_the_descriptor_mark_a_run_s_name_the_same_way() -> None:
+    """The one name in the descriptor the driver has to substitute itself.
+
+    Two spellings of the marker would leave a driver addressing an object
+    called `<name>` — which the API server refuses, minutes into a staged run.
+    """
+    assert f"ENGINE_NAME_MARKER='{NAME}'" in (SCRIPTS / "_k8s.sh").read_text()
+
+
+@needs_shell_tools
 def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Path) -> None:
     """The one place a driver reads the operator's own Deployment by name.
 
@@ -1330,7 +1431,7 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
         STAGE,
         [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
         tmp_path,
-        {"STUB_STAGE_DIR": str(staged), "STUB_FLINK_STATE": "FAILED"},
+        {"STUB_STAGE_DIR": str(staged), "STUB_ENGINE_STATE": "FAILED"},
     )
     assert run.result.returncode != 0
     assert f"flinkdeployment/{RUN_OBJECT} went to FAILED" in run.result.stderr
@@ -1606,6 +1707,9 @@ def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> Non
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    # The copied spec, because a teardown reads which engine a run started out
+    # of it rather than guessing from the documents beside it.
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
 
     location = f"{TABLE_LOCATION}/metadata/00003-abc.metadata.json"
@@ -1654,7 +1758,7 @@ def test_the_engine_image_is_recorded_off_the_jobmanager_pod(tmp_path: Path) -> 
         [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
         tmp_path,
         {**_verify_environment(tmp_path), "STUB_STAGE_DIR": str(staged), "STUB_ENGINE_IMAGE": f"{image} {digest}"},
-        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
 
@@ -1683,7 +1787,7 @@ def test_a_pod_that_reports_no_digest_still_stages(tmp_path: Path) -> None:
             "STUB_ENGINE_IMAGE": f"{image} ",
             "ENGINE_IMAGE_WAIT_S": "0",
         },
-        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
     recorded = json.loads((tmp_path / "work" / "runs" / RUN_ID / "engine-image.json").read_text())

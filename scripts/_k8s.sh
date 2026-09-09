@@ -425,19 +425,37 @@ k8s_write_engine_image() {
 	fi
 }
 
-k8s_deployment_tail() {
-	log "--- last 40 lines of deploy/$1 ---"
-	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "deploy/$1" --tail=40 >&2 || true
+# k8s_engine_tail <log target> — the last of an engine's own output, on stderr.
+#
+# The target is whatever the engine's descriptor named: a Deployment for one
+# whose operator raises a fleet behind it, a pod for one whose driver is a pod.
+k8s_engine_tail() {
+	log "--- last 40 lines of $1 ---"
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "$1" --tail=40 >&2 || true
 }
 
-# The state the Flink operator reports for a run's job, empty until it reports
-# one. A missing object is the normal first answer — the operator creates it
-# seconds after the apply — so a failed read is empty rather than fatal, and it
-# is the caller's timeout that turns a state which never arrives into a refusal
-# naming the object.
-k8s_flinkdeployment_state() {
-	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "flinkdeployment/$1" \
-		-o 'jsonpath={.status.jobStatus.state}' 2>/dev/null || true
+# k8s_engine_state <kind> <name> <jsonpath> — the state an operator reports for
+# a run, empty until it reports one.
+#
+# A missing object is the normal first answer — the operator creates it seconds
+# after the apply — so a failed read is empty rather than fatal, and it is the
+# caller's timeout that turns a state which never arrives into a refusal naming
+# the object.
+k8s_engine_state() {
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "$1/$2" \
+		-o "jsonpath=$3" 2>/dev/null || true
+}
+
+# k8s_write_pods <path> <label selector> — the run's pods as one JSON document.
+#
+# For an engine whose check reads the fleet's shape rather than only what the
+# engine reports about itself: how many pods there are, and whether they hold
+# their cores or borrow them, is visible nowhere else. A file and not a pipe,
+# because the check is a separate process whose refusal names where the
+# document came from.
+k8s_write_pods() {
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pods -l "$2" -o json >"$1" ||
+		die "could not read the pods matching '$2' in $SITE_NAMESPACE; try: kubectl get pods -l '$2'"
 }
 
 # ---------------------------------------------------------------------------
@@ -500,6 +518,67 @@ k8s_port_forward_stop() {
 # are addressed by the run id itself and are not lowercased anywhere.
 k8s_object_name() {
 	printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Where a run's object name goes in the descriptor strings that carry one — the
+# same marker `specs/kubernetes.NAME` declares, spelled in both languages
+# because the driver is what holds the name. A test holds the two together.
+ENGINE_NAME_MARKER='<name>'
+
+# How the engine of a run is addressed on this cluster, in the globals below,
+# with the run's object name already substituted into the ones that carry it.
+#
+# One call rather than one per field: the harness command is a Python process,
+# and a driver that started eleven of them would spend seconds asking for
+# constants. The engine's own module is the only statement of these names — a
+# driver that restated one would drift from the renderer the first time it
+# changed, which is also what keeps a third engine out of this file.
+#
+# k8s_read_engine <engine> <run object name>
+k8s_read_engine() {
+	local engine=$1 name=$2 fields="" key="" value="" required=""
+	fields="$(harness_local engine-k8s "$engine")" ||
+		die "could not read how a '$engine' run is addressed on a cluster; the line above says why"
+	ENGINE_KIND=""
+	ENGINE_RUNNING_STATE=""
+	ENGINE_FAILED_STATES=""
+	ENGINE_STATE_JSONPATH=""
+	ENGINE_REST_SERVICE_SUFFIX=""
+	ENGINE_REST_PORT=""
+	ENGINE_LOG_TARGET=""
+	ENGINE_PROVENANCE_SELECTOR=""
+	ENGINE_PODS_SELECTOR=""
+	ENGINE_DOCUMENT_FILE=""
+	ENGINE_CONFIGMAP_FILE=""
+	# `IFS='='` splits on the first `=` only, which a selector holding one of
+	# its own needs. A key this does not know is a refusal rather than a field
+	# quietly dropped: the driver would go on to address the cluster with a
+	# name nobody read.
+	while IFS='=' read -r key value; do
+		[[ -n $key ]] || continue
+		value="${value//$ENGINE_NAME_MARKER/$name}"
+		case "$key" in
+		kind) ENGINE_KIND="$value" ;;
+		running_state) ENGINE_RUNNING_STATE="$value" ;;
+		failed_states) ENGINE_FAILED_STATES="$value" ;;
+		state_jsonpath) ENGINE_STATE_JSONPATH="$value" ;;
+		rest_service_suffix) ENGINE_REST_SERVICE_SUFFIX="$value" ;;
+		rest_port) ENGINE_REST_PORT="$value" ;;
+		log_target) ENGINE_LOG_TARGET="$value" ;;
+		provenance_selector) ENGINE_PROVENANCE_SELECTOR="$value" ;;
+		pods_selector) ENGINE_PODS_SELECTOR="$value" ;;
+		document_file) ENGINE_DOCUMENT_FILE="$value" ;;
+		configmap_file) ENGINE_CONFIGMAP_FILE="$value" ;;
+		*) die "engine-k8s $engine names a field '$key' that no driver here reads; update scripts/_k8s.sh" ;;
+		esac
+	done <<<"$fields"
+	# Every field but the pods selector, which is empty for an engine whose
+	# check reads nothing off the pods.
+	for required in ENGINE_KIND ENGINE_RUNNING_STATE ENGINE_FAILED_STATES ENGINE_STATE_JSONPATH \
+		ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR \
+		ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
+		[[ -n ${!required} ]] || die "engine-k8s $engine printed no ${required#ENGINE_}, so this run cannot be addressed"
+	done
 }
 
 # The two Jobs `launch.sh` creates and `teardown.sh` deletes, named in one place
