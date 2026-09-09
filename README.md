@@ -12,12 +12,6 @@ Status: phase 1 — local end to end. See `scripts/smoke.sh`.
 You need Docker with Compose v2, plus `jq`, `yq` (mikefarah v4) and `curl` on
 the host. Give Docker 16 GB of RAM.
 
-On **Apple Silicon**, expect the smoke below to take appreciably longer than
-the ten minutes it claims: the Flink image is `linux/amd64` because PyFlink
-publishes no aarch64 wheel, so the engine runs under emulation. That is also why the smoke's spec asks for two TaskManagers
-rather than one. Everything else in the stack is native. A multi-arch image,
-built on a Java SQL runner in place of PyFlink, is a planned follow-up.
-
 ```bash
 git clone <this repository> && cd lakehouse-ingest-bench
 uv sync                                 # only for the tests and the tools outside a container

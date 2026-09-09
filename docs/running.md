@@ -89,11 +89,11 @@ that builds, what it costs and how to remove it; this section is the order the
 drivers run in.
 
 **The cluster is yours.** Neither deploy script creates, deletes or reconfigures
-it, and it needs at least one **amd64** node: PyFlink publishes no aarch64 wheel
-in any release, so the Flink image is amd64-only, the preflight refuses a
-cluster without such a node, and `push-images.sh` builds `linux/amd64` unless
-told otherwise. The Spark image is multi-arch, so a Spark-only campaign is not
-bound by that. If you have no cluster,
+it. A **Flink** run needs at least one **amd64** node: PyFlink publishes no
+aarch64 wheel in any release, so the Flink image is amd64-only, and
+`setup.sh`'s preflight refuses a cluster without such a node because it cannot
+know which engine you will run. The harness and Spark images are multi-arch,
+so a Spark-only campaign runs on either architecture. If you have no cluster,
 `deploy/aws/eksctl-cluster.example.yaml` makes a minimal one — see the last
 section of that README.
 
