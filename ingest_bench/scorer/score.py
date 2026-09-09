@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO, cast
 
+from ingest_bench import uri
 from ingest_bench.clock import Clock
 from ingest_bench.corpus import metadata
 from ingest_bench.producer import publish_log
@@ -85,6 +87,7 @@ class ScoreArgs:
     speed: float = 1.0
     behind_max_ms: int = 5000
     expected_publish_shards: int = 1
+    upload_prefix: str | None = None
 
 
 @dataclass
@@ -183,6 +186,29 @@ def _write_json(path: Path, document: dict[str, object]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _mirror(args: ScoreArgs, names: Iterable[str]) -> None:
+    """Copy the named artifacts to the upload prefix, if there is one.
+
+    Called after each file is written locally rather than instead of writing
+    it: the local copy is what the loop appends to and what a mounted volume
+    keeps, and the prefix is how another pod — the gate, or an operator — reads
+    a run it is not sharing a filesystem with.
+    """
+    if args.upload_prefix is None:
+        return
+    for name in names:
+        uri.write_bytes(uri.join(args.upload_prefix, name), (args.out_dir / name).read_bytes())
+
+
+def _mirror_everything(args: ScoreArgs) -> None:
+    """Mirror every artifact the run produced, however the run ended.
+
+    A failed scorer publishes its artifacts too. The summary it leaves says the
+    reader is gone, and that is precisely what a driver has to be able to read.
+    """
+    _mirror(args, sorted(path.name for path in args.out_dir.iterdir() if path.is_file()))
 
 
 def _as_int(value: object) -> int:
@@ -418,6 +444,9 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     state.samples.append(sample)
     _append_line(state.args.out_dir / KEEPUP_SAMPLES_FILE, cast(dict[str, object], asdict(sample)))
     _write_summary(state)
+    # Only these two, and every poll: they are what `gate` judges a run in
+    # flight on, and the rest of the artifacts exist only once it has ended.
+    _mirror(state.args, (KEEPUP_SAMPLES_FILE, SUMMARY_FILE))
     print(
         f"POLL t={(at_ms - state.args.epoch_ms) / 1000:.1f} prefix={state.tally.prefix()}/{state.last_batch()} "
         f"committed={sample.committed_rows} offered={sample.offered_rows} backlog={sample.backlog_rows} "
@@ -512,3 +541,9 @@ def run(args: ScoreArgs, clock: Clock, log: TextIO) -> int:
         _write_summary(state)
         print(f"SCORER_FAILED error={type(error).__name__}: {error}", file=log, flush=True)
         raise
+    finally:
+        # Both endings, and a failure that is about to be re-raised: a run whose
+        # artifacts never left the pod is a run nobody can read. A failure here
+        # is left to propagate — an upload that did not happen is the one thing
+        # a caller of this must not be told went fine.
+        _mirror_everything(args)

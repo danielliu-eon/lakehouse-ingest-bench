@@ -361,6 +361,8 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                 "4",
                 "--warmup-s",
                 "60",
+                "--upload-prefix",
+                "s3://bench/runs/events/scores",
             ]
         )
         == 0
@@ -372,6 +374,7 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert args.catalog_props == {"type": "sql", "uri": "sqlite:///cat.db"}
     assert args.expected_publish_shards == 4 and args.warmup_s == 60
     assert args.out_dir == tmp_path / "scores" and args.freshness_bound_s == 180.0
+    assert args.upload_prefix == "s3://bench/runs/events/scores"
 
 
 def test_shortened_replay_is_scored_on_what_was_offered(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
@@ -499,3 +502,87 @@ def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
     assert summary["run_valid"] is False and summary["last_batch"] == 3 and summary["prefix"] == 2
     exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
     assert exact["scored_batches"] == 4 and exact["loss_rows"] == records[3].rows
+
+
+def test_the_upload_prefix_mirrors_the_artifacts_the_gate_reads(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    """Both files the gate reads are mirrored every poll, and everything at exit.
+
+    The gate runs beside the scorer rather than inside it, so on a cluster it
+    reads these two through the object store — which means a summary written
+    only locally is a run nothing can judge until it ends.
+    """
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(props, "bench.mirror", corpus, create.parse_partition("unpartitioned"), {})
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _finished_producer(logs, records, epoch)
+    for record in records:
+        table.append(_rows_of(record, corpus))
+    out_dir = tmp_path / "out"
+    mirror = tmp_path / "mirror"
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.mirror",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=out_dir,
+        poll_interval_s=1.0,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+        upload_prefix=f"file://{mirror}",
+    )
+    clock = StepClock(now_ms())
+    log = io.StringIO()
+
+    state = score._load_inputs(args, clock, log)
+    assert score._poll_once(state, clock, log) is True
+    assert {path.name for path in mirror.iterdir()} == {score.SUMMARY_FILE, score.KEEPUP_SAMPLES_FILE}
+
+    assert score.run(args, StepClock(now_ms()), log) == 0
+    assert {path.name for path in mirror.iterdir()} == {path.name for path in out_dir.iterdir()}
+    assert json.loads((mirror / score.SUMMARY_FILE).read_text())["run_valid"] is True
+
+
+def test_a_failed_scorer_still_publishes_what_it_had(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    """The summary that says the reader is gone is the one a driver has to read.
+
+    A scorer whose catalog stopped answering is the case the mirror exists for:
+    without it a driver polling the prefix would keep reading the last summary
+    the scorer managed to upload, which said the run was still going.
+    """
+    props = _props(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    out_dir = tmp_path / "out"
+    mirror = tmp_path / "mirror"
+
+    def unreachable(catalog_props: dict[str, str], table: str) -> Table:
+        raise RuntimeError("the catalog stopped answering")
+
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.gone",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=now_ms(),
+        out_dir=out_dir,
+        poll_interval_s=1.0,
+        idle_stop_s=30.0,
+        upload_prefix=f"file://{mirror}",
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        # The loop reaches it through this module object, so this is the
+        # function it will call.
+        patch.setattr(score, "load_table", unreachable)
+        with pytest.raises(RuntimeError, match="stopped answering"):
+            score.run(args, StepClock(now_ms()), io.StringIO())
+
+    assert {path.name for path in mirror.iterdir()} == {path.name for path in out_dir.iterdir()}
+    summary = json.loads((mirror / score.SUMMARY_FILE).read_text())
+    assert summary["aborted"] is True and summary["reason"] == "scorer_failed: RuntimeError"

@@ -59,6 +59,12 @@ def build_score_parser() -> argparse.ArgumentParser:
         help="the run's time origin, the same one every producer shard was given",
     )
     parser.add_argument("--out", required=True, metavar="DIR", help="the directory the artifacts are written to")
+    parser.add_argument(
+        "--upload-prefix",
+        metavar="URI",
+        help="copy the artifacts under this prefix as they are written, for a reader that does not share this "
+        "process's filesystem",
+    )
     parser.add_argument("--poll-interval-s", type=float, default=5.0, help="how often the table is read")
     parser.add_argument(
         "--idle-stop-s",
@@ -145,6 +151,7 @@ def score(argv: Sequence[str] | None = None) -> int:
             speed=float(args.speed),
             behind_max_ms=int(args.behind_max_ms),
             expected_publish_shards=int(args.publish_shards),
+            upload_prefix=None if args.upload_prefix is None else str(args.upload_prefix),
         ),
         SystemClock(),
         sys.stdout,
