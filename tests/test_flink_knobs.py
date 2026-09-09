@@ -372,7 +372,10 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
                         {
                             "name": "flink-main-container",
                             "volumeMounts": [{"name": "job", "mountPath": "/opt/bench/run", "readOnly": True}],
-                            "env": [{"name": "AWS_REGION", "value": "eu-west-1"}],
+                            "env": [
+                                {"name": "AWS_REGION", "value": "eu-west-1"},
+                                {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"},
+                            ],
                         }
                     ],
                 },
@@ -384,8 +387,9 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
 def test_the_amd64_pin_wins_and_a_cluster_off_aws_names_no_region(meta: metadata.CorpusMetadata) -> None:
     """PyFlink has no aarch64 wheel, so the pin is not a site's to override.
 
-    `AWS_REGION` is the other half: an SDK reads it when nothing else names a
-    region, and a cluster on another cloud has none to name.
+    The region is the other half: an SDK reads it when nothing else names one,
+    and a cluster on another cloud has none to name — so a pod there carries
+    neither of the two names it would otherwise be rendered under.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     cluster = replace(_cluster(), aws_region=None, node_selector={"kubernetes.io/arch": "arm64"}, tolerations=[])

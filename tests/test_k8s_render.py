@@ -33,7 +33,7 @@ SAMPLE = {
     "SERVICE_ACCOUNT": "an-account",
     "IMAGE": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/lakehouse-ingest-bench/harness:abc1234",
     "COMMAND": "gen-corpus --preset smoke --out s3://a-bucket/corpus/shards/$JOB_COMPLETION_INDEX --shard-count 4",
-    "ENV": '[{"name": "AWS_REGION", "value": "eu-west-1"}]',
+    "ENV": '[{"name": "AWS_REGION", "value": "eu-west-1"}, {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"}]',
     "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}',
     "TOLERATIONS": '[{"key": "a-taint", "operator": "Exists", "effect": "NoSchedule"}]',
     "COUNT": "4",
@@ -186,7 +186,10 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
     # The image's entrypoint is `/bin/sh -c`, so the whole command line is one
     # argument and the shell it names expands `$JOB_COMPLETION_INDEX`.
     assert container["args"] == [SAMPLE["COMMAND"]]
-    assert container["env"] == [{"name": "AWS_REGION", "value": "eu-west-1"}]
+    assert container["env"] == [
+        {"name": "AWS_REGION", "value": "eu-west-1"},
+        {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"},
+    ]
     requests = _mapping(_mapping(container["resources"])["requests"])
     assert requests["cpu"] == expectation.cpu and requests["memory"] == expectation.memory
 

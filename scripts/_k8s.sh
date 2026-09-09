@@ -109,15 +109,21 @@ site_flags() {
 }
 
 # The env list every Job gets, which is the region or nothing. A cluster off AWS
-# names none, and an `AWS_REGION` rendered empty reaches an SDK as a region it
-# cannot resolve — a signing failure far from the file that caused it.
+# names none, and a region rendered empty reaches an SDK as one it cannot
+# resolve — a signing failure far from the file that caused it.
+#
+# Under both names, because the SDKs disagree about which one is a client's
+# region. Java's reads `AWS_REGION`; botocore reads `AWS_DEFAULT_REGION` alone
+# and consults `AWS_REGION` only as a hint for its smart-defaults mode, so a
+# pod given only that name has a client with no region at all — which resolves
+# S3's global endpoint and is refused for a bucket that lives anywhere else.
 site_env_json() {
 	local region
 	region="$(site_value '.kubernetes.aws_region')"
 	if [[ -z $region ]]; then
 		printf '[]'
 	else
-		printf '[{"name":"AWS_REGION","value":"%s"}]' "$region"
+		printf '[{"name":"AWS_REGION","value":"%s"},{"name":"AWS_DEFAULT_REGION","value":"%s"}]' "$region" "$region"
 	fi
 }
 

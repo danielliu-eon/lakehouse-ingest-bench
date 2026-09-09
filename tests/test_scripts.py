@@ -51,6 +51,10 @@ AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
 
+# The two names a pod's region is rendered under, in the order a driver writes
+# them. Java's SDK reads the first, botocore only the second.
+REGION_ENV_NAMES = ("AWS_REGION", "AWS_DEFAULT_REGION")
+
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 
 # The drivers read the site with `yq` and a run's facts with `jq`, and neither
@@ -552,6 +556,38 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
         node_selector={},
         tolerations=[],
     )
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("region", ["eu-west-1", None])
+def test_the_job_env_names_the_region_under_both_names_an_sdk_reads(tmp_path: Path, region: str | None) -> None:
+    """A pod's region has to reach botocore as well as Java's SDK.
+
+    Java's reads `AWS_REGION`; botocore reads `AWS_DEFAULT_REGION` alone and
+    treats `AWS_REGION` as a hint for something else, so a pod given only that
+    name has an S3 client with no region — which resolves the global endpoint
+    and is refused for a bucket that lives anywhere else. A cluster off AWS
+    names no region and gets neither variable rather than an empty one.
+    """
+    site = _filled_site()
+    if region is None:
+        site = "".join(line for line in site.splitlines(keepends=True) if "aws_region" not in line)
+    site_file = tmp_path / "site.yaml"
+    site_file.write_text(site)
+    program = "\n".join(
+        [
+            "set -euo pipefail",
+            "PREREQ_DOC=deploy/aws/README.md",
+            "source scripts/_lib.sh",
+            f"SITE_FILE={site_file}",
+            "source scripts/_k8s.sh",
+            "site_env_json",
+        ]
+    )
+    out = subprocess.run(["bash", "-c", program], cwd=REPO_ROOT, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    expected = [] if region is None else [{"name": name, "value": region} for name in REGION_ENV_NAMES]
+    assert json.loads(out.stdout) == expected
 
 
 def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:

@@ -577,7 +577,14 @@ def render_flinkdeployment(
         # What an AWS SDK reads when nothing else names a region for it, which
         # is the case for both halves of an MSK IAM connection: the token
         # signer in the Kafka client, and S3 under the table's FileIO.
-        container["env"] = [{"name": "AWS_REGION", "value": cluster.aws_region}]
+        #
+        # Both names, because the SDKs disagree about which one carries it.
+        # This container's Java client reads `AWS_REGION`; botocore, which any
+        # Python tooling beside it goes through, reads `AWS_DEFAULT_REGION`
+        # alone and is left with no region at all when only the other is set.
+        container["env"] = [
+            {"name": name, "value": cluster.aws_region} for name in ("AWS_REGION", "AWS_DEFAULT_REGION")
+        ]
     pod_spec: dict[str, object] = {
         "nodeSelector": {**cluster.node_selector, **_ARCH_PIN},
         "tolerations": cluster.tolerations,
