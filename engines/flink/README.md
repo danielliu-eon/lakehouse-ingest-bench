@@ -12,61 +12,37 @@ or serializer is written here — so a Flink result is Flink's.
 | Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro-confluent-registry:1.20.1` — one shaded jar registering both the `avro` and the `avro-confluent` format |
 | Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
-| Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
+| Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — the shaded client pair, not `hadoop-common` and siblings |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
 | PyFlink | `apache-flink==1.20.1`, `pyyaml==6.0.2` |
 
 The image is amd64 because **PyFlink publishes no Linux aarch64 wheel in any
-release**; on arm64 the stack runs emulated, which checks a run end to end but
-does not measure one. `job.sql` carries whatever `site.catalog.props` and
-`site.kafka.security` hold, so a credential written there literally is in the
-file: it is a config file, not the publishable record — `facts.json` is that.
-Write the credential as `${env:NAME}` and the file names it instead, leaving the
-submitter to read it out of the container's environment.
+release**; on arm64 the stack runs emulated. Two jar choices are load-bearing,
+and the `Dockerfile` carries the reasoning where a maintainer would change them:
+Hadoop arrives shaded because Flink installs its `HadoopModule` the moment it
+finds Hadoop on the classpath, and the Kafka client is deliberately **unshaded**
+because Amazon MSK's `IAMClientCallbackHandler` implements the unshaded
+`AuthenticateCallbackHandler`, which a shaded client can never load.
 
-On **Apple Silicon** that emulation is why the smoke takes appreciably longer
-than its native equivalent, and why `runs/smoke-flink.yaml` asks for two
-TaskManagers to absorb a 5 MB/s corpus. Replacing `job.py` with a Java SQL
-runner would retire the platform pin and make this image multi-arch; that is a
-planned follow-up, and `script.py` is stdlib-only so the submitter can be
-swapped without touching the rest.
-
-Hadoop arrives as the **shaded client pair** and not as `hadoop-common` plus
-siblings. Flink installs its `HadoopModule` the moment it finds Hadoop on the
-classpath, and installing it initializes `UserGroupInformation` — which needs
-commons-configuration2, guava and re2j behind it. `hadoop-client-api` and
-`hadoop-client-runtime` are one shading run over exactly that closure, so the
-transitive set never has to be enumerated jar by jar.
-
-The Kafka client is the **plain connector plus an unshaded `kafka-clients`**
-and not the SQL uber jar, which is the same connector with
-`org.apache.kafka` relocated to `org.apache.flink.kafka.shaded.org.apache.kafka`
-and no unshaded copy left. Amazon MSK's `IAMClientCallbackHandler` implements
-the unshaded `AuthenticateCallbackHandler`, so a shaded client can never load
-it — the two class names never meet. Unshading costs the codec jars, which the
-uber jar bundled: the producer picks the compression and the consumer has to
-decompress it.
-
-The `flink` profile starts the cluster; `flink-job` submits one run detached,
-mounting `$RUN_DIR` — set it to the staged run directory, or the mount fails.
+`job.sql` carries whatever `site.catalog.props` and `site.kafka.security` hold,
+so a credential written there literally is in the file; write `${env:NAME}` and
+the submitter resolves it from the container's environment instead
+([`../../docs/pitfalls.md`](../../docs/pitfalls.md)). Locally, the `flink`
+profile starts the cluster and `flink-job` submits one run detached, mounting
+`$RUN_DIR` — which must be the staged run directory or the mount fails.
 
 ## On Kubernetes
 
 A site that declares a `kubernetes` block gets two more rendered files, and
-`render` then needs the tag of the image that was pushed:
+`render` then needs the tag of the image that was pushed: `flinkdeployment.yaml`,
+one `FlinkDeployment` per run named by the run id, and
+`flink-job-configmap.yaml`, which mounts `job.sql` and `flink-conf.yaml` at
+`/opt/bench/run`.
 
-| File | What it is |
-|---|---|
-| `flinkdeployment.yaml` | one `FlinkDeployment` per run, named by the run id |
-| `flink-job-configmap.yaml` | `job.sql` and `flink-conf.yaml`, mounted at `/opt/bench/run` |
-
-`mode: standalone`, so the operator starts the `taskmanagers` the knobs ask
-for; native mode would size the fleet from the job's parallelism instead and
-leave that knob unhonoured. The pod is pinned to `kubernetes.io/arch: amd64`
-over whatever the site's `node_selector` says, because the image has no
-aarch64 PyFlink to run. `AWS_REGION` is set on the container only where the
-site names an `aws_region`, and it is what the MSK token signer and S3 read
-when nothing else names a region for them.
+`mode: standalone`, so the operator starts the `taskmanagers` the knobs ask for;
+native mode would size the fleet from the job's parallelism and leave that knob
+unhonoured. The pod pins `kubernetes.io/arch: amd64` over whatever the site's
+`node_selector` says, since the image has no aarch64 PyFlink to run.
 
 ## Knobs
 
@@ -84,12 +60,12 @@ when nothing else names a region for them.
 | `source_parallelism` | `1` | Kafka readers; must be `<=` topic partitions |
 | `max_parallelism` | `4 * taskmanagers * slots` | `pipeline.max-parallelism` |
 | `distribution_mode` | required | `none` / `hash` / `range`, as a sink hint |
-| `machine_type` | unset | cost column and phase-2 placement |
+| `machine_type` | unset | cost column and placement |
 | `extra_flink_conf` | `{}` | applied last, so it overrides anything above |
 
 `execution.checkpointing.mode` is always `EXACTLY_ONCE`: it is the promise
 duplication is scored against, so it is not a knob. `tm_cpu`, `jm_cpu` and
-`machine_type` are carried, not consumed — `flink.env` sizes the containers.
+`machine_type` are carried, not consumed.
 
 ## Source parallelism: the path taken
 
@@ -97,34 +73,23 @@ duplication is scored against, so it is not a knob. `tm_cpu`, `jm_cpu` and
 (verified against the jar: `KafkaConnectorOptions` declares `SINK_PARALLELISM`
 and no `SCAN_PARALLELISM`; FLINK-33262 is not in this release), and an
 unsupported `WITH` key fails validation. So the fallback is taken:
+`parallelism.default` is `source_parallelism`, which the readers inherit, and
+the sink carries `'write-parallelism' = taskmanagers * slots` — emitted only
+when it differs from the default — so the writers use the whole fleet. The hint
+reaches the table through `table.dynamic-table-options.enabled`, `true` by
+default in 1.20.1 (verified in `TableConfigOptions`).
 
-- `parallelism.default` = `source_parallelism`, which the readers inherit.
-- The sink carries `'write-parallelism' = taskmanagers * slots`, emitted only
-  when it differs from the default, so the writers use the whole fleet.
-
-The hint reaches the table through `table.dynamic-table-options.enabled`,
-`true` by default in 1.20.1 (verified in `TableConfigOptions`).
-`flink-conf.yaml`'s cluster-shaped keys are informational on a job config; the
-stack applies them from `flink.env`.
-
-`scripts/smoke.sh` confirms the rest on a live job. On `runs/smoke-flink.yaml`
-— 2 taskmanagers, 4 slots, `source_parallelism: 4` — the insert renders
-`'write-parallelism' = '8'` and the graph comes back with
-`Source: kafka_source -> ConstraintEnforcer` at 4, `IcebergStreamWriter` at 8
-and `IcebergFilesCommitter -> IcebergSink` at 1, so the hint does apply. A
-writer sitting at the reader count on such a fleet is how one that did not
-would look. The committer is a singleton by construction — the sink serialises
-commits whatever the writers do. `GET /jobs/<id>/checkpoints/config` reports
-`interval 10000`, `min_pause 2000`, `mode exactly_once`, matching the knobs.
-
-A fleet whose slots equal `source_parallelism` emits no hint at all, because
-the two numbers coincide and there is nothing to say.
+That the hint applies is not assumed: `verify.py` reads the live graph's three
+parallelisms on every run, and a writer sitting at the reader count is how a
+dropped hint would look. The committer is a singleton by construction — the sink
+serialises commits whatever the writers do. A fleet whose slots equal
+`source_parallelism` emits no hint at all, the two numbers coinciding.
 
 ## What staging verifies
 
-`verify.py` reads those documents back and refuses the run on any line it
-prints — `stage.sh` through a port-forward to `svc/<run>-rest`, `smoke.sh`
-over the stack's network. Exit 3 is drift; 2 is unread, retried three times:
+`verify.py` reads the running job back and refuses the run on any line it
+prints — `stage.sh` through a port-forward, `smoke.sh` over the stack's network.
+Exit 3 is drift; 2 is unread, retried three times:
 
 - the job named by the run id is RUNNING, on its live attempt;
 - `interval` and `min_pause` match the knobs in ms, or an
@@ -135,34 +100,24 @@ over the stack's network. Exit 3 is drift; 2 is unread, retried three times:
 
 ## Sizing
 
-Two figures worth carrying into a real spec, both measured on the local stack
-against the `smoke` corpus's 5 MB/s, with the engine image emulated on arm64:
+Slots, not memory, are the dial for freshness on this shape of workload:
+checkpoint state is a few kilobytes, and what a checkpoint spends its seconds on
+is writers flushing Parquet. On the smoke corpus's 5 MB/s, four slots absorb
+about three quarters of the offered rate — draining every row exactly and still
+missing a 60 s p95 bound — which is why `runs/smoke-flink.yaml` asks for eight.
+Its recorded run is in
+[`../../docs/examples/smoke-flink/`](../../docs/examples/smoke-flink/): 96.9%
+absorbed, p95 17.6 s, drain 4.87 s. Both figures come from the local stack with
+the engine image emulated, so neither is a result.
 
-| Fleet | Result |
-|---|---|
-| 1 taskmanager, 4 slots | absorbs ~77% of the offered rate. Drains every row exactly, freshness p95 ~95 s against a 60 s bound |
-| 2 taskmanagers, 8 slots | absorbs ~98%. Freshness p95 ~15 s, drain ~10 s |
-
-Checkpoint duration is what the slots are spent on: state is a few kilobytes,
-and the 5-to-17 seconds a checkpoint takes is writers flushing Parquet. So
-slots, not memory, are the dial for freshness on this shape of workload — and a
-freshness breach with clean exactness means the fleet was too small for the
-offer, which is the thing the benchmark exists to detect.
-
-## Catalog properties
+## Catalog properties, and the wire format
 
 A run needs an Iceberg **REST** catalog; any other `type` in
-`site.catalog.props` is refused at stage time. pyiceberg's names carry through
-unchanged bar one, and `type` is translated rather than passed on:
-
-| `site.catalog.props` | Rendered |
-|---|---|
-| `type` (`rest`, or absent) | `'type' = 'iceberg'`, `'catalog-type' = 'rest'` |
-| `s3.region` | `client.region` |
-| `s3.{endpoint,access-key-id,secret-access-key,path-style-access}` | unchanged |
-| `site.warehouse` on `s3://` / `gs://` | adds the matching `'io-impl'`. The catalog's own `warehouse` is not always a location — a Glue REST endpoint takes the account id there — so the scheme is read off the site's warehouse instead |
-
-## Wire formats and the timestamp column
+`site.catalog.props` is refused at stage time. The translated keys are in
+[`../../docs/run-spec.md`](../../docs/run-spec.md); Flink renders `type` as
+`'type' = 'iceberg'` beside `'catalog-type' = 'rest'`, and takes
+`site.kafka.security` as `properties.*` verbatim bar that file's MSK IAM
+translation.
 
 A run's `kafka.value_encoding` picks the source's format, and both formats read
 the same DDL:
@@ -180,26 +135,16 @@ it is `smoke-flink.yaml` plus the encoding, and a test holds the pair to that.
 
 The corpus's `event_time` is what makes one DDL serve both. It is Avro
 `timestamp-millis`, so the column is `TIMESTAMP(3)` — and 3 is the widest
-timestamp `avro-confluent` can plan, because it converts the DDL to a reader
-schema under Flink's legacy Avro timestamp mapping and declares no option to
-disable that mapping (`avro.timestamp_mapping.legacy` belongs to the plain
-`avro` format; an unknown `avro-confluent.*` key fails validation). Its own
-`schema` option is no way round it either: `RegistryAvroFormatFactory` passes
-the DDL conversion to `Optional.orElse`, which evaluates eagerly, so the
-conversion runs even when a reader schema is stated.
+timestamp `avro-confluent` can plan: it converts the DDL to a reader schema
+under Flink's legacy Avro timestamp mapping and declares no option to disable
+that mapping (`avro.timestamp_mapping.legacy` belongs to the plain `avro`
+format, and an unknown `avro-confluent.*` key fails validation). Its own
+`schema` option is no way round it either, since `RegistryAvroFormatFactory`
+passes the DDL conversion to `Optional.orElse`, which evaluates eagerly.
 
-Under `avro` the non-legacy mapping sends `TIMESTAMP(3)` to
-`local-timestamp-millis` and under `avro-confluent` the legacy one sends it to
-`timestamp-millis`. Both annotate the same `long`, an Avro logical type is not
-on the wire, and Java Avro resolves a writer against a reader of a different
-record name by field name — so either format reads the corpus's bytes and
-commits the millisecond the producer wrote, widened into the table's
-microsecond `timestamp` column.
-
-`site.kafka.security` reaches the source as `properties.*` verbatim, with
-one translation. `sasl.mechanism: OAUTHBEARER` beside the harness's own
-`aws.region` is its MSK IAM signal, and the Java client spells that
-authentication `AWS_MSK_IAM` with the `IAMLoginModule` and its callback
-handler — so those four properties are rendered and the pseudo-key is not.
-Every other key still passes through. Neither form carries a credential:
-the module signs a token from whatever the pod's own identity is.
+The two formats then map that column to different logical types —
+`local-timestamp-millis` under `avro`, `timestamp-millis` under
+`avro-confluent` — and it makes no difference: both annotate the same `long`, an
+Avro logical type is not on the wire, and Java Avro resolves a writer against a
+reader of a different record name by field name. So either format commits the
+millisecond the producer wrote, widened into the table's microsecond `timestamp`.
