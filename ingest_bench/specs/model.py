@@ -19,7 +19,7 @@ import yaml
 from ingest_bench.specs import engines
 
 # A run's name reaches a Kafka topic, an Iceberg table name and a Kubernetes
-# namespace, so it is restricted to what all three accept.
+# object name, so it is restricted to what all three accept.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,60}$")
 
 EXTERNAL = "external"
@@ -33,6 +33,19 @@ DEFAULT_GEOMETRY_OFFSETS_S: tuple[int, ...] = (600, 1200, 1800, 2700, 3600)
 
 _SPEC_KEYS = frozenset({"name", "engine", "corpus", "table", "kafka", "producer", "scoring", "external", "fleet"})
 _SITE_KEYS = frozenset({"corpus_root", "runs_root", "warehouse", "kafka", "catalog", "kubernetes", "pricing"})
+_KUBERNETES_KEYS = frozenset(
+    {
+        "context",
+        "namespace",
+        "harness_service_account",
+        "flink_service_account",
+        "service_account_annotations",
+        "registry",
+        "aws_region",
+        "node_selector",
+        "tolerations",
+    }
+)
 
 _PLACEHOLDER = "YOUR_"
 
@@ -78,6 +91,12 @@ def _as_float(value: object, where: str) -> float:
 
 def _as_string_map(value: object, where: str) -> dict[str, str]:
     return {key: _as_str(entry, f"{where}.{key}") for key, entry in _as_mapping(value, where).items()}
+
+
+def _as_string_maps(value: object, where: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list of mappings, got {value!r}")
+    return [_as_string_map(entry, f"{where}[{index}]") for index, entry in enumerate(cast(list[object], value))]
 
 
 def _refuse_unknown(block: dict[str, object], allowed: frozenset[str], where: str) -> None:
@@ -299,7 +318,8 @@ def load_run_spec(path: Path) -> RunSpec:
     name = _as_str(_required(raw, "name", "spec"), "spec.name")
     if NAME_RE.match(name) is None:
         raise ValueError(
-            f"spec.name names a topic, a table and a namespace, so it must match {NAME_RE.pattern}; got {name!r}"
+            f"spec.name names a topic, a table and a Kubernetes object, so it must match {NAME_RE.pattern}; "
+            f"got {name!r}"
         )
     corpus = _as_str(_required(raw, "corpus", "spec"), "spec.corpus")
     kafka = _kafka_spec(raw)
@@ -336,6 +356,27 @@ def load_run_spec(path: Path) -> RunSpec:
 
 
 @dataclass(frozen=True)
+class KubernetesConfig:
+    """The cluster a run's workloads are submitted to, and how they are placed on it.
+
+    One namespace and one pair of service accounts per site, not per run: a
+    cloud grants an identity to a (namespace, service account) pair, and it is
+    granted once by whoever stood the cluster up — so a run that invented its
+    own namespace would have no credentials in it.
+    """
+
+    context: str
+    namespace: str
+    harness_service_account: str
+    flink_service_account: str
+    service_account_annotations: dict[str, str]
+    registry: str
+    aws_region: str
+    node_selector: dict[str, str]
+    tolerations: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
 class SiteConfig:
     """Where a run's storage, broker and catalog are, and what compute costs.
 
@@ -350,7 +391,7 @@ class SiteConfig:
     kafka_bootstrap: str
     kafka_security: dict[str, str]
     catalog_props: dict[str, str]
-    kubernetes: dict[str, object]
+    kubernetes: KubernetesConfig | None
     pricing_vcpu_hour_usd: float
     pricing_gib_hour_usd: float
 
@@ -376,6 +417,39 @@ def _refuse_placeholders(value: object, where: str) -> None:
             _refuse_placeholders(entry, f"{where}[{index}]")
 
 
+def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
+    """The cluster block, or ``None`` where there is no cluster.
+
+    An empty block is that answer rather than a missing one: a local run has a
+    site config like any other, and it says so by declaring no cluster instead
+    of by leaving a reader to guess whether the key was forgotten.
+    """
+    where = "site.kubernetes"
+    block = _block(raw, "kubernetes", "site")
+    if not block:
+        return None
+    _refuse_unknown(block, _KUBERNETES_KEYS, where)
+    return KubernetesConfig(
+        context=_as_str(_required(block, "context", where), f"{where}.context"),
+        namespace=_as_str(_required(block, "namespace", where), f"{where}.namespace"),
+        harness_service_account=_as_str(
+            _required(block, "harness_service_account", where), f"{where}.harness_service_account"
+        ),
+        flink_service_account=_as_str(
+            _required(block, "flink_service_account", where), f"{where}.flink_service_account"
+        ),
+        service_account_annotations={}
+        if "service_account_annotations" not in block
+        else _as_string_map(block["service_account_annotations"], f"{where}.service_account_annotations"),
+        registry=_as_str(_required(block, "registry", where), f"{where}.registry"),
+        aws_region=_as_str(_required(block, "aws_region", where), f"{where}.aws_region"),
+        node_selector={}
+        if "node_selector" not in block
+        else _as_string_map(block["node_selector"], f"{where}.node_selector"),
+        tolerations=[] if "tolerations" not in block else _as_string_maps(block["tolerations"], f"{where}.tolerations"),
+    )
+
+
 def load_site(path: Path) -> SiteConfig:
     """The site config at ``path``, or a refusal to read it."""
     raw = _load_yaml(path, "site config")
@@ -396,7 +470,7 @@ def load_site(path: Path) -> SiteConfig:
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
         kafka_security={} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security"),
         catalog_props=_as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props"),
-        kubernetes=_block(raw, "kubernetes", "site"),
+        kubernetes=_kubernetes_config(raw),
         pricing_vcpu_hour_usd=_as_float(
             _required(pricing, "vcpu_hour_usd", "site.pricing"), "site.pricing.vcpu_hour_usd"
         ),

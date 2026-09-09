@@ -1,10 +1,10 @@
 """The names a run answers to, all derived from its spec and its stamp.
 
-A run's topic, table, run directory and namespace are one identifier in
-different alphabets. Deriving them in one function is what lets the producer,
-the engine and the scorer be handed names by different commands, minutes
-apart, and still address the same run — and what makes a leftover topic or
-table traceable to the run that created it.
+A run's topic, table and run directory are one identifier in different
+alphabets. Deriving them in one function is what lets the producer, the engine
+and the scorer be handed names by different commands, minutes apart, and still
+address the same run — and what makes a leftover topic or table traceable to
+the run that created it.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ class Derived:
     run_id: str
     topic: str
     table: str
-    namespace: str
     run_root: str
     corpus_uri: str
 
@@ -55,9 +54,6 @@ def derive(spec: RunSpec, site: SiteConfig, *, stamp: str | None = None, corpus_
         # every engine that reads it, and quoting it everywhere is worse than
         # translating it once here.
         table=f"{TABLE_NAMESPACE}.t_{run_id.replace('-', '_')}",
-        # The Kubernetes namespace a phase-2 deployment puts the engine in,
-        # which is the run id in the alphabet Kubernetes accepts.
-        namespace=f"ingest-bench-{run_id}",
         run_root=uri.join(site.runs_root, run_id),
         corpus_uri=uri.join(site.corpus_root, corpus_dir),
     )

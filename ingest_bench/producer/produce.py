@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TextIO
 
-from ingest_bench import uri
+from ingest_bench import kafka_auth, uri
 from ingest_bench.clock import Clock
 from ingest_bench.corpus import frames, metadata
 from ingest_bench.producer import pacing, publish_log
@@ -83,8 +83,9 @@ class ProduceArgs:
     behind_max_ms: int
     upload_prefix: str | None
     # librdkafka client properties from the site, with any environment
-    # indirection already resolved. Applied over the defaults below, so a site
-    # that needs authentication needs no new knob here.
+    # indirection already resolved. Applied over the defaults below and then
+    # built through `kafka_auth`, so a site that needs authentication — MSK's
+    # IAM mechanism included — needs no new knob here.
     kafka_props: dict[str, str]
 
 
@@ -187,7 +188,9 @@ def run(
             "regenerate the corpus with it or choose another key"
         )
     selected = pacing.select_batches(metadata.read_manifest(args.corpus_uri), args.shard, args.shards, args.seconds)
-    producer = producer_factory({**default_producer_config(args.bootstrap), **args.kafka_props})
+    producer = producer_factory(
+        kafka_auth.librdkafka_config({**default_producer_config(args.bootstrap), **args.kafka_props})
+    )
     records: list[publish_log.PublishRecord] = []
     offered = 0
     published = 0

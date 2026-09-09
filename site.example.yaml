@@ -12,7 +12,10 @@ catalog:
   props:                            # passed to pyiceberg and rendered into engine configs; ${env:NAME} works here too
     uri: http://YOUR_CATALOG:8181
     warehouse: s3://YOUR_BUCKET/warehouse
-kubernetes: {}                      # phase 2: context, service account, node placement
+kubernetes: {}                      # empty means no cluster, and everything runs where it is started. A
+                                    # cluster sets context, namespace, harness_service_account,
+                                    # flink_service_account, registry and aws_region, and may add
+                                    # service_account_annotations, node_selector and tolerations.
 pricing:
   vcpu_hour_usd: 0.0
   gib_hour_usd: 0.0

@@ -33,7 +33,7 @@ def _site() -> model.SiteConfig:
         "s3.path-style-access": "true",
         "s3.region": "us-east-1",
     }
-    return model.SiteConfig("s3://corpus", "s3://runs", "s3://warehouse", "kafka:9092", {}, props, {}, 0.0, 0.0)
+    return model.SiteConfig("s3://corpus", "s3://runs", "s3://warehouse", "kafka:9092", {}, props, None, 0.0, 0.0)
 
 
 def test_validate(meta: metadata.CorpusMetadata) -> None:
@@ -167,7 +167,6 @@ def test_the_external_example_is_what_the_renderer_produces(meta: metadata.Corpu
         run_id="@RUN_ID@",
         topic="@TOPIC@",
         table="@NAMESPACE@.@TABLE@",
-        namespace="@K8S_NAMESPACE@",
         run_root="@RUN_ROOT@",
         corpus_uri="@CORPUS_URI@",
     )

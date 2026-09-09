@@ -50,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="KEY=VALUE",
         help="a librdkafka client property (security.protocol=..., sasl.username=...), repeatable. Applied over "
-        "the producer's own defaults; a ${env:NAME} value is read from the environment of this process",
+        "the producer's own defaults; a ${env:NAME} value is read from the environment of this process. "
+        "aws.region is taken here too, to sign an Amazon MSK IAM token with",
     )
     return parser
 

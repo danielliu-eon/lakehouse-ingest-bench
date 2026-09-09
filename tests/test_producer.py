@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ingest_bench import uri
+from ingest_bench import kafka_auth, uri
 from ingest_bench.corpus import generate, preset
 from ingest_bench.producer import cli as producer_cli
 from ingest_bench.producer import pacing, produce, publish_log
@@ -338,3 +338,39 @@ def test_the_cli_resolves_a_kafka_prop_reference(
                 "sasl.password=${env:IB_TEST_SASL_PASSWORD}",
             ]
         )
+
+
+def test_the_region_pseudo_key_never_reaches_the_producer(
+    tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A driver may pass `aws.region` as a `--kafka-prop`, and librdkafka would refuse it."""
+
+    def signed(region: str) -> tuple[str, int]:
+        return "token", 1_700_000_000_000
+
+    monkeypatch.setattr(kafka_auth, "msk_token_provider", lambda: signed)
+    clock = FakeClock(1_700_000_000_000)
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9098",
+        topic="t",
+        epoch_ms=clock.now_ms(),
+        speed=1000.0,
+        shard=0,
+        shards=1,
+        seconds=None,
+        key_column=None,
+        publish_log_path=tmp_path / "publish_log-0.jsonl",
+        behind_max_ms=5000,
+        upload_prefix=None,
+        kafka_props={"security.protocol": "SASL_SSL", "sasl.mechanism": "OAUTHBEARER", "aws.region": "eu-west-1"},
+    )
+    configs: list[dict[str, object]] = []
+
+    def factory(config: dict[str, object]) -> produce.FrameProducer:
+        configs.append(config)
+        return FakeProducer(clock)
+
+    assert produce.run(args, factory, clock, io.StringIO()) == 0
+    assert "aws.region" not in configs[0] and callable(configs[0]["oauth_cb"])
+    assert configs[0]["sasl.mechanism"] == "OAUTHBEARER" and configs[0]["enable.idempotence"] is True

@@ -55,9 +55,73 @@ def test_site_refuses_placeholders(tmp_path: Path) -> None:
     assert site.kafka_bootstrap == "localhost:9092" and site.catalog_props["type"] == "sql"
 
 
+CLUSTER: dict[str, object] = {
+    "context": "my-cluster",
+    "namespace": "ingest-bench",
+    "harness_service_account": "ingest-bench-harness",
+    "flink_service_account": "ingest-bench-flink",
+    "registry": "registry.example/ingest-bench",
+    "aws_region": "eu-west-1",
+}
+
+
+def _cluster_site(tmp_path: Path, cluster: dict[str, object]) -> Path:
+    path = tmp_path / "site.yaml"
+    path.write_text(
+        "corpus_root: /tmp/c\nruns_root: /tmp/r\nwarehouse: /tmp/w\n"
+        "kafka: {bootstrap_servers: 'localhost:9092'}\n"
+        "catalog: {props: {type: sql}}\n"
+        "pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}\n" + yaml.safe_dump({"kubernetes": cluster})
+    )
+    return path
+
+
+def test_an_empty_kubernetes_block_means_no_cluster(tmp_path: Path) -> None:
+    assert model.load_site(_cluster_site(tmp_path, {})).kubernetes is None
+
+
+def test_the_kubernetes_block_loads_a_cluster(tmp_path: Path) -> None:
+    cluster: dict[str, object] = {
+        **CLUSTER,
+        "service_account_annotations": {"example.com/role": "arn"},
+        "node_selector": {"kubernetes.io/arch": "amd64"},
+        "tolerations": [{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
+    }
+    loaded = model.load_site(_cluster_site(tmp_path, cluster)).kubernetes
+    assert loaded == model.KubernetesConfig(
+        context="my-cluster",
+        namespace="ingest-bench",
+        harness_service_account="ingest-bench-harness",
+        flink_service_account="ingest-bench-flink",
+        service_account_annotations={"example.com/role": "arn"},
+        registry="registry.example/ingest-bench",
+        aws_region="eu-west-1",
+        node_selector={"kubernetes.io/arch": "amd64"},
+        tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
+    )
+
+
+def test_the_placement_keys_are_optional(tmp_path: Path) -> None:
+    """A cluster that places workloads nowhere in particular says nothing about it."""
+    loaded = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
+    assert loaded is not None
+    assert loaded.service_account_annotations == {} and loaded.node_selector == {} and loaded.tolerations == []
+
+
+def test_the_kubernetes_block_refuses_what_it_does_not_recognise(tmp_path: Path) -> None:
+    for cluster, message in (
+        ({**CLUSTER, "zone": "eu-west-1a"}, "unknown keys"),
+        ({key: value for key, value in CLUSTER.items() if key != "namespace"}, "namespace"),
+        ({**CLUSTER, "tolerations": {"key": "bench"}}, "list of mappings"),
+        ({**CLUSTER, "node_selector": {"arch": 64}}, "node_selector.arch"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            model.load_site(_cluster_site(tmp_path, cluster))
+
+
 def test_derive_ids() -> None:
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
-    site = model.SiteConfig("s3://b/corpus", "s3://b/runs", "s3://b/wh", "k:9092", {}, {"uri": "u"}, {}, 0.0, 0.0)
+    site = model.SiteConfig("s3://b/corpus", "s3://b/runs", "s3://b/wh", "k:9092", {}, {"uri": "u"}, None, 0.0, 0.0)
     d = derive.derive(spec, site, stamp="20260908T120000Z", corpus_dir="smoke-1a2b3c4d")
     assert d.run_id == "smoke-flink-20260908T120000Z" and d.topic == d.run_id
     assert d.table == "ingest_bench.t_smoke_flink_20260908T120000Z"

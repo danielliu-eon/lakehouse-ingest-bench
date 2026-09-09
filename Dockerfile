@@ -22,13 +22,17 @@ ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 PATH="/app/.venv/bin:${PATH}"
 # itself and is the only layer a source edit invalidates. README.md is copied
 # because pyproject names it as the package readme, so the build backend
 # needs it present.
+#
+# The `aws` extra is installed unconditionally: it carries the MSK IAM token
+# signer, which a site on another cloud never calls, and resolving it at image
+# build time is what keeps one image able to run against any site.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra aws --no-install-project
 
 COPY ingest_bench ./ingest_bench
 COPY engines ./engines
 COPY workloads ./workloads
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra aws
 
 # Presets and schemas live beside the package in a checkout and are copied to
 # a fixed path here, so every command in this image finds them without a flag.

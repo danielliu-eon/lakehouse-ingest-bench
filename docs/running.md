@@ -84,13 +84,21 @@ stack, one broker, therefore gets 1.
 
 ## Credentials
 
-The harness implements no authentication.
+The harness implements no authentication, bar the one exception named below.
 
 **Kafka.** `site.kafka.security` reaches the admin client that creates the topic
 verbatim, as librdkafka properties. A producer shard reads no site config, so a
 driver carries the same properties to it with `produce --kafka-prop key=value`,
 applied over the producer's own defaults. Nothing about SASL, mTLS or a
 proprietary broker is implemented here; configuration is the whole interface.
+
+The one exception is a mechanism no property can express: `sasl.mechanism:
+OAUTHBEARER` against Amazon MSK wants a token signed from the caller's own
+credentials, per connection, that expires within the hour. Declare the region
+to sign in as `aws.region` alongside it — the harness's own key, stripped
+before the properties reach a client — and install the harness with its `aws`
+extra. A site that arranges its own tokens sets any `sasl.oauthbearer.*`
+property instead, and its configuration is passed through untouched.
 
 **Object storage and catalogs.** The cloud SDK's default credential chain: pod
 identity or an instance role in a cluster, an ambient profile on a laptop. Static

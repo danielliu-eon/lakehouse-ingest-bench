@@ -239,6 +239,34 @@ wheels = [
 ]
 
 [[package]]
+name = "aws-msk-iam-sasl-signer-python"
+version = "1.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "boto3" },
+    { name = "botocore" },
+    { name = "click" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/38/8b/9af0a7def4ba357afadc89c06019d3735944cb3d6065a455f41580ba7fd6/aws_msk_iam_sasl_signer_python-1.0.2.tar.gz", hash = "sha256:3432d88a7c6db4887ceb1130ebaed0113bfda48b79ea811537add5f1d25fa13f", size = 24034, upload-time = "2025-03-05T20:49:48.582Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/43/f3ffd79fc4941b8d610530d81e1f600cfa1b8651affc25cb929fd0f2f2c9/aws_msk_iam_sasl_signer_python-1.0.2-py2.py3-none-any.whl", hash = "sha256:310eb2db9ca0ff55ed06a24212739b87533e7f1cf6f34e43aabbd97a3b21290e", size = 13279, upload-time = "2025-03-05T20:49:46.611Z" },
+]
+
+[[package]]
+name = "boto3"
+version = "1.43.75"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b1/dd/b93be617dd5d1c6a3a248066030a450e62d211c0af0f49ed3a0d761383c9/boto3-1.43.75.tar.gz", hash = "sha256:86da93d3d5b46a58b03fa51b598ffa4aeaff485a3000affacf78491c105e44f0", size = 112673, upload-time = "2026-08-19T19:54:17.236Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/52/89/d0baf1269e57ac548387c11e5d9ba78d1e118ceb43f1e5e5114bdd2e8391/boto3-1.43.75-py3-none-any.whl", hash = "sha256:08a79edb68e6a0d65d305eb90188639313650e155aed015e86eef59d8475dde0", size = 140026, upload-time = "2026-08-19T19:54:15.509Z" },
+]
+
+[[package]]
 name = "botocore"
 version = "1.43.75"
 source = { registry = "https://pypi.org/simple" }
@@ -1058,6 +1086,12 @@ dependencies = [
     { name = "zstandard" },
 ]
 
+[package.optional-dependencies]
+aws = [
+    { name = "aws-msk-iam-sasl-signer-python" },
+    { name = "boto3" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
@@ -1068,6 +1102,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aws-msk-iam-sasl-signer-python", marker = "extra == 'aws'", specifier = ">=1.0" },
+    { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.34" },
     { name = "confluent-kafka", specifier = ">=2.5" },
     { name = "fastavro", specifier = ">=1.9" },
     { name = "fsspec", specifier = ">=2024.6" },
@@ -1079,6 +1115,7 @@ requires-dist = [
     { name = "s3fs", specifier = ">=2024.6" },
     { name = "zstandard", specifier = ">=0.22" },
 ]
+provides-extras = ["aws"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2172,6 +2209,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/12/60/69fc080b72a32971b2fb5acbc80802b0e876b606f6e27b1689caac4bb57b/s3fs-2026.7.0.tar.gz", hash = "sha256:76b062d1b2bc7bf4bcd9e7d8f1eb2b5dd9d5cee96ce888664c4ddb5f563146bf", size = 87595, upload-time = "2026-07-28T17:14:10.595Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/98/cc/bcde19a37952ecc58e7d9d67ecaa048e1e21b17d014ce0863a6a6101e606/s3fs-2026.7.0-py3-none-any.whl", hash = "sha256:64edf3c01ebffab1eec38ff9c09eefbf86a3db14c87d248f795da0e7b801d698", size = 32659, upload-time = "2026-07-28T17:14:09.497Z" },
+]
+
+[[package]]
+name = "s3transfer"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/43/35e4d8aa320bffe8287fe8f65f578fa2d2db0a64212f0e710dce58267854/s3transfer-0.19.2.tar.gz", hash = "sha256:ba0309fd86be3c27dbf78cdd813c13c5e1df16e5874b99d2535ebbdfb9892993", size = 165592, upload-time = "2026-07-22T19:30:44.432Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/e7/5c595c75e9f41a44f30e526eda465ea0b4eec93470e074e4a111b253f13a/s3transfer-0.19.2-py3-none-any.whl", hash = "sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25", size = 90216, upload-time = "2026-07-22T19:30:43.251Z" },
 ]
 
 [[package]]

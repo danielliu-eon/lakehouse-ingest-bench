@@ -7,17 +7,21 @@ already exists holds records from an earlier run, and appending to it would
 put rows in the table that no manifest accounts for.
 
 Every call takes the librdkafka client properties a run's site declares, with
-any indirection already resolved. Authentication is never implemented here:
-whatever the site names is handed to the client verbatim, so a cluster this
-harness has never heard of is reachable by configuration alone.
+any indirection already resolved. Authentication is not implemented here: the
+properties reach the client through `kafka_auth`, which passes all but its own
+keys through verbatim, so a cluster this harness has never heard of is
+reachable by configuration alone.
 """
 
 from __future__ import annotations
 
 import time
+from typing import cast
 
 from confluent_kafka import KafkaError, KafkaException
 from confluent_kafka.admin import AdminClient, NewTopic
+
+from ingest_bench import kafka_auth
 
 REQUEST_TIMEOUT_S = 30.0
 
@@ -33,9 +37,36 @@ DEFAULT_TOPIC_CONFIG: dict[str, str] = {"retention.ms": "172800000", "retention.
 _VISIBILITY_TIMEOUT_S = 30.0
 _VISIBILITY_POLL_S = 0.25
 
+# librdkafka serves an OAUTHBEARER token callback only from a client's `poll`,
+# and an admin client's own requests never poll: `list_topics` on a client that
+# has no token yet waits out its whole timeout and reports a SASL
+# authentication error. Polling here is what makes the token exist before the
+# first request. A client library that already served the callback while it
+# constructed the client leaves this loop with nothing to do.
+_TOKEN_POLL_S = 0.1
+_TOKEN_POLL_ATTEMPTS = 20
+
 
 def _client(bootstrap: str, client: dict[str, str]) -> AdminClient:
-    return AdminClient({"bootstrap.servers": bootstrap, **client})
+    served = False
+
+    def token_served() -> None:
+        nonlocal served
+        served = True
+
+    config = kafka_auth.librdkafka_config({"bootstrap.servers": bootstrap, **client}, on_token=token_served)
+    # The admin client's declared configuration holds only scalars, while
+    # librdkafka's token callback is a callable. The cast is over a mapping this
+    # module built, so nothing unchecked reaches the client.
+    admin = AdminClient(cast("dict[str, str | int | float | bool]", config))
+    if "oauth_cb" in config:
+        # A token that never arrives is left to the request that follows: the
+        # broker's own authentication error names more than a refusal here could.
+        for _ in range(_TOKEN_POLL_ATTEMPTS):
+            if served:
+                break
+            admin.poll(_TOKEN_POLL_S)
+    return admin
 
 
 def _error_code(err: KafkaException) -> int:
