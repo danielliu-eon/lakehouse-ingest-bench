@@ -200,6 +200,7 @@ else
 	# to read the endpoint — which is worth another look, since a tunnel and an
 	# engine can both be a moment behind the state that reported it running.
 	VERIFY_DRIFT_STATUS=3
+	VERIFY_PENDING_STATUS=4
 	VERIFY_TRIES=3
 	# Absolute, because `harness_local`'s checkout fallback runs from the
 	# repository root and not from the operator's working directory.
@@ -218,6 +219,7 @@ else
 
 	log "checking $ENGINE_KIND/$RUN_OBJECT against $VERIFY_SPEC"
 	verify_tries=0
+	placement_waited=0
 	while :; do
 		verify_args=(--spec "$VERIFY_SPEC" --run-id "$RUN_ID" --rest "http://localhost:$VERIFY_PORT")
 		# Re-read on every try, because an executor still being scheduled is
@@ -236,6 +238,17 @@ else
 		fi
 		if ((verify_status == VERIFY_DRIFT_STATUS)); then
 			die "$ENGINE_KIND/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the engine can be read before it is torn down"
+		fi
+		# A fleet still being placed gets the engine's own running wait, not
+		# the endpoint's tries: the object was RUNNING before its last pod
+		# had an image to start from.
+		if ((verify_status == VERIFY_PENDING_STATUS)); then
+			placement_waited=$((placement_waited + ENGINE_POLL_S))
+			if ((placement_waited > ENGINE_RUNNING_WAIT_S)); then
+				die "$ENGINE_KIND/$RUN_OBJECT's fleet was not fully placed within ${ENGINE_RUNNING_WAIT_S}s; the lines above name what is still missing. It is left running, so the pods can be read before it is torn down"
+			fi
+			sleep "$ENGINE_POLL_S"
+			continue
 		fi
 		verify_tries=$((verify_tries + 1))
 		if ((verify_tries >= VERIFY_TRIES)); then

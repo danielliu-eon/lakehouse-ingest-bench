@@ -28,6 +28,11 @@ REST_TIMEOUT_S = 5.0
 # the second and fails on the first, so they cannot share an exit status.
 DRIFT_EXIT = 3
 UNVERIFIED_EXIT = 2
+# A fleet the scheduler has not finished placing is a third answer: not drift,
+# because nothing was dropped, and not an unreadable endpoint, because the
+# driver answered. Staging waits this one out against the engine's own running
+# wait rather than the handful of tries an endpoint gets.
+PENDING_EXIT = 4
 
 # What a field the engine did not report reads as. A name rather than an empty
 # string, because the line is read by a person deciding whether to restage or

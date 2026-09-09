@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from engines.spark import verify as verify_module
-from engines.spark.verify import APPLICATIONS, verify
+from engines.spark.verify import APPLICATIONS, FleetNotPlaced, verify
 from ingest_bench.readings import DRIFT_EXIT, UNVERIFIED_EXIT
 from ingest_bench.specs import engines
 from ingest_bench.specs.model import RunSpec, load_run_spec
@@ -263,7 +263,15 @@ def test_an_executor_the_scheduler_never_placed_is_a_narrower_fleet() -> None:
     of one publishes a rate attributed to compute that was never paid for.
     """
     short = [_pod(DRIVER_POD, "driver"), _pod(EXECUTOR_PODS[0], "executor")]
-    assert _drift(pods=_pods(short)) == ["executor pods: spec 2, engine 1"]
+    with pytest.raises(FleetNotPlaced) as not_placed:
+        _drift(pods=_pods(short))
+    assert not_placed.value.lines == ["executor pods: spec 2, engine 1"]
+
+
+def test_an_executor_the_run_never_asked_for_is_drift_rather_than_a_wait() -> None:
+    fleet = [_pod(DRIVER_POD, "driver"), *(_pod(name, "executor") for name in EXECUTOR_PODS)]
+    extra = [*fleet, _pod("exec-3", "executor")]
+    assert _drift(pods=_pods(extra)) == ["executor pods: spec 2, engine 3"]
 
 
 def test_a_pod_that_borrows_its_cores_is_refused() -> None:
@@ -293,9 +301,21 @@ def test_a_pod_the_api_server_has_not_admitted_reports_neither_phase_nor_class()
         _pod(EXECUTOR_PODS[0], "executor", phase="Pending", qos=None),
         _pod(EXECUTOR_PODS[1], "executor"),
     ]
-    assert _drift(pods=_pods(pending)) == [
+    with pytest.raises(FleetNotPlaced) as not_placed:
+        _drift(pods=_pods(pending))
+    assert not_placed.value.lines == [f"pod {EXECUTOR_PODS[0]} phase: spec Running, engine Pending"]
+
+
+def test_a_pending_pod_beside_a_borrowing_one_is_refused_not_waited_for() -> None:
+    """Drift is a verdict; a fleet still being placed is not. Drift wins."""
+    mixed = [
+        _pod(DRIVER_POD, "driver"),
+        _pod(EXECUTOR_PODS[0], "executor", phase="Pending", qos=None),
+        _pod(EXECUTOR_PODS[1], "executor", qos="Burstable"),
+    ]
+    assert _drift(pods=_pods(mixed)) == [
+        f"pod {EXECUTOR_PODS[1]} qos class: spec Guaranteed, engine Burstable",
         f"pod {EXECUTOR_PODS[0]} phase: spec Running, engine Pending",
-        f"pod {EXECUTOR_PODS[0]} qos class: spec Guaranteed, engine not reported",
     ]
 
 

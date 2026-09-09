@@ -38,6 +38,7 @@ from engines.spark.knobs import Knobs, kubernetes_name, read
 from ingest_bench.readings import (
     DRIFT_EXIT,
     NOT_REPORTED,
+    PENDING_EXIT,
     UNVERIFIED_EXIT,
     document,
     documents,
@@ -193,6 +194,19 @@ def _pods(answer: object) -> list[_Pod]:
     return pods
 
 
+class FleetNotPlaced(Exception):
+    """The fleet is not yet what the run asked for, and nothing has drifted.
+
+    Raised rather than returned so that a caller reading a verdict cannot
+    mistake a fleet still being scheduled for one that dropped a setting: the
+    first is waited for, the second is refused.
+    """
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__("; ".join(lines))
+        self.lines = lines
+
+
 def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
     """Every pod of the fleet that is not one the run asked for.
 
@@ -206,14 +220,23 @@ def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
     drivers = [pod for pod in fleet if pod.role == _DRIVER]
     executors = [pod for pod in fleet if pod.role == _EXECUTOR]
     lines: list[str] = []
+    pending: list[str] = []
     if len(drivers) != 1:
         lines.append(line("driver pods", 1, len(drivers)))
-    if len(executors) != knobs.executors:
+    # The operator reports RUNNING once the driver is up, and the driver asks
+    # for its executors only then; a fleet still short of them, or with a pod
+    # still pulling its image, is one the scheduler has not finished placing
+    # rather than one that dropped a setting.
+    if len(executors) < knobs.executors:
+        pending.append(line("executor pods", knobs.executors, len(executors)))
+    elif len(executors) > knobs.executors:
         lines.append(line("executor pods", knobs.executors, len(executors)))
     for pod in (*drivers, *executors):
         if pod.phase != _RUNNING_PHASE:
-            lines.append(line(f"pod {pod.name} phase", _RUNNING_PHASE, pod.phase or NOT_REPORTED))
-        if pod.qos_class != _GUARANTEED:
+            # The QoS class is judged once the pod runs: a Pending pod's is
+            # not yet a fact about the cores it will hold.
+            pending.append(line(f"pod {pod.name} phase", _RUNNING_PHASE, pod.phase or NOT_REPORTED))
+        elif pod.qos_class != _GUARANTEED:
             lines.append(line(f"pod {pod.name} qos class", _GUARANTEED, pod.qos_class or NOT_REPORTED))
     for pod in fleet:
         if pod.role not in (_DRIVER, _EXECUTOR):
@@ -221,7 +244,9 @@ def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
             # either half of the fleet is not part of the run this measures,
             # and it is sharing the run's namespace with it.
             lines.append(line(f"pod {pod.name} role", f"{_DRIVER} or {_EXECUTOR}", pod.role or NOT_REPORTED))
-    return lines
+    if pending and not lines:
+        raise FleetNotPlaced(pending)
+    return [*lines, *pending]
 
 
 def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object], pods: object) -> list[str]:
@@ -282,6 +307,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # answers by looking again rather than by refusing the run.
         print(error, file=sys.stderr)
         return UNVERIFIED_EXIT
+    except FleetNotPlaced as not_placed:
+        for pending in not_placed.lines:
+            print(pending, file=sys.stderr)
+        return PENDING_EXIT
     for drifted in drift:
         print(drifted)
     if drift:
