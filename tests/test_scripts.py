@@ -389,7 +389,7 @@ def test_the_harness_policy_covers_the_three_bucket_prefixes() -> None:
 
     prefixes = {f"{bucket}/corpus/*", f"{bucket}/runs/*", f"{bucket}/warehouse/*"}
     objects = _one(statements, prefixes, "the objects under the three prefixes")
-    assert _actions(objects) == {"s3:GetObject", "s3:PutObject", "s3:DeleteObject"}
+    assert _actions(objects) == {"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject"}
 
 
 def test_the_harness_policy_names_the_table_namespace_the_harness_uses() -> None:
@@ -417,16 +417,18 @@ def test_the_msk_topic_statement_allows_idempotent_writes() -> None:
 
     The producer is idempotent, so its very first send fails without this
     action — and the denial names a producer id rather than the policy.
+    `cluster` is its only resource type, so it belongs on the cluster ARN,
+    not the topic ARN alongside `WriteData`.
     """
     statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "harness-policy.json"))
 
     topics = _one(statements, {IAM_VALUES["MSK_TOPIC_ARN"]}, "the topics")
     actions = _actions(topics)
-    assert "kafka-cluster:WriteDataIdempotently" in actions
+    assert "kafka-cluster:WriteDataIdempotently" not in actions
     assert {"kafka-cluster:WriteData", "kafka-cluster:ReadData", "kafka-cluster:CreateTopic"} <= actions
 
     cluster = _one(statements, {IAM_VALUES["MSK_ARN"]}, "the cluster")
-    assert "kafka-cluster:Connect" in _actions(cluster)
+    assert {"kafka-cluster:Connect", "kafka-cluster:WriteDataIdempotently"} <= _actions(cluster)
 
     groups = _one(statements, {IAM_VALUES["MSK_GROUP_ARN"]}, "the consumer groups")
     assert _actions(groups) == {"kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup"}

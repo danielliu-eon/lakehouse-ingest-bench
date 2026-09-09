@@ -15,6 +15,7 @@
       "Action": [
         "s3:GetObject",
         "s3:PutObject",
+        "s3:AbortMultipartUpload",
         "s3:DeleteObject"
       ],
       "Resource": [
@@ -49,7 +50,8 @@
       "Action": [
         "kafka-cluster:Connect",
         "kafka-cluster:DescribeCluster",
-        "kafka-cluster:DescribeClusterDynamicConfiguration"
+        "kafka-cluster:DescribeClusterDynamicConfiguration",
+        "kafka-cluster:WriteDataIdempotently"
       ],
       "Resource": "${MSK_ARN}"
     },
@@ -64,7 +66,6 @@
         "kafka-cluster:AlterTopic",
         "kafka-cluster:AlterTopicDynamicConfiguration",
         "kafka-cluster:WriteData",
-        "kafka-cluster:WriteDataIdempotently",
         "kafka-cluster:ReadData"
       ],
       "Resource": "${MSK_TOPIC_ARN}"
