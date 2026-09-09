@@ -1,10 +1,15 @@
-"""Create and drop the topic a run publishes into.
+"""Create and drop the topic a run publishes into, and count the cluster's brokers.
 
 A run owns its topic: it is created before the producer starts and dropped
 after the score is written, so one run's retained bytes cannot be read as
 another's. Creation is refused rather than made idempotent — a topic that
 already exists holds records from an earlier run, and appending to it would
 put rows in the table that no manifest accounts for.
+
+Every call takes the librdkafka client properties a run's site declares, with
+any indirection already resolved. Authentication is never implemented here:
+whatever the site names is handed to the client verbatim, so a cluster this
+harness has never heard of is reachable by configuration alone.
 """
 
 from __future__ import annotations
@@ -29,21 +34,21 @@ _VISIBILITY_TIMEOUT_S = 30.0
 _VISIBILITY_POLL_S = 0.25
 
 
-def _client(bootstrap: str) -> AdminClient:
-    return AdminClient({"bootstrap.servers": bootstrap})
+def _client(bootstrap: str, client: dict[str, str]) -> AdminClient:
+    return AdminClient({"bootstrap.servers": bootstrap, **client})
 
 
 def _error_code(err: KafkaException) -> int:
     return int(err.args[0].code())
 
 
-def _exists(client: AdminClient, name: str) -> bool:
-    return name in client.list_topics(timeout=REQUEST_TIMEOUT_S).topics
+def _exists(admin: AdminClient, name: str) -> bool:
+    return name in admin.list_topics(timeout=REQUEST_TIMEOUT_S).topics
 
 
-def _await_visibility(client: AdminClient, name: str, present: bool) -> None:
+def _await_visibility(admin: AdminClient, name: str, present: bool) -> None:
     deadline = time.monotonic() + _VISIBILITY_TIMEOUT_S
-    while _exists(client, name) != present:
+    while _exists(admin, name) != present:
         if time.monotonic() >= deadline:
             state = "appear" if present else "disappear"
             raise TimeoutError(
@@ -52,29 +57,50 @@ def _await_visibility(client: AdminClient, name: str, present: bool) -> None:
         time.sleep(_VISIBILITY_POLL_S)
 
 
-def topic_exists(bootstrap: str, name: str) -> bool:
-    return _exists(_client(bootstrap), name)
+def topic_exists(bootstrap: str, name: str, client: dict[str, str]) -> bool:
+    return _exists(_client(bootstrap, client), name)
 
 
-def create_topic(bootstrap: str, name: str, partitions: int, replication_factor: int, config: dict[str, str]) -> None:
-    client = _client(bootstrap)
-    topic = NewTopic(name, num_partitions=partitions, replication_factor=replication_factor, config=dict(config))
+def broker_count(bootstrap: str, client: dict[str, str]) -> int:
+    """How many brokers the cluster's metadata names.
+
+    This is what a run's replication factor is chosen from, so it is read from
+    the cluster rather than guessed at from a hostname: a name says nothing
+    about how many brokers answer to it, and a factor above the count is
+    refused by the broker at topic creation.
+    """
+    brokers = _client(bootstrap, client).list_topics(timeout=REQUEST_TIMEOUT_S).brokers
+    if not brokers:
+        raise ValueError(f"the cluster at {bootstrap} names no brokers in its metadata")
+    return len(brokers)
+
+
+def create_topic(
+    bootstrap: str,
+    name: str,
+    partitions: int,
+    replication_factor: int,
+    topic_config: dict[str, str],
+    client: dict[str, str],
+) -> None:
+    admin = _client(bootstrap, client)
+    topic = NewTopic(name, num_partitions=partitions, replication_factor=replication_factor, config=dict(topic_config))
     try:
-        client.create_topics([topic], request_timeout=REQUEST_TIMEOUT_S)[name].result()
+        admin.create_topics([topic], request_timeout=REQUEST_TIMEOUT_S)[name].result()
     except KafkaException as err:
         if _error_code(err) == KafkaError.TOPIC_ALREADY_EXISTS:
             raise ValueError(f"topic {name!r} already exists on {bootstrap}; drop it before starting a run") from err
         raise
-    _await_visibility(client, name, present=True)
+    _await_visibility(admin, name, present=True)
 
 
-def delete_topic(bootstrap: str, name: str) -> None:
+def delete_topic(bootstrap: str, name: str, client: dict[str, str]) -> None:
     """Drop ``name``, treating an absent topic as already dropped."""
-    client = _client(bootstrap)
+    admin = _client(bootstrap, client)
     try:
-        client.delete_topics([name], request_timeout=REQUEST_TIMEOUT_S)[name].result()
+        admin.delete_topics([name], request_timeout=REQUEST_TIMEOUT_S)[name].result()
     except KafkaException as err:
         if _error_code(err) != KafkaError.UNKNOWN_TOPIC_OR_PART:
             raise
         return
-    _await_visibility(client, name, present=False)
+    _await_visibility(admin, name, present=False)

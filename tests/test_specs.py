@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from ingest_bench import catalog as cat
-from ingest_bench import stage, uri
+from ingest_bench import kafka_admin, stage, uri
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.specs import derive, engines, model
 
@@ -65,23 +65,40 @@ def test_derive_ids() -> None:
 
 
 class FakeAdmin:
-    """A topic admin that records what `stage` asked of it instead of reaching a broker."""
+    """A cluster admin that records what `stage` asked of it instead of reaching a broker."""
 
-    def __init__(self, present: tuple[str, ...] = ()) -> None:
+    def __init__(self, present: tuple[str, ...] = (), brokers: int = 1) -> None:
         self.present = set(present)
+        self.brokers = brokers
         self.created: list[tuple[str, int, int, dict[str, str]]] = []
         self.deleted: list[str] = []
+        # The client properties of every call, which is where a run's Kafka
+        # credentials would appear.
+        self.clients: list[dict[str, str]] = []
 
-    def exists(self, bootstrap: str, name: str) -> bool:
+    def exists(self, bootstrap: str, name: str, client: dict[str, str]) -> bool:
+        self.clients.append(client)
         return name in self.present
 
+    def broker_count(self, bootstrap: str, client: dict[str, str]) -> int:
+        self.clients.append(client)
+        return self.brokers
+
     def create(
-        self, bootstrap: str, name: str, partitions: int, replication_factor: int, config: dict[str, str]
+        self,
+        bootstrap: str,
+        name: str,
+        partitions: int,
+        replication_factor: int,
+        topic_config: dict[str, str],
+        client: dict[str, str],
     ) -> None:
-        self.created.append((name, partitions, replication_factor, config))
+        self.clients.append(client)
+        self.created.append((name, partitions, replication_factor, topic_config))
         self.present.add(name)
 
-    def delete(self, bootstrap: str, name: str) -> None:
+    def delete(self, bootstrap: str, name: str, client: dict[str, str]) -> None:
+        self.clients.append(client)
         self.deleted.append(name)
         self.present.discard(name)
 
@@ -188,6 +205,21 @@ def test_stage_writes_the_run_directory(tmp_path: Path, corpus: tuple[str, str])
     table = cat.open_catalog(model.load_site(site_path).catalog_props).load_table(str(facts["table"]))
     assert [field.name for field in table.schema().fields] == metadata.read(str(facts["corpus_uri"])).field_names()
     assert table.spec().fields[0].name == "partition_key"
+
+
+def test_replication_factor_follows_the_broker_count(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    corpus_root, _ = corpus
+    site_path = _site_file(tmp_path, corpus_root)
+    for index, (brokers, expected) in enumerate(((1, 1), (2, 2), (5, 3))):
+        admin = FakeAdmin(brokers=brokers)
+        staged = stage.stage(
+            ROOT / "runs" / "smoke-external.yaml",
+            site_path,
+            tmp_path / "runs",
+            admin,
+            stamp=f"20260908T1600{index:02d}Z",
+        )
+        assert admin.created == [(staged.derived.topic, 4, expected, dict(kafka_admin.DEFAULT_TOPIC_CONFIG))]
 
 
 def test_stage_drops_the_topic_when_staging_fails(tmp_path: Path, corpus: tuple[str, str]) -> None:

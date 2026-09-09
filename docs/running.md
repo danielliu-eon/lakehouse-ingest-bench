@@ -85,12 +85,11 @@ follow-up.
 ## The Kafka topic
 
 Staging creates the run's topic with `kafka.partitions` partitions. Its
-replication factor is not a knob in phase 1: it is 1 when the bootstrap host is
-`localhost`, `127.0.0.1` or `kafka`, and 3 for any other host, on the
-assumption that a cluster reached by name has at least three brokers. A one- or
-two-broker cluster under any other hostname fails staging with an
-`INVALID_REPLICATION_FACTOR` from Kafka until a site knob exists, which is
-planned. The local stack is unaffected.
+replication factor is not a site knob: staging reads the broker count out of
+the cluster's metadata and asks for `min(3, brokers)`. Three replicas mean one
+broker dying mid-run does not end it; a smaller cluster gets one replica per
+broker, because a factor above the broker count is refused outright. The local
+stack, one broker, therefore gets 1.
 
 ## Sizing the producer
 

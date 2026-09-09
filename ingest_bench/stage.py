@@ -38,11 +38,12 @@ REDACTED = "<redacted>"
 # catalog token is the one thing in it that must not travel.
 _SECRET_HINTS = ("token", "credential", "secret", "password")
 
-# Hosts that only ever name a single-broker cluster — a laptop stack or the
-# compose service — get a replication factor of 1 because a higher one cannot
-# be satisfied. Anything else is assumed to be a real cluster of at least
-# three brokers. Phase 2 reads the broker count from the cluster instead.
-_SINGLE_BROKER_HOSTS = frozenset({"localhost", "127.0.0.1", "kafka"})
+# Three replicas is what a run's records are worth: enough that losing one
+# broker mid-run does not end it, and no more than the smallest cluster anyone
+# runs this against can satisfy. A cluster with fewer brokers than that gets as
+# many replicas as it has brokers, since a factor above the broker count is
+# refused outright.
+MAX_REPLICATION_FACTOR = 3
 
 # The spec's way of saying the producer sends no message key, so records
 # round-robin across partitions instead of following a column's skew.
@@ -56,35 +57,57 @@ _TIMELINE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class KafkaAdmin(Protocol):
-    """The topic operations staging needs, behind a protocol so it can be faked.
+    """The cluster operations staging needs, behind a protocol so it can be faked.
 
-    Staging is otherwise untestable without a broker, and the part worth
-    testing — that a failure after creation drops the topic again — is exactly
-    the part a live broker makes hard to provoke.
+    Staging is otherwise untestable without a broker, and the parts worth
+    testing — that a failure after creation drops the topic again, and that the
+    replication factor follows the cluster — are exactly the parts a live
+    broker makes hard to provoke.
+
+    Every method takes the client properties to reach the cluster with, rather
+    than the admin holding them, because the site that declares them is read
+    inside `stage` and a secret they name is resolved at the call itself.
     """
 
-    def exists(self, bootstrap: str, name: str) -> bool: ...
+    def exists(self, bootstrap: str, name: str, client: dict[str, str]) -> bool: ...
+
+    def broker_count(self, bootstrap: str, client: dict[str, str]) -> int: ...
 
     def create(
-        self, bootstrap: str, name: str, partitions: int, replication_factor: int, config: dict[str, str]
+        self,
+        bootstrap: str,
+        name: str,
+        partitions: int,
+        replication_factor: int,
+        topic_config: dict[str, str],
+        client: dict[str, str],
     ) -> None: ...
 
-    def delete(self, bootstrap: str, name: str) -> None: ...
+    def delete(self, bootstrap: str, name: str, client: dict[str, str]) -> None: ...
 
 
 class ClusterAdmin:
-    """The real topic admin, against the broker the site names."""
+    """The real cluster admin, against the broker the site names."""
 
-    def exists(self, bootstrap: str, name: str) -> bool:
-        return kafka_admin.topic_exists(bootstrap, name)
+    def exists(self, bootstrap: str, name: str, client: dict[str, str]) -> bool:
+        return kafka_admin.topic_exists(bootstrap, name, client)
+
+    def broker_count(self, bootstrap: str, client: dict[str, str]) -> int:
+        return kafka_admin.broker_count(bootstrap, client)
 
     def create(
-        self, bootstrap: str, name: str, partitions: int, replication_factor: int, config: dict[str, str]
+        self,
+        bootstrap: str,
+        name: str,
+        partitions: int,
+        replication_factor: int,
+        topic_config: dict[str, str],
+        client: dict[str, str],
     ) -> None:
-        kafka_admin.create_topic(bootstrap, name, partitions, replication_factor, config)
+        kafka_admin.create_topic(bootstrap, name, partitions, replication_factor, topic_config, client)
 
-    def delete(self, bootstrap: str, name: str) -> None:
-        kafka_admin.delete_topic(bootstrap, name)
+    def delete(self, bootstrap: str, name: str, client: dict[str, str]) -> None:
+        kafka_admin.delete_topic(bootstrap, name, client)
 
 
 @dataclass(frozen=True)
@@ -128,9 +151,8 @@ def redact(props: dict[str, str]) -> dict[str, str]:
     }
 
 
-def replication_factor(bootstrap: str) -> int:
-    hosts = {entry.split(":")[0].strip() for entry in bootstrap.split(",")}
-    return 1 if hosts <= _SINGLE_BROKER_HOSTS else 3
+def replication_factor(brokers: int) -> int:
+    return min(MAX_REPLICATION_FACTOR, brokers)
 
 
 def harness_table_properties(spec: model.RunSpec) -> dict[str, str]:
@@ -217,14 +239,16 @@ def stage(
         knobs = knobs_for(spec.engine)
         knobs.validate(spec.engine_block, spec, meta)
 
-    if admin.exists(site.kafka_bootstrap, derived.topic):
+    kafka_client = dict(site.kafka_security)
+    if admin.exists(site.kafka_bootstrap, derived.topic, kafka_client):
         raise ValueError(f"topic {derived.topic!r} already exists on {site.kafka_bootstrap}; it holds another run")
     admin.create(
         site.kafka_bootstrap,
         derived.topic,
         spec.kafka.partitions,
-        replication_factor(site.kafka_bootstrap),
+        replication_factor(admin.broker_count(site.kafka_bootstrap, kafka_client)),
         dict(kafka_admin.DEFAULT_TOPIC_CONFIG),
+        kafka_client,
     )
     try:
         ddl: str | None = None
@@ -251,7 +275,7 @@ def stage(
         # same name. A table it may also have created is left alone — a table
         # with no data is inert, and a teardown that drops tables on its own is
         # a worse failure mode than an orphan.
-        admin.delete(site.kafka_bootstrap, derived.topic)
+        admin.delete(site.kafka_bootstrap, derived.topic, kafka_client)
         raise
     return Staged(spec=spec, derived=derived, run_dir=run_dir, facts=facts)
 
