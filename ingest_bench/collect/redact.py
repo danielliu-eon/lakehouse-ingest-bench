@@ -41,7 +41,16 @@ def _roots(site: SiteConfig) -> list[tuple[str, str]]:
     corpus root would otherwise have every run path attributed to the corpus,
     and the two are not the same place.
     """
-    named = (("corpus_root", site.corpus_root), ("runs_root", site.runs_root), ("warehouse", site.warehouse))
+    named = [("corpus_root", site.corpus_root), ("runs_root", site.runs_root), ("warehouse", site.warehouse)]
+    # The registry and the catalog's warehouse property are roots too: an image
+    # reference starts with the registry host, and a Glue catalog's warehouse is
+    # the bare account id. Neither is a path under the three object-store roots,
+    # so each needs naming here to be substituted rather than published.
+    if site.kubernetes is not None:
+        named.append(("registry", site.kubernetes.registry))
+    catalog_warehouse = site.catalog_props.get("warehouse")
+    if catalog_warehouse is not None and catalog_warehouse.rstrip("/") not in {root.rstrip("/") for _, root in named}:
+        named.append(("catalog_warehouse", catalog_warehouse))
     return sorted(
         # An empty root is dropped rather than matched: it would sit at the
         # start of every string and rewrite paths that are under no root at all.

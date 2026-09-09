@@ -329,6 +329,39 @@ def test_redact_uri_takes_the_longest_matching_root(tmp_path: Path) -> None:
     assert redact_uri("s3://another-bucket/runs/r1", site) == "s3://another-bucket/runs/r1"
 
 
+def test_redact_uri_covers_the_registry_and_a_glue_warehouse(tmp_path: Path) -> None:
+    path = tmp_path / "glue.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "corpus_root": f"{BUCKET}/corpus",
+                "runs_root": f"{BUCKET}/runs",
+                "warehouse": f"{BUCKET}/warehouse",
+                "kafka": {"bootstrap_servers": "broker.invalid:9092"},
+                # Glue's warehouse property is the account id itself, twelve digits
+                # that sit under no object-store root.
+                "catalog": {"props": {"uri": "https://glue.invalid/iceberg", "warehouse": "123456789012"}},
+                "kubernetes": {
+                    "context": "c",
+                    "namespace": "n",
+                    "harness_service_account": "h",
+                    "flink_service_account": "f",
+                    "registry": "123456789012.dkr.ecr.us-east-2.amazonaws.com",
+                },
+                "pricing": {"vcpu_hour_usd": 0.0, "gib_hour_usd": 0.0},
+            }
+        )
+    )
+    site = model.load_site(path)
+    registry = "123456789012.dkr.ecr.us-east-2.amazonaws.com"
+    assert redact_uri("123456789012", site) == "<catalog_warehouse>"
+    assert redact_uri(f"{registry}/bench/flink:abc", site) == "<registry>/bench/flink:abc"
+    assert redact_uri(f"{registry}/bench/flink@sha256:0", site) == "<registry>/bench/flink@sha256:0"
+    # A catalog warehouse that is the site warehouse keeps the site's own name.
+    same = _site_config(tmp_path)
+    assert redact_uri(f"{BUCKET}/warehouse/ns/t", same) == "<warehouse>/ns/t"
+
+
 def test_redact_uri_does_not_match_a_sibling_prefix(tmp_path: Path) -> None:
     site = _site_config(tmp_path)
     assert redact_uri(f"{BUCKET}/corpus-archive/smoke-1", site) == f"{BUCKET}/corpus-archive/smoke-1"
