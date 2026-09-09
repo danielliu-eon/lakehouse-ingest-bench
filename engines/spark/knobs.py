@@ -18,13 +18,16 @@ import re
 from dataclasses import dataclass, fields
 from typing import cast
 
-from engines.spark.stream_to_iceberg import JOB_DOCUMENT, READER_SCHEMA, VALUE_EXPRESSIONS
+import yaml
+
+from engines.spark.stream_to_iceberg import JOB_DOCUMENT, READER_SCHEMA, RUN_DIR, VALUE_EXPRESSIONS
 from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.kafka_auth import REGION_KEY
 from ingest_bench.specs.derive import Derived
-from ingest_bench.specs.model import RunSpec, SiteConfig
+from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
+from ingest_bench.specs.model import KubernetesConfig, RunSpec, SiteConfig
 
 # The catalog the job's table is addressed through. Nothing outside the
 # rendered files refers to it, so it is fixed rather than derived from the run.
@@ -41,6 +44,11 @@ ENV_FILE = "job.env"
 SCHEMA_FILE = READER_SCHEMA.name
 JOB_FILE = JOB_DOCUMENT.name
 
+# The two documents a run on a cluster is, which the local stack has no use for
+# — it submits the job itself instead of handing an operator an object.
+SPARKAPPLICATION_FILE = "sparkapplication.yaml"
+CONFIGMAP_FILE = "spark-job-configmap.yaml"
+
 # The two settings the submission line is shaped by, which the compose file
 # interpolates by name. Named here rather than written twice so a test can hold
 # the two copies together.
@@ -53,6 +61,48 @@ RANGE = "range"
 DISTRIBUTION_MODES = frozenset({NONE, HASH, RANGE})
 
 REST = "rest"
+
+# The image the operator starts, under the registry the site names, and the
+# Spark inside it. `sparkVersion` is a required field of a SparkApplication;
+# a test holds this to the tag the Dockerfile pins so the two cannot drift.
+_IMAGE_REPOSITORY = "lakehouse-ingest-bench/spark"
+SPARK_VERSION = "3.5.9"
+
+# The job, as the operator submits it: a `local://` reference is a path inside
+# the image rather than a file the operator would have to stage. A test holds
+# this to the path the Dockerfile copies the job to.
+_JOB_SCRIPT = "local:///opt/bench/engines/spark/stream_to_iceberg.py"
+
+# Where the run's rendered files are mounted, and the volume that carries them.
+# The job's own constant, so a mount under any other path would be one the job
+# does not open.
+_RUN_MOUNT = str(RUN_DIR)
+_JOB_VOLUME = "job"
+
+# How a driver addresses a Spark run on a cluster. Every name is the
+# spark-operator's: it publishes the driver's UI as a Service called
+# `<application>-ui-svc`, names the driver pod `<application>-driver`, and
+# labels both halves of the fleet with the application's name.
+#
+# `pods_selector` matches the driver and the executors together, because two of
+# the things `verify` compares — how many executors there are, and whether
+# their CPU is guaranteed rather than a share the node may reclaim — are
+# properties of the pods and are reported nowhere in the driver's own answers.
+KUBERNETES = EngineKubernetes(
+    kind="sparkapplication",
+    running_state="RUNNING",
+    # A submission the operator could not make, an application that failed and
+    # one on its way to failing: none of the three has a fleet left to wait for.
+    failed_states=("FAILED", "SUBMISSION_FAILED", "FAILING"),
+    state_jsonpath="{.status.applicationState.state}",
+    rest_service_suffix="-ui-svc",
+    rest_port=4040,
+    log_target=f"pod/{NAME}-driver",
+    provenance_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={NAME}",
+    pods_selector=f"sparkoperator.k8s.io/app-name={NAME}",
+    document_file=SPARKAPPLICATION_FILE,
+    configmap_file=CONFIGMAP_FILE,
+)
 
 # Spark's own duration grammar for a processing-time trigger, which is a count
 # and a whole unit word: `Trigger.ProcessingTime` parses the string as a SQL
@@ -432,6 +482,16 @@ def render_conf_file(spec: RunSpec, site: SiteConfig, derived: Derived) -> str:
     return "".join(f"{key} {value}\n" for key, value in render_conf(spec, site, derived).items())
 
 
+def render_env(spec: RunSpec) -> str:
+    """The submission line's own shape, which is not a job setting.
+
+    The driver's core count and heap are chosen before a session exists, so the
+    local stack reads these as environment rather than out of the properties.
+    """
+    knobs = read(spec.engine_block)
+    return f"{LOCAL_CORES_VAR}={knobs.cores_total()}\n{DRIVER_MEM_VAR}={knobs.driver_mem_mb}\n"
+
+
 # ---------------------------------------------------------------------------
 # Rendering the job's documents
 # ---------------------------------------------------------------------------
@@ -523,6 +583,160 @@ def render_job(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMe
 
 
 # ---------------------------------------------------------------------------
+# Rendering the Kubernetes documents
+# ---------------------------------------------------------------------------
+
+
+def _cluster(site: SiteConfig) -> KubernetesConfig:
+    if site.kubernetes is None:
+        raise ValueError("a Spark run on Kubernetes is placed by site.kubernetes, and the site declares no cluster")
+    return site.kubernetes
+
+
+def kubernetes_name(run_id: str) -> str:
+    """The run id as a Kubernetes object name.
+
+    An RFC 1123 subdomain is lowercase, and a run id's stamp is not: the `T`
+    and the `Z` in it are refused by the API server. Only the names are
+    lowercased — the run id itself is the identifier the topic, the table and
+    the run directory are addressed by, and it stays as it is.
+    """
+    return run_id.lower()
+
+
+def configmap_name(derived: Derived) -> str:
+    """The ConfigMap the run's rendered files are mounted from."""
+    return f"{kubernetes_name(derived.run_id)}-spark-job"
+
+
+def _mount() -> list[dict[str, object]]:
+    """The run's files on a pod, as its own copy.
+
+    Copied per pod rather than shared, because `yaml.safe_dump` renders one
+    object reached twice as an anchor and an alias — and a manifest is read by
+    people at least as often as by an API server.
+    """
+    return [{"name": _JOB_VOLUME, "mountPath": _RUN_MOUNT, "readOnly": True}]
+
+
+def _placement(cluster: KubernetesConfig) -> dict[str, object]:
+    """Where a pod may run, as its own copy, for the reason above."""
+    return {
+        "nodeSelector": dict(cluster.node_selector),
+        "tolerations": [dict(toleration) for toleration in cluster.tolerations],
+    }
+
+
+def _region_env(cluster: KubernetesConfig) -> list[dict[str, str]]:
+    """The region under both names an SDK reads it as, or nothing off AWS.
+
+    Both halves of an MSK IAM connection need one — the token signer in the
+    Kafka client and S3 under the table's FileIO — and the SDKs disagree about
+    which name carries it: this image's Java client reads `AWS_REGION`, while
+    botocore reads `AWS_DEFAULT_REGION` alone and is left with no region at all
+    when only the other is set.
+    """
+    if cluster.aws_region is None:
+        return []
+    return [{"name": name, "value": cluster.aws_region} for name in ("AWS_REGION", "AWS_DEFAULT_REGION")]
+
+
+def render_sparkapplication(
+    spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, image_tag: str
+) -> str:
+    """The SparkApplication one run is, as the operator takes it.
+
+    ``meta`` is unread — the corpus shapes the job document and not the fleet —
+    and stays in the signature so both of a run's Kubernetes documents are
+    rendered from the same arguments.
+
+    Both halves of the fleet ask for as much CPU as they cap at, which is what
+    makes their pods Guaranteed. A Burstable pod's cores are a share the node
+    may reclaim, so a rate measured on one is the node's answer rather than the
+    engine's; the memory limit Spark sets equal to the request on its own.
+    """
+    knobs = read(spec.engine_block)
+    cluster = _cluster(site)
+    driver: dict[str, object] = {
+        "cores": knobs.driver_cores,
+        "coreLimit": str(knobs.driver_cores),
+        "memory": f"{knobs.driver_mem_mb}m",
+        # The identity the whole fleet runs as: the driver creates the executor
+        # pods itself, and both halves reach the broker and the table as this
+        # account rather than with anything carried in a file.
+        "serviceAccount": cluster.spark_service_account,
+        "volumeMounts": _mount(),
+        **_placement(cluster),
+    }
+    region = _region_env(cluster)
+    if region:
+        driver["env"] = region
+    executor: dict[str, object] = {
+        "instances": knobs.executors,
+        "cores": knobs.executor_cores,
+        "coreLimit": str(knobs.executor_cores),
+        "memory": f"{knobs.executor_mem_mb}m",
+        "volumeMounts": _mount(),
+        **_placement(cluster),
+    }
+    if region:
+        executor["env"] = _region_env(cluster)
+    document: dict[str, object] = {
+        "apiVersion": "sparkoperator.k8s.io/v1beta2",
+        "kind": "SparkApplication",
+        "metadata": {"name": kubernetes_name(derived.run_id), "namespace": cluster.namespace},
+        "spec": {
+            "type": "Python",
+            "pythonVersion": "3",
+            # Cluster and not client mode: the driver is a pod of its own, so
+            # the fleet a run is costed for is the fleet the cluster scheduled
+            # rather than one attached to whatever submitted it.
+            "mode": "cluster",
+            "image": f"{cluster.registry}/{_IMAGE_REPOSITORY}:{image_tag}",
+            # The tag is a commit, so an image already on the node is the image
+            # that tag names and pulling it again buys nothing.
+            "imagePullPolicy": "IfNotPresent",
+            "mainApplicationFile": _JOB_SCRIPT,
+            "sparkVersion": SPARK_VERSION,
+            # A run is scored once and never resumed: a restarted driver would
+            # read the topic from its checkpoint or from the beginning, and
+            # either way the rows it committed would be attributed to an
+            # attempt the result does not describe.
+            "restartPolicy": {"type": "Never"},
+            "sparkConf": render_conf(spec, site, derived),
+            "driver": driver,
+            "executor": executor,
+            "volumes": [{"name": _JOB_VOLUME, "configMap": {"name": configmap_name(derived)}}],
+        },
+    }
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+def render_job_configmap(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
+    """The ConfigMap the run's rendered files are mounted from.
+
+    All four and not only the two the job opens. The properties reached the
+    operator as `spec.sparkConf` and the environment file is the local stack's,
+    so neither is read off this mount — but a driver pod that carries every
+    file the run rendered is one a person can read the run out of without
+    fetching anything.
+    """
+    cluster = _cluster(site)
+    document = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": configmap_name(derived), "namespace": cluster.namespace},
+        "data": {
+            CONF_FILE: render_conf_file(spec, site, derived),
+            ENV_FILE: render_env(spec),
+            SCHEMA_FILE: render_reader_schema(meta),
+            JOB_FILE: render_job(spec, site, derived, meta),
+        },
+    }
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
 # The run directory
 # ---------------------------------------------------------------------------
 
@@ -532,18 +746,20 @@ def render(
 ) -> dict[str, str]:
     """The engine's files for the run directory, keyed by filename.
 
-    ``image_tag`` is unread: the local stack builds its own image, and the
-    Kubernetes documents that would name a pushed one are not rendered here. It
-    stays in the signature because the harness calls every managed engine's
-    renderer the same way.
+    A site with a cluster gets the two Kubernetes documents as well, and needs
+    the tag of the image they start. A site without one is the local stack,
+    which builds its own image and submits the job itself.
     """
-    knobs = read(spec.engine_block)
-    return {
+    files = {
         CONF_FILE: render_conf_file(spec, site, derived),
-        # The submission line's own shape, which is not a job setting: the
-        # driver's core count and heap are chosen before a session exists, so
-        # the stack reads these as environment instead.
-        ENV_FILE: (f"{LOCAL_CORES_VAR}={knobs.cores_total()}\n{DRIVER_MEM_VAR}={knobs.driver_mem_mb}\n"),
+        ENV_FILE: render_env(spec),
         SCHEMA_FILE: render_reader_schema(meta),
         JOB_FILE: render_job(spec, site, derived, meta),
     }
+    if site.kubernetes is None:
+        return files
+    if image_tag is None:
+        raise ValueError("a run on a cluster starts an image, so render needs image_tag: the tag that was pushed")
+    files[SPARKAPPLICATION_FILE] = render_sparkapplication(spec, site, derived, meta, image_tag)
+    files[CONFIGMAP_FILE] = render_job_configmap(spec, site, derived, meta)
+    return files

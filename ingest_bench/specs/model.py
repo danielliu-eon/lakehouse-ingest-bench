@@ -46,6 +46,7 @@ _KUBERNETES_KEYS = frozenset(
         "namespace",
         "harness_service_account",
         "flink_service_account",
+        "spark_service_account",
         "service_account_annotations",
         "registry",
         "aws_region",
@@ -53,6 +54,12 @@ _KUBERNETES_KEYS = frozenset(
         "tolerations",
     }
 )
+
+# The identity a Spark run's driver and executors run as. Defaulted rather than
+# required, unlike the two beside it: a site written before Spark could be
+# staged on a cluster names two accounts and not three, and `deploy/aws/setup.sh`
+# creates this one under exactly this name.
+_SPARK_SERVICE_ACCOUNT = "ingest-bench-spark"
 
 _PLACEHOLDER = "YOUR_"
 
@@ -400,7 +407,7 @@ def load_run_spec(path: Path) -> RunSpec:
 class KubernetesConfig:
     """The cluster a run's workloads are submitted to, and how they are placed on it.
 
-    One namespace and one pair of service accounts per site, not per run: a
+    One namespace and one service account per role per site, not per run: a
     cloud grants an identity to a (namespace, service account) pair, and it is
     granted once by whoever stood the cluster up — so a run that invented its
     own namespace would have no credentials in it.
@@ -414,6 +421,7 @@ class KubernetesConfig:
     namespace: str
     harness_service_account: str
     flink_service_account: str
+    spark_service_account: str
     service_account_annotations: dict[str, str]
     registry: str
     aws_region: str | None
@@ -507,6 +515,9 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
         flink_service_account=_as_str(
             _required(block, "flink_service_account", where), f"{where}.flink_service_account"
         ),
+        spark_service_account=_SPARK_SERVICE_ACCOUNT
+        if "spark_service_account" not in block
+        else _as_str(block["spark_service_account"], f"{where}.spark_service_account"),
         service_account_annotations={}
         if "service_account_annotations" not in block
         else _as_string_map(block["service_account_annotations"], f"{where}.service_account_annotations"),

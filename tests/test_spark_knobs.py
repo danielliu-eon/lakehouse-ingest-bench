@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 from engines.spark import fleet, knobs, stream_to_iceberg
 from ingest_bench import uri
@@ -366,11 +367,12 @@ def _cluster() -> model.KubernetesConfig:
         namespace="ingest-bench",
         harness_service_account="ingest-bench-harness",
         flink_service_account="ingest-bench-flink",
+        spark_service_account="ingest-bench-spark",
         service_account_annotations={},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",
         node_selector={"bench-pool": "engine"},
-        tolerations=[],
+        tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
     )
 
 
@@ -457,16 +459,180 @@ def test_a_glue_catalog_reaches_storage_through_the_sites_warehouse(meta: metada
     assert "spark.sql.catalog.ice.io-impl" not in knobs.render_conf(_spec(), nowhere, d)
 
 
-def test_a_cluster_run_renders_the_same_four_files(meta: metadata.CorpusMetadata) -> None:
-    """No Kubernetes documents here: the stack this engine ships with is compose.
+def test_render_sparkapplication(meta: metadata.CorpusMetadata) -> None:
+    """The whole document the operator is handed, parsed rather than matched."""
+    spec = _spec()
+    site = _aws_site()
+    d = _derived(site, meta)
+    document = yaml.safe_load(knobs.render_sparkapplication(spec, site, d, meta, image_tag="0.1.0-abc1234"))
+    mount = [{"name": "job", "mountPath": "/opt/bench/run", "readOnly": True}]
+    placement: dict[str, object] = {
+        "nodeSelector": {"bench-pool": "engine"},
+        "tolerations": [{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
+    }
+    region = [{"name": "AWS_REGION", "value": "eu-west-1"}, {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"}]
+    assert document == {
+        "apiVersion": "sparkoperator.k8s.io/v1beta2",
+        "kind": "SparkApplication",
+        "metadata": {"name": "smoke-spark-20260908t000000z", "namespace": "ingest-bench"},
+        "spec": {
+            "type": "Python",
+            "pythonVersion": "3",
+            "mode": "cluster",
+            "image": "registry.example/ingest-bench/lakehouse-ingest-bench/spark:0.1.0-abc1234",
+            "imagePullPolicy": "IfNotPresent",
+            "mainApplicationFile": "local:///opt/bench/engines/spark/stream_to_iceberg.py",
+            "sparkVersion": knobs.SPARK_VERSION,
+            "restartPolicy": {"type": "Never"},
+            "sparkConf": knobs.render_conf(spec, site, d),
+            "driver": {
+                "cores": 1,
+                "coreLimit": "1",
+                "memory": "2048m",
+                "serviceAccount": "ingest-bench-spark",
+                "volumeMounts": mount,
+                **placement,
+                "env": region,
+            },
+            "executor": {
+                "instances": 2,
+                "cores": 2,
+                "coreLimit": "2",
+                "memory": "2048m",
+                "volumeMounts": mount,
+                **placement,
+                "env": region,
+            },
+            "volumes": [{"name": "job", "configMap": {"name": "smoke-spark-20260908t000000z-spark-job"}}],
+        },
+    }
 
-    `image_tag` is accepted and unread, because the harness calls every managed
-    engine's renderer the same way — so a cluster site must not make the call
-    fail before the documents exist.
+
+def test_both_halves_of_the_fleet_ask_for_as_much_cpu_as_they_cap_at(meta: metadata.CorpusMetadata) -> None:
+    """Guaranteed QoS, which is what makes a measured rate the engine's answer.
+
+    Spark requests `cores` and limits at `coreLimit`, and a pod whose CPU
+    request and limit differ is Burstable — cores the node may reclaim under
+    pressure. It sets the memory limit equal to the request itself, so the
+    core numbers are the whole of what this document decides.
     """
     site = _aws_site()
     d = _derived(site, meta)
-    assert set(knobs.render(_spec(), site, d, meta, image_tag="t")) == set(knobs.render(_spec(), site, d, meta))
+    spec = replace(_spec(), engine_block={**_spec().engine_block, "driver_cores": 3, "executor_cores": 5})
+    fleet = yaml.safe_load(knobs.render_sparkapplication(spec, site, d, meta, image_tag="t"))["spec"]
+    assert (fleet["driver"]["cores"], fleet["driver"]["coreLimit"]) == (3, "3")
+    assert (fleet["executor"]["cores"], fleet["executor"]["coreLimit"]) == (5, "5")
+
+
+def test_the_executors_are_given_the_region_the_driver_is(meta: metadata.CorpusMetadata) -> None:
+    """An executor reaches the broker and the table itself, so it needs one too.
+
+    The Kafka client signs an MSK IAM token per connection and the table's data
+    files are written through Iceberg's own S3 client, both inside the
+    executors — and an SDK with no region resolves S3's global endpoint, which
+    is refused for a bucket that lives anywhere else. A cluster off AWS has no
+    region to name, and then neither half carries the variable.
+    """
+    site = _aws_site()
+    d = _derived(site, meta)
+    elsewhere = replace(site, kubernetes=replace(_cluster(), aws_region=None))
+    for half in ("driver", "executor"):
+        named = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))["spec"][half]
+        assert [entry["name"] for entry in named["env"]] == ["AWS_REGION", "AWS_DEFAULT_REGION"]
+        off_aws = yaml.safe_load(knobs.render_sparkapplication(_spec(), elsewhere, d, meta, image_tag="t"))
+        assert "env" not in off_aws["spec"][half]
+
+
+def test_the_documents_repeat_a_shared_value_rather_than_pointing_at_it(meta: metadata.CorpusMetadata) -> None:
+    """No YAML anchors: a manifest is read by people as well as by an API server.
+
+    The mount and the placement are the same values on both halves of the
+    fleet, and `yaml.safe_dump` renders one object reached twice as an anchor
+    and an alias.
+    """
+    rendered = knobs.render_sparkapplication(_spec(), _aws_site(), _derived(_aws_site(), meta), meta, image_tag="t")
+    assert "&id" not in rendered and "*id" not in rendered
+
+
+def test_kubernetes_name_lowercases_a_run_id() -> None:
+    assert knobs.kubernetes_name("smoke-spark-20260908T000000Z") == "smoke-spark-20260908t000000z"
+    assert knobs.kubernetes_name("already-lower-1") == "already-lower-1"
+
+
+def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> None:
+    """A run id reaches the two documents as itself everywhere it is not a name.
+
+    An RFC 1123 name is lowercase and a run id's stamp is not. The settings
+    carrying the id are not names Kubernetes reads, and lowercasing one of them
+    would point a run's checkpoints or its consumer group at something no other
+    reader of the run addresses.
+    """
+    site = _aws_site()
+    d = _derived(site, meta)
+    conf = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))["spec"]["sparkConf"]
+    assert conf["spark.app.name"] == d.run_id
+    job = json.loads(knobs.render_job(_spec(), site, d, meta))
+    assert job["group_id"] == d.run_id
+    assert job["write_options"]["checkpointLocation"].endswith(f"/{d.run_id}/checkpoints")
+
+
+def test_render_job_configmap(meta: metadata.CorpusMetadata) -> None:
+    """Every file the run rendered, as the pods read them off a mount."""
+    spec = _spec()
+    site = _aws_site()
+    d = _derived(site, meta)
+    document = yaml.safe_load(knobs.render_job_configmap(spec, site, d, meta))
+    assert document["apiVersion"] == "v1" and document["kind"] == "ConfigMap"
+    assert document["metadata"] == {"name": "smoke-spark-20260908t000000z-spark-job", "namespace": "ingest-bench"}
+    files = knobs.render(spec, site, d, meta, image_tag="t")
+    assert document["data"] == {
+        name: files[name] for name in (knobs.CONF_FILE, knobs.ENV_FILE, knobs.SCHEMA_FILE, knobs.JOB_FILE)
+    }
+
+
+def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.CorpusMetadata) -> None:
+    spec = _spec()
+    site = _aws_site()
+    d = _derived(site, meta)
+    assert set(knobs.render(spec, site, d, meta, image_tag="t")) == {
+        knobs.CONF_FILE,
+        knobs.ENV_FILE,
+        knobs.SCHEMA_FILE,
+        knobs.JOB_FILE,
+        knobs.SPARKAPPLICATION_FILE,
+        knobs.CONFIGMAP_FILE,
+    }
+    # The tag names the image a run is submitted as, so a cluster run without
+    # one has no engine to start.
+    with pytest.raises(ValueError, match="image_tag"):
+        knobs.render(spec, site, d, meta)
+    # No cluster, no Kubernetes documents — and nothing to refuse either.
+    local = _site()
+    assert set(knobs.render(spec, local, _derived(local, meta), meta)) == {
+        knobs.CONF_FILE,
+        knobs.ENV_FILE,
+        knobs.SCHEMA_FILE,
+        knobs.JOB_FILE,
+    }
+    with pytest.raises(ValueError, match="site.kubernetes"):
+        knobs.render_sparkapplication(spec, local, d, meta, image_tag="t")
+    with pytest.raises(ValueError, match="site.kubernetes"):
+        knobs.render_job_configmap(spec, local, d, meta)
+
+
+def test_the_pinned_spark_is_the_one_the_image_carries(meta: metadata.CorpusMetadata) -> None:
+    """Two pins drift, and the one nobody rereads is the one a cluster runs.
+
+    `sparkVersion` is a required field of a SparkApplication and the job's path
+    is inside the image, so both are statements about the Dockerfile — held to
+    it here rather than reread by whoever next edits one of the two files.
+    """
+    dockerfile = (ROOT / "engines" / "spark" / "Dockerfile").read_text()
+    assert f"FROM apache/spark:{knobs.SPARK_VERSION}-" in dockerfile
+    site = _aws_site()
+    document = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, _derived(site, meta), meta, image_tag="t"))
+    path = str(document["spec"]["mainApplicationFile"]).removeprefix("local://")
+    assert f"{path.rsplit('/', 1)[0]}/" in dockerfile, f"the Dockerfile copies the job nowhere near {path}"
 
 
 def test_fleet(meta: metadata.CorpusMetadata) -> None:

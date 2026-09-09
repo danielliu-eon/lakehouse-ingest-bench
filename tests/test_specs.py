@@ -172,12 +172,26 @@ def test_the_kubernetes_block_loads_a_cluster(tmp_path: Path) -> None:
         namespace="ingest-bench",
         harness_service_account="ingest-bench-harness",
         flink_service_account="ingest-bench-flink",
+        spark_service_account="ingest-bench-spark",
         service_account_annotations={"example.com/role": "arn"},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",
         node_selector={"kubernetes.io/arch": "amd64"},
         tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
     )
+
+
+def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(tmp_path: Path) -> None:
+    """Defaulted, unlike the two beside it, so an older site config still loads.
+
+    A site written before Spark could be staged on a cluster names two accounts
+    and not three, and `deploy/aws/setup.sh` creates this one under exactly
+    this name.
+    """
+    loaded = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
+    assert loaded is not None and loaded.spark_service_account == "ingest-bench-spark"
+    renamed = model.load_site(_cluster_site(tmp_path, {**CLUSTER, "spark_service_account": "sparky"})).kubernetes
+    assert renamed is not None and renamed.spark_service_account == "sparky"
 
 
 def test_the_placement_keys_are_optional(tmp_path: Path) -> None:

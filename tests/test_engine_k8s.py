@@ -19,6 +19,47 @@ from ingest_bench.specs.kubernetes import FIELDS, NAME, for_name
 RUN_OBJECT = "smoke-flink-20260908t000000z"
 
 
+@pytest.mark.parametrize("engine", sorted(engines.MANAGED))
+def test_every_managed_engine_says_how_it_is_addressed(engine: str) -> None:
+    """A managed engine with no descriptor is one no driver could stage.
+
+    The printed fields are checked against the dataclass's own, because a field
+    added without a line in `texts` would be one a driver asks for and is
+    refused.
+    """
+    descriptor = engines.kubernetes_for(engine)
+    assert set(descriptor.texts()) == set(FIELDS)
+    assert descriptor.kind and descriptor.running_state and descriptor.failed_states
+    assert descriptor.state_jsonpath.startswith("{.status.") and descriptor.rest_port > 0
+    # Two documents, named apart: a driver applies the ConfigMap first because
+    # the other one mounts it.
+    assert descriptor.document_file.endswith(".yaml") and descriptor.configmap_file.endswith(".yaml")
+    assert descriptor.document_file != descriptor.configmap_file
+
+
+def test_the_spark_descriptor_names_what_the_operator_named() -> None:
+    """Every name here belongs to the spark-operator rather than to this harness.
+
+    It publishes the driver's UI as `<application>-ui-svc` on Spark's own 4040,
+    names the driver pod `<application>-driver`, and labels both halves of the
+    fleet with the application's name — so `spark-role` is what tells the two
+    apart when provenance wants the driver's image alone.
+    """
+    descriptor = engines.kubernetes_for("spark")
+    assert descriptor.kind == "sparkapplication"
+    assert descriptor.state_jsonpath == "{.status.applicationState.state}"
+    assert descriptor.rest_service_suffix == "-ui-svc"
+    assert descriptor.rest_port == 4040
+    assert for_name(descriptor.log_target, RUN_OBJECT) == f"pod/{RUN_OBJECT}-driver"
+    assert for_name(descriptor.provenance_selector, RUN_OBJECT) == (
+        f"spark-role=driver,sparkoperator.k8s.io/app-name={RUN_OBJECT}"
+    )
+    # How many executors there are, and whether their CPU is guaranteed, are
+    # properties of the pods and are reported nowhere in the driver's answers.
+    assert for_name(descriptor.pods_selector, RUN_OBJECT) == f"sparkoperator.k8s.io/app-name={RUN_OBJECT}"
+    assert descriptor.failed_states == ("FAILED", "SUBMISSION_FAILED", "FAILING")
+
+
 def test_the_flink_descriptor_names_what_the_operator_named() -> None:
     """Every name here belongs to the Flink operator rather than to this harness.
 

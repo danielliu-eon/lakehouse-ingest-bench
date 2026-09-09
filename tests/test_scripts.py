@@ -625,6 +625,7 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
         namespace="ingest-bench",
         harness_service_account="ingest-bench-harness",
         flink_service_account="ingest-bench-flink",
+        spark_service_account="ingest-bench-spark",
         service_account_annotations={},
         registry="123456789012.dkr.ecr.eu-west-1.amazonaws.com",
         aws_region="eu-west-1",

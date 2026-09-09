@@ -258,6 +258,7 @@ def _cluster() -> model.KubernetesConfig:
         namespace="ingest-bench",
         harness_service_account="ingest-bench-harness",
         flink_service_account="ingest-bench-flink",
+        spark_service_account="ingest-bench-spark",
         service_account_annotations={},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",

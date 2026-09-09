@@ -33,6 +33,7 @@ kubernetes:
   namespace: ingest-bench
   harness_service_account: ingest-bench-harness
   flink_service_account: ingest-bench-flink
+  spark_service_account: ingest-bench-spark
   service_account_annotations: {}      # only for IRSA users; Pod Identity needs none
   registry: YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
   aws_region: YOUR_REGION              # rendered as AWS_REGION on every pod
