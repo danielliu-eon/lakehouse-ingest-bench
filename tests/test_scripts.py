@@ -213,6 +213,29 @@ def test_every_script_is_executable() -> None:
         assert not os.access(script, os.X_OK), f"{script} is sourced, so it should not be executable"
 
 
+def test_both_workflows_install_the_same_checked_yq() -> None:
+    """One pinned release, and the digest of the bytes behind it.
+
+    A version tag names a release and not its contents, and this binary reads
+    every site config a run is staged from — so the download is checked rather
+    than trusted. The two workflows install it for the same tests, and a
+    version bumped in one of them alone would leave them running different
+    parsers.
+    """
+    installs = {
+        path.name: (
+            re.findall(r"yq/releases/download/(v[\d.]+)/yq_linux_amd64", path.read_text()),
+            re.findall(r"^\s*([0-9a-f]{64}) \| sha256sum", path.read_text(), re.MULTILINE),
+        )
+        for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+    }
+    installing = {name: pins for name, pins in installs.items() if pins[0]}
+    assert set(installing) == {"ci.yml", "smoke.yml"}, installing
+    for name, (versions, digests) in installing.items():
+        assert len(versions) == 1 and len(digests) == 1, f"{name} pins {versions} and checks {digests}"
+    assert len({pins for pins in map(str, installing.values())}) == 1, installing
+
+
 @needs_bash
 def test_help_needs_no_stack() -> None:
     """`--help` has to answer before the host-tool check, on any machine.

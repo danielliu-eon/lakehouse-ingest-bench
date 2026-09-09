@@ -14,9 +14,15 @@ jobs:
       # rather than snap: snap is not available on every runner image, and the
       # version a channel serves changes under the test suite.
       - run: sudo apt-get update && sudo apt-get install -y jq
+      # The digest is checked because a version tag is a name and not the
+      # bytes behind it: a release asset can be replaced, and this binary then
+      # parses every site config a run is staged from. It moves with the
+      # version above, and both are the same pair in smoke.yml.
       - run: |
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          printf '%s  /usr/local/bin/yq\n' \
+            a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 | sha256sum --check --strict
           sudo chmod +x /usr/local/bin/yq
           yq --version
       - run: uv sync --frozen
