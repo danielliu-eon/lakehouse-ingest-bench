@@ -21,7 +21,17 @@ from collections.abc import Callable, Mapping
 # The region to sign an MSK token in, and the only key this module removes.
 REGION_KEY = "aws.region"
 
-_MECHANISM_KEY = "sasl.mechanism"
+MECHANISM_KEY = "sasl.mechanism"
+
+# librdkafka takes the mechanism under two names — the plural is its own and
+# the singular an alias — and every reader of these properties in this
+# repository reads the singular. A site that wrote the plural would
+# authenticate and lose the MSK IAM translation with it: the token callback
+# below, and the Java-client form the engines render, are both keyed on the
+# name above. Refused rather than accepted under one name and ignored under
+# the other.
+MECHANISM_ALIAS = "sasl.mechanisms"
+
 _OAUTHBEARER = "OAUTHBEARER"
 _OAUTHBEARER_PREFIX = "sasl.oauthbearer."
 
@@ -45,7 +55,7 @@ def msk_token_provider() -> TokenProvider:
         from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
     except ImportError as error:
         raise ValueError(
-            f"{_MECHANISM_KEY}={_OAUTHBEARER} signs an Amazon MSK token, and the signer is not installed; "
+            f"{MECHANISM_KEY}={_OAUTHBEARER} signs an Amazon MSK token, and the signer is not installed; "
             "install this harness with its 'aws' extra"
         ) from error
 
@@ -68,6 +78,20 @@ def _oauth_callback(region: str, token_provider: TokenProvider, on_token: Callab
     return callback
 
 
+def refuse_mechanism_alias(security: Mapping[str, object], where: str) -> None:
+    """Refuse the plural spelling of the mechanism key, wherever it was written.
+
+    See ``MECHANISM_ALIAS``: both names reach a client, one name is read here,
+    and the difference between them is whether a run is signed for MSK or
+    merely connected to it.
+    """
+    if MECHANISM_ALIAS in security:
+        raise ValueError(
+            f"{where} sets {MECHANISM_ALIAS!r}, which a client accepts and nothing here reads; "
+            f"write it as {MECHANISM_KEY!r}"
+        )
+
+
 def librdkafka_config(
     security: Mapping[str, object],
     *,
@@ -79,8 +103,9 @@ def librdkafka_config(
     ``on_token`` is called every time librdkafka asks for a token, so a caller
     that has to drive the callback itself can tell when it has run.
     """
+    refuse_mechanism_alias(security, "the client properties")
     config = {key: value for key, value in security.items() if key != REGION_KEY}
-    if _MECHANISM_KEY not in security or security[_MECHANISM_KEY] != _OAUTHBEARER:
+    if MECHANISM_KEY not in security or security[MECHANISM_KEY] != _OAUTHBEARER:
         return config
     # The site arranges its own tokens — librdkafka's OIDC path, or a token it
     # holds. A second source of them would override whatever it set up.
@@ -88,7 +113,7 @@ def librdkafka_config(
         return config
     if REGION_KEY not in security:
         raise ValueError(
-            f"{_MECHANISM_KEY}={_OAUTHBEARER} signs a token per connection, so the client properties must also "
+            f"{MECHANISM_KEY}={_OAUTHBEARER} signs a token per connection, so the client properties must also "
             f"set {REGION_KEY!r}: the region to sign it in"
         )
     region = security[REGION_KEY]

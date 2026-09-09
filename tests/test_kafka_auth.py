@@ -114,6 +114,19 @@ def test_another_mechanism_is_passed_through() -> None:
     }
 
 
+def test_the_plural_spelling_of_the_mechanism_is_refused() -> None:
+    """librdkafka takes both names, and everything here reads one of them.
+
+    The plural is librdkafka's own and the singular its alias, so a site that
+    wrote the plural would connect — and quietly lose the MSK IAM translation
+    with it, since that is keyed on the name this harness reads. The refusal
+    names the spelling to write instead.
+    """
+    plural = {"security.protocol": "SASL_SSL", "sasl.mechanisms": "OAUTHBEARER", "aws.region": REGION}
+    with pytest.raises(ValueError, match="'sasl.mechanism'"):
+        kafka_auth.librdkafka_config(plural, token_provider=token_provider([]))
+
+
 def test_no_security_at_all_is_an_empty_configuration() -> None:
     assert kafka_auth.librdkafka_config({}) == {}
 

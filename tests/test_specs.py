@@ -778,6 +778,25 @@ def test_a_secret_is_named_in_the_facts_and_resolved_at_the_cluster(
     )
 
 
+def test_a_site_spelling_the_mechanism_in_the_plural_is_refused(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """The site is where the spelling is written, so it is where it is refused.
+
+    librdkafka takes `sasl.mechanisms` as readily as `sasl.mechanism`, and
+    every reader in this repository — the token callback and the Java-client
+    properties the engines render — reads the singular. A site carrying the
+    plural would connect and be given none of the MSK IAM translation, so it
+    is refused at load rather than at the first connection that needed it.
+    """
+    corpus_root, _ = corpus
+    site_path = _site_file(
+        tmp_path,
+        corpus_root,
+        security={"security.protocol": "SASL_SSL", "sasl.mechanisms": "OAUTHBEARER", "aws.region": "eu-west-1"},
+    )
+    with pytest.raises(ValueError, match="'sasl.mechanism'"):
+        model.load_site(site_path)
+
+
 def test_a_literal_credential_is_still_redacted(tmp_path: Path, corpus: tuple[str, str]) -> None:
     corpus_root, _ = corpus
     staged = stage.stage(

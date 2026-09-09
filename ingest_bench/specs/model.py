@@ -18,6 +18,7 @@ from typing import cast
 
 import yaml
 
+from ingest_bench.kafka_auth import refuse_mechanism_alias
 from ingest_bench.specs import engines
 
 # A run's name reaches a Kafka topic, an Iceberg table name and a Kubernetes
@@ -597,20 +598,23 @@ def load_site(path: Path) -> SiteConfig:
 
     kafka = _as_mapping(_required(raw, "kafka", "site"), "site.kafka")
     _refuse_unknown(kafka, frozenset({"bootstrap_servers", "security", "schema_registry"}), "site.kafka")
+    security = {} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security")
+    # The security block reaches a client verbatim, so the keys in it are not
+    # refused by name — with the one exception a client would accept and every
+    # reader here would then read past.
+    refuse_mechanism_alias(security, "site.kafka.security")
+    refuse_compression_props(security, "site.kafka.security")
     catalog = _as_mapping(_required(raw, "catalog", "site"), "site.catalog")
     _refuse_unknown(catalog, frozenset({"props"}), "site.catalog")
     pricing = _as_mapping(_required(raw, "pricing", "site"), "site.pricing")
     _refuse_unknown(pricing, frozenset({"vcpu_hour_usd", "gib_hour_usd"}), "site.pricing")
-
-    kafka_security = {} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security")
-    refuse_compression_props(kafka_security, "site.kafka.security")
 
     return SiteConfig(
         corpus_root=_as_str(_required(raw, "corpus_root", "site"), "site.corpus_root"),
         runs_root=_as_str(_required(raw, "runs_root", "site"), "site.runs_root"),
         warehouse=_as_str(_required(raw, "warehouse", "site"), "site.warehouse"),
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
-        kafka_security=kafka_security,
+        kafka_security=security,
         schema_registry=_schema_registry_config(kafka),
         catalog_props=_as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props"),
         kubernetes=_kubernetes_config(raw),
