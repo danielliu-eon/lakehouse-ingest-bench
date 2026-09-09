@@ -87,8 +87,8 @@ done
 [[ $SEED =~ ^[0-9]+$ ]] || die "--seed must be a non-negative integer, got '$SEED'"
 
 require_host_tools kubectl yq git
-# The shard directory is resolved by listing the bucket, and only a sharded
-# corpus has one to resolve.
+# Only a sharded generation reads the bucket, and then to check that every
+# shard published its batches before the merge is launched over them.
 ((SHARDS == 1)) || require_host_tools aws
 
 k8s_read_site
@@ -157,30 +157,41 @@ fi
 # Merge
 # ---------------------------------------------------------------------------
 
-# Shard 0's directory names all of them: every shard generated the same preset
-# at the same seed, so each wrote a directory of this one name. Naming them
-# rather than listing every shard's prefix is also what makes a shard that
-# wrote nothing fail the merge by name instead of being quietly left out.
-LISTING="$(aws s3 ls "$CORPUS_ROOT/shards/0/")" ||
-	die "could not list $CORPUS_ROOT/shards/0/; read job/$GEN_JOB's log with: kubectl logs job/$GEN_JOB"
-SHARD_DIRS="$(awk '/ PRE /{ sub(/\/$/, "", $2); print $2 }' <<<"$LISTING")"
-[[ -n $SHARD_DIRS ]] || die "no corpus directory under $CORPUS_ROOT/shards/0/; read job/$GEN_JOB's log"
-DIR_COUNT="$(awk 'NF{count++} END{print count + 0}' <<<"$SHARD_DIRS")"
-((DIR_COUNT == 1)) ||
-	die "expected one corpus directory under $CORPUS_ROOT/shards/0/, found: $(tr '\n' ' ' <<<"$SHARD_DIRS")"
+# The directory this generation wrote, by name. A corpus directory is its
+# preset's name and the hash of that preset, so one generation writes the same
+# name under every `shards/<i>/` prefix — and a prefix holds one such directory
+# per sharded generation the bucket has ever seen, because the merge leaves
+# every batch where its shard wrote it: the shard directories are part of each
+# merged corpus and are never cleaned up. Which is why the name is read from
+# what this generation reported writing rather than from what the prefix holds,
+# where the second preset generated into a bucket would find two.
+#
+# `kubectl logs` over an indexed Job answers with one of its pods, and nothing
+# here depends on which: the shard index is in the prefix, and the last segment
+# — the only part read below — is the same for all of them.
+#
+# Assigned before it is read, so a `wrote_uri` that refused ends this script as
+# a failed assignment rather than as an empty name; see the single-shard path.
+SHARD_DIR="$(wrote_uri "$GEN_JOB")"
+SHARD_DIR="${SHARD_DIR##*/}"
 
-# The merge writes one metadata document beside the shard prefixes and leaves
-# every batch where its shard wrote it, so the shard directories are part of
-# the corpus and must not be cleaned up afterwards.
+# Each shard's own metadata document, read before a merge pod is paid for. The
+# merge refuses a shard it cannot read too, but only once a pod has been
+# scheduled and an image pulled — and after a generation of hours that answer
+# is wanted at once. `aws s3 ls` exits non-zero over a path that matches
+# nothing, which is what makes this a check and not a listing.
 MERGE_COMMAND="merge-corpus"
 shard=0
 while ((shard < SHARDS)); do
-	MERGE_COMMAND="$MERGE_COMMAND $CORPUS_ROOT/shards/$shard/$SHARD_DIRS"
+	SHARD_CORPUS="$CORPUS_ROOT/shards/$shard/$SHARD_DIR"
+	aws s3 ls "$SHARD_CORPUS/corpus.json" >/dev/null ||
+		die "$SHARD_CORPUS holds no corpus.json, so shard $shard of $SHARDS published none of its batches; read job/$GEN_JOB's log with: kubectl logs job/$GEN_JOB"
+	MERGE_COMMAND="$MERGE_COMMAND $SHARD_CORPUS"
 	shard=$((shard + 1))
 done
 MERGE_COMMAND="$MERGE_COMMAND --out $CORPUS_ROOT"
 
-log "merging $SHARDS shards of $SHARD_DIRS"
+log "merging $SHARDS shards of $SHARD_DIR"
 k8s_delete job "$MERGE_JOB"
 k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"NAME=$MERGE_JOB" \

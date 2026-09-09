@@ -1123,6 +1123,9 @@ case "$*" in
 *"get pod -l"*) printf '%s\\n' "${STUB_ENGINE_IMAGE:-}" ;;
 *"get job/"*) printf 'Complete\\n' ;;
 *"logs job/scorer-"*) printf 'POLL t=0.1 prefix=0/0\\n' ;;
+# The merge Job's own log, for a driver that reads two Jobs' logs in one run
+# and is answered by what each of them wrote rather than by one text twice.
+*"logs job/corpus-merge"*) cat "${STUB_MERGE_LOG:-$STUB_JOB_LOG}" ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
 *"get pods -l"*) printf '%s\\n' "${STUB_PODS:-}" ;;
 *"jsonpath={.status."*) printf '%s\\n' "${STUB_ENGINE_STATE:-RUNNING}" ;;
@@ -1133,11 +1136,19 @@ esac
 # when a test names it; every other subcommand succeeds silently. Guarded on
 # that directory rather than on the subcommand alone, because the drivers sync
 # several prefixes and only the staged one has a stand-in.
+#
+# `s3 ls` answers with the listing a test names, and refuses the one path a
+# test names as absent — which is how a bucket that is missing a shard is
+# expressed, since `aws s3 ls` exits non-zero over a path that matches nothing.
 AWS_STUB = """
 printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
 if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
 	mkdir -p "$4"
 	cp -R "$STUB_STAGE_DIR/." "$4"
+fi
+if [[ ${1:-} == s3 && ${2:-} == ls ]]; then
+	[[ -z ${STUB_S3_LS_ABSENT:-} || ${3:-} != *"$STUB_S3_LS_ABSENT"* ]] || exit 1
+	printf '%s\\n' "${STUB_S3_LS:-}"
 fi
 """
 
@@ -1244,6 +1255,18 @@ RUN_ID = "smoke-flink-20260908T120000Z"
 # lowercase and the stamp in a run id is not.
 RUN_OBJECT = RUN_ID.lower()
 BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
+
+# The corpus root the filled example declares, and a sharded generation under
+# it: a corpus directory is its preset's name and the hash of that preset, so
+# every shard of one generation writes a directory of this one name.
+CORPUS_ROOT = f"s3://{SITE_AWS_FILLINGS['YOUR_BUCKET']}/corpus"
+SHARDED_PRESET = "events-100mbs-skew"
+CORPUS_DIR = f"{SHARDED_PRESET}-7aa0f164"
+
+# What a shard prefix holds once a second preset has been generated into the
+# same bucket. The prefixes are shared, and the batches under them are part of
+# each merged corpus, so this is the steady state rather than leftovers.
+TWO_CORPORA = f"                           PRE {CORPUS_DIR}/\n                           PRE smoke-e13842f9/"
 
 
 def _stage_job_log(run_id: str) -> str:
@@ -1364,6 +1387,74 @@ def _job_command(document: dict[str, object]) -> str:
 
 def _pod_spec(document: dict[str, object]) -> dict[str, object]:
     return _mapping(_mapping(_mapping(document["spec"])["template"])["spec"])
+
+
+def _named_job(run: DriverRun, name: str) -> dict[str, object]:
+    """The one applied document of ``name``, so a driver's Jobs can be told apart."""
+    matching = [document for document in run.applied if _mapping(document["metadata"])["name"] == name]
+    assert len(matching) == 1, f"expected one {name}, found {len(matching)}"
+    return matching[0]
+
+
+def _sharded_generation(tmp_path: Path, environment: dict[str, str]) -> DriverRun:
+    """A two-shard generation whose shard prefixes hold two presets' corpora."""
+    # Both logs in the shape the harness prints them: a shard's line carries
+    # its index between the URI and the figures, and the merge's the shard
+    # count — so a driver that read either by position reads them both.
+    merge_log = tmp_path / "merge.log"
+    merge_log.write_text(f"wrote {CORPUS_ROOT}/{CORPUS_DIR} from 2 shards: 12000000 rows, 600000000 encoded bytes\n")
+    return _run_driver(
+        GEN_CORPUS,
+        [SHARDED_PRESET, "--shards", "2", "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_S3_LS": TWO_CORPORA, "STUB_MERGE_LOG": str(merge_log), **environment},
+        # Shard 1's, because `kubectl logs job/<indexed job>` answers with one
+        # of its pods and a driver may not depend on which: every shard writes
+        # a directory of the same name under a prefix of its own.
+        job_log=(
+            f"wrote {CORPUS_ROOT}/shards/1/{CORPUS_DIR} shard 1 of 2: "
+            "6000000 rows, 300000000 encoded bytes, 250000000 stored bytes\n"
+        ),
+    )
+
+
+@needs_shell_tools
+def test_a_sharded_merge_names_the_corpus_its_generation_wrote(tmp_path: Path) -> None:
+    """The shard prefixes are shared, so the directory is chosen by name.
+
+    Every multi-shard preset generated into one bucket writes under the same
+    `shards/<i>/` prefixes, and the batches there are part of each merged
+    corpus rather than leftovers — so a shard prefix holds one directory per
+    preset ever generated, and the merge cannot be the one directory it finds.
+    The name comes from what the generation itself reported writing.
+    """
+    run = _sharded_generation(tmp_path, {})
+
+    assert run.result.returncode == 0, run.result.stderr
+    assert run.result.stdout.strip() == f"{CORPUS_ROOT}/{CORPUS_DIR}"
+    command = _job_command(_named_job(run, "corpus-merge"))
+    assert command == (
+        f"merge-corpus {CORPUS_ROOT}/shards/0/{CORPUS_DIR} {CORPUS_ROOT}/shards/1/{CORPUS_DIR} --out {CORPUS_ROOT}"
+    )
+    # Every shard's copy is read before a merge pod is paid for, and by the
+    # document that says the shard finished rather than by its prefix existing.
+    for shard in (0, 1):
+        assert f"s3 ls {CORPUS_ROOT}/shards/{shard}/{CORPUS_DIR}/corpus.json" in run.aws_calls, run.aws_calls
+
+
+@needs_shell_tools
+def test_a_generation_missing_a_shard_is_refused_before_the_merge(tmp_path: Path) -> None:
+    """A shard that wrote nothing is named, rather than merged around.
+
+    The merge reads every shard's metadata and publishes one document over the
+    lot, so a missing shard is a corpus short of its batches — and the figures
+    the whole run is scored against would describe a workload nobody offered.
+    """
+    run = _sharded_generation(tmp_path, {"STUB_S3_LS_ABSENT": f"shards/1/{CORPUS_DIR}"})
+
+    assert run.result.returncode != 0
+    assert f"{CORPUS_ROOT}/shards/1/{CORPUS_DIR}" in run.result.stderr, run.result.stderr
+    assert [document for document in run.applied if _mapping(document["metadata"])["name"] == "corpus-merge"] == []
 
 
 @needs_shell_tools
