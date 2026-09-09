@@ -18,9 +18,9 @@ from pathlib import Path
 
 import yaml
 
-from engines.flink.script import split_statements
+from engines.flink.script import split_statements, substitute_env
 
-__all__ = ["build_parser", "main", "split_statements"]
+__all__ = ["build_parser", "main", "split_statements", "substitute_env"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,8 +45,11 @@ def read_conf(path: Path) -> dict[str, str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    conf = read_conf(Path(str(args.conf)))
-    statements = split_statements(Path(str(args.sql)).read_text())
+    # The rendered files name their secrets rather than holding them, so this is
+    # where the environment of this container is read into them. Nothing
+    # substituted here is written back to either file.
+    conf = {key: substitute_env(value) for key, value in read_conf(Path(str(args.conf))).items()}
+    statements = split_statements(substitute_env(Path(str(args.sql)).read_text()))
     if not statements:
         raise ValueError(f"{args.sql} holds no statements")
 

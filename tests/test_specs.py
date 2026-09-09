@@ -116,7 +116,7 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     return out, preset.corpus_dir_name(p)
 
 
-def _site_file(tmp_path: Path, corpus_root: str) -> Path:
+def _site_file(tmp_path: Path, corpus_root: str, security: dict[str, str] | None = None, token: str = "shh") -> Path:
     path = tmp_path / "site.yaml"
     path.write_text(
         yaml.safe_dump(
@@ -124,13 +124,13 @@ def _site_file(tmp_path: Path, corpus_root: str) -> Path:
                 "corpus_root": corpus_root,
                 "runs_root": f"file://{tmp_path}/published",
                 "warehouse": f"file://{tmp_path}/wh",
-                "kafka": {"bootstrap_servers": "localhost:9092", "security": {}},
+                "kafka": {"bootstrap_servers": "localhost:9092", "security": security or {}},
                 "catalog": {
                     "props": {
                         "type": "sql",
                         "uri": f"sqlite:///{tmp_path}/catalog.db",
                         "warehouse": f"file://{tmp_path}/wh",
-                        "token": "shh",
+                        "token": token,
                     }
                 },
                 "kubernetes": {},
@@ -244,6 +244,63 @@ def test_stage_refuses_an_existing_topic(tmp_path: Path, corpus: tuple[str, str]
             tmp_path / "runs",
             admin,
             stamp="20260908T140000Z",
+        )
+    assert admin.created == [] and admin.deleted == []
+
+
+def test_a_secret_is_named_in_the_facts_and_resolved_at_the_cluster(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus_root, _ = corpus
+    monkeypatch.setenv("IB_TEST_KAFKA_PASSWORD", "s3cret")
+    monkeypatch.setenv("IB_TEST_CATALOG_TOKEN", "t0ken")
+    site_path = _site_file(
+        tmp_path,
+        corpus_root,
+        security={"security.protocol": "SASL_SSL", "sasl.password": "${env:IB_TEST_KAFKA_PASSWORD}"},
+        token="${env:IB_TEST_CATALOG_TOKEN}",
+    )
+    admin = FakeAdmin()
+    staged = stage.stage(
+        ROOT / "runs" / "smoke-external.yaml", site_path, tmp_path / "runs", admin, stamp="20260908T170000Z"
+    )
+    # The site config keeps the reference, and so does every file staging wrote:
+    # a reference is publishable, and it says which variable a reader must set.
+    assert model.load_site(site_path).kafka_security["sasl.password"] == "${env:IB_TEST_KAFKA_PASSWORD}"
+    facts = json.loads((staged.run_dir / "facts.json").read_text())
+    assert facts["catalog_props"]["token"] == "${env:IB_TEST_CATALOG_TOKEN}"
+    # The value exists only in the calls that need it.
+    assert admin.clients and all(
+        client == {"security.protocol": "SASL_SSL", "sasl.password": "s3cret"} for client in admin.clients
+    )
+
+
+def test_a_literal_credential_is_still_redacted(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    corpus_root, _ = corpus
+    staged = stage.stage(
+        ROOT / "runs" / "smoke-external.yaml",
+        _site_file(tmp_path, corpus_root),
+        tmp_path / "runs",
+        FakeAdmin(),
+        stamp="20260908T171000Z",
+    )
+    facts = json.loads((staged.run_dir / "facts.json").read_text())
+    assert facts["catalog_props"]["token"] == "<redacted>"
+
+
+def test_stage_refuses_an_unset_reference_before_it_creates_anything(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus_root, _ = corpus
+    monkeypatch.delenv("IB_TEST_ABSENT", raising=False)
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="IB_TEST_ABSENT"):
+        stage.stage(
+            ROOT / "runs" / "smoke-external.yaml",
+            _site_file(tmp_path, corpus_root, security={"sasl.password": "${env:IB_TEST_ABSENT}"}),
+            tmp_path / "runs",
+            admin,
+            stamp="20260908T180000Z",
         )
     assert admin.created == [] and admin.deleted == []
 

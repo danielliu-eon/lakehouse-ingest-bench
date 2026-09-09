@@ -14,6 +14,8 @@ from pathlib import Path
 
 from pyiceberg.catalog import Catalog, load_catalog
 
+from ingest_bench.specs.env import resolve_env_placeholders
+
 
 def _parse_key_value(raw: str, source: str) -> tuple[str, str]:
     """One ``KEY=VALUE`` setting, or a refusal naming where it came from.
@@ -42,6 +44,11 @@ def load_catalog_props(values: Sequence[str], files: Sequence[str] = ()) -> dict
     file without editing it. Comment and blank lines are skipped so a property
     file can carry its own provenance. A file is preferred over a flag for a
     credential: on argv a token lands in every process listing.
+
+    A ``${env:NAME}`` value is replaced from the environment before the
+    properties are returned, so a checked-in property file can name a
+    credential without holding one. Every caller here opens a catalog with what
+    it gets back and writes none of it down.
     """
     props: dict[str, str] = {}
     for filename in files:
@@ -59,7 +66,7 @@ def load_catalog_props(values: Sequence[str], files: Sequence[str] = ()) -> dict
     for raw in values:
         key, value = _parse_key_value(raw, "--catalog-prop")
         props[key] = value
-    return props
+    return resolve_env_placeholders(props)
 
 
 def open_catalog(props: dict[str, str]) -> Catalog:

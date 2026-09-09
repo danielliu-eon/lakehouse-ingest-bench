@@ -27,6 +27,7 @@ from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.engines import knobs_for
+from ingest_bench.specs.env import has_placeholder, resolve_env_placeholders
 from ingest_bench.table.create import create_table, parse_partition
 from ingest_bench.table.ddl import spark_sql_ddl
 
@@ -145,10 +146,20 @@ def resolve_corpus_dir(corpus_root: str, name: str) -> str:
 
 
 def redact(props: dict[str, str]) -> dict[str, str]:
-    """``props`` with every credential-shaped value replaced."""
+    """``props`` with every credential-shaped literal value replaced.
+
+    A value that names an environment variable is published as it stands. It is
+    a reference and not a secret, and it is the one thing a reader of
+    `facts.json` needs in order to supply the credential from their own copy of
+    it — redacting it would hide which variable to set.
+    """
     return {
-        key: REDACTED if any(hint in key.lower() for hint in _SECRET_HINTS) else value for key, value in props.items()
+        key: REDACTED if _names_a_secret(key) and not has_placeholder(value) else value for key, value in props.items()
     }
+
+
+def _names_a_secret(key: str) -> bool:
+    return any(hint in key.lower() for hint in _SECRET_HINTS)
 
 
 def replication_factor(brokers: int) -> int:
@@ -239,7 +250,12 @@ def stage(
         knobs = knobs_for(spec.engine)
         knobs.validate(spec.engine_block, spec, meta)
 
-    kafka_client = dict(site.kafka_security)
+    # Resolved here and not at load: the site config, the run's facts and the
+    # engine's rendered script all keep the placeholder, and only the calls
+    # below ever see the value. Both are resolved before the cluster is
+    # touched, so an unset variable is a refusal rather than a half-staged run.
+    kafka_client = resolve_env_placeholders(site.kafka_security)
+    catalog_props = resolve_env_placeholders(site.catalog_props)
     if admin.exists(site.kafka_bootstrap, derived.topic, kafka_client):
         raise ValueError(f"topic {derived.topic!r} already exists on {site.kafka_bootstrap}; it holds another run")
     admin.create(
@@ -253,7 +269,7 @@ def stage(
     try:
         ddl: str | None = None
         if spec.table.managed_by == model.HARNESS:
-            create_table(site.catalog_props, derived.table, meta, partition, harness_table_properties(spec))
+            create_table(catalog_props, derived.table, meta, partition, harness_table_properties(spec))
         else:
             ddl = spark_sql_ddl(meta, derived.table, partition, spec.table.properties)
         facts = _facts(spec, site, derived, ddl)

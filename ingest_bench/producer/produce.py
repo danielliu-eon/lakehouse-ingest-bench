@@ -82,6 +82,10 @@ class ProduceArgs:
     publish_log_path: Path
     behind_max_ms: int
     upload_prefix: str | None
+    # librdkafka client properties from the site, with any environment
+    # indirection already resolved. Applied over the defaults below, so a site
+    # that needs authentication needs no new knob here.
+    kafka_props: dict[str, str]
 
 
 def default_producer_config(bootstrap: str) -> dict[str, object]:
@@ -183,7 +187,7 @@ def run(
             "regenerate the corpus with it or choose another key"
         )
     selected = pacing.select_batches(metadata.read_manifest(args.corpus_uri), args.shard, args.shards, args.seconds)
-    producer = producer_factory(default_producer_config(args.bootstrap))
+    producer = producer_factory({**default_producer_config(args.bootstrap), **args.kafka_props})
     records: list[publish_log.PublishRecord] = []
     offered = 0
     published = 0

@@ -1,22 +1,19 @@
 # Running a benchmark
 
-Phase 1 runs everything on one machine through Docker Compose. That is enough
-to check a change end to end. It is not enough to measure one: the harness, the
-broker, the object store and the engine share the machine's cores, and on an
-arm64 host the engine image is emulated. Treat local figures as a signal that
-the pieces agree, never as a result.
+Phase 1 runs everything on one machine through Docker Compose. That is enough to
+check a change end to end, not to measure one: the harness, the broker, the
+object store and the engine share the machine's cores, and on an arm64 host the
+engine image is emulated. Local figures say the pieces agree, never how fast.
 
 ## Prerequisites
 
 - **Docker** with Compose v2 (`docker compose version`).
-- **`jq`**, **`yq`** (mikefarah, v4) and **`curl`** on the host. The scripts
-  read the run's facts with `jq`, the spec's scoring keys with `yq`, and the
-  engine's readiness with `curl`.
-- **16 GB RAM** available to Docker, and a few GB of its disk. The default
-  smoke corpus is about 1.5 GB encoded and 0.9 GB stored, and it lives inside
-  the object-store container until the stack is torn down.
-- Free ports: 8081 (engine REST), 9000 / 9001 (object store), 8181 (catalog),
-  9092 / 29092 (broker).
+- **`jq`**, **`yq`** (mikefarah, v4) and **`curl`** on the host: the scripts read
+  the run's facts, the spec's scoring keys and the engine's readiness with them.
+- **16 GB RAM** available to Docker, and a few GB of its disk. The default smoke
+  corpus is about 1.5 GB encoded and 0.9 GB stored, and it lives in the
+  object-store container until teardown.
+- Free ports: 8081 (engine REST), 9000 / 9001 (object store), 8181 (catalog), 9092 / 29092 (broker).
 
 `uv sync` is only needed to run the tests and the tools outside a container;
 the smoke builds its own image from the checkout.
@@ -27,7 +24,6 @@ the smoke builds its own image from the checkout.
 scripts/smoke.sh                          # the full 300 s corpus, stock Flink
 scripts/smoke.sh --set duration_s=30      # a 30 s corpus, for a quick check
 scripts/smoke.sh --engine external        # stage and score; you start the engine
-scripts/smoke.sh --keep                   # leave the stack up afterwards
 ```
 
 | Flag | Effect |
@@ -40,28 +36,24 @@ scripts/smoke.sh --keep                   # leave the stack up afterwards
 `EPOCH_LEAD_S`, `IDLE_STOP_S`, `EXTERNAL_READY_WAIT_S`, `FLINK_REST`,
 `FLINK_SLOT_WAIT_S` and `FLINK_JOB_WAIT_S` override the waits.
 
-It exits 0 only when the scorer published `run_valid: true`, and prints the
-verdict block before it does. On a failure it dumps the last lines of the
-scorer's and the engine's logs before tearing the stack down.
+It exits 0 only when the scorer published `run_valid: true`, printing the verdict
+block first; on a failure it dumps the tail of the scorer's and the engine's logs
+before teardown.
 
-Two things to know about repeat runs. Teardown wipes the object store, so each
-run regenerates the corpus; with `--keep`, a second run at a *different*
-`--set` leaves two corpora of the same name and staging refuses rather than
-guess which one to score. Run directories live on the host under `runs/` and
-survive teardown either way.
+On repeat runs: teardown wipes the object store, so each run regenerates the
+corpus, and with `--keep` a second run at a *different* `--set` leaves two
+corpora of the same name that staging refuses to choose between. Run directories
+live on the host under `runs/` and survive teardown either way.
 
-Two things to know about `--set duration_s=30`, both of which make its verdict
-block read oddly. The shipped specs exclude the first 60 seconds after the epoch
-from the freshness window, because a fleet meeting its first rows is
-provisioning rather than lagging; a 30-second corpus is shorter than that, so
-the window collapses to the run's last instant and `freshness.window` reports
-one sample four times over. Read `freshness.full` instead for a short run's
+Two things make `--set duration_s=30`'s verdict block read oddly. The shipped
+specs exclude the first 60 seconds after the epoch from the freshness window,
+because a fleet meeting its first rows is provisioning rather than lagging; a
+30-second corpus is shorter than that, so the window collapses to the run's last
+instant and reports one sample four times over — read `freshness.full` for its
 whole lag curve. And `keepup.absorbed_at_offer_end` comes out near zero, because
-the engine's first commit lands after the last batch was acked — with a
-ten-second checkpoint interval there is barely one commit inside a
-thirty-second offer. The short run is still a real check: the table has to
-drain and exactness has to be clean. It is the freshness bound and the keep-up
-fraction that only a corpus longer than the warmup exercises.
+with a ten-second checkpoint interval there is barely one commit inside a
+thirty-second offer. It still checks that the table drains and that exactness is
+clean; only the freshness bound and the keep-up fraction need a longer corpus.
 
 ## Generating a corpus
 
@@ -76,11 +68,10 @@ batch is `offered_bytes_per_s x batch_interval_ms / 1000`:
 | `events-600mbs-{uniform,skew}` | 600 MB | about 6 GB |
 
 `--shard-index` / `--shard-count` split the batches across processes, which is
-how a large corpus is generated in parallel — but every shard builds whole
-batches of the same size, so sharding buys throughput and not headroom. Either
-600 MB/s preset therefore needs about 6 GB free per generating process. A
-streaming batch writer that removes the whole-batch buffer is a planned
-follow-up.
+how a large corpus is generated in parallel. Every shard still builds whole
+batches, so sharding buys throughput and not headroom: either 600 MB/s preset
+needs about 6 GB free per process. A streaming batch writer that removes the
+whole-batch buffer is a planned follow-up.
 
 ## The Kafka topic
 
@@ -91,36 +82,57 @@ broker dying mid-run does not end it; a smaller cluster gets one replica per
 broker, because a factor above the broker count is refused outright. The local
 stack, one broker, therefore gets 1.
 
+## Credentials
+
+The harness implements no authentication.
+
+**Kafka.** `site.kafka.security` is handed to every Kafka client — the admin
+client that creates the topic, and each producer shard — verbatim, as librdkafka
+properties; `produce --kafka-prop key=value` adds the same properties to one
+shard, over the producer's own defaults. A cluster this repository has never
+heard of is therefore reachable by configuration alone.
+
+**Object storage and catalogs.** The cloud SDK's default credential chain: pod
+identity or an instance role in a cluster, an ambient profile on a laptop. Static
+keys are for the local stack, where they are its published defaults.
+
+**Anything secret is a reference.** Write `${env:NAME}` in `site.kafka.security`,
+`site.catalog.props`, a `--catalog-prop` or a `--kafka-prop`, and the variable is
+read inside the process that uses it, at the call that needs it. Nothing resolves
+at load, so the site config, the run's `facts.json`, `job.sql` and
+`flink-conf.yaml` all keep the placeholder and no rendered file or run artifact
+holds a secret. A managed engine substitutes its own container's environment as
+it submits the job, which is where the variable has to be set. An unset one is
+refused by name rather than substituted empty. A literal credential still works
+and is still redacted out of `facts.json` by property name; a placeholder is
+published as it stands, since it names the variable a reader has to set.
+
 ## Sizing the producer
 
 `scripts/measure-producer.sh` times one producer shard sending a corpus (3 GB
-encoded, ~11.7M rows) into the local Kafka broker with `--epoch` an hour in
-the past — every batch is already due, so the wall clock measures the
-producer alone, not the corpus's own pacing.
+encoded, ~11.7M rows) into the local broker with `--epoch` an hour in the past,
+so every batch is already due and the wall clock measures the producer rather
+than the corpus's pacing.
 
-Median of three runs on an Apple M5 Pro (arm64) under OrbStack — the harness
-image is native arm64, so nothing here is emulated, and Kafka is a single
-local broker sharing this machine's cores with the harness, so the figure is
-a per-process ceiling, not a cluster's:
+Median of three runs on an Apple M5 Pro (arm64) under OrbStack. Nothing here is
+emulated, and the one local broker shares this machine's cores with the harness
+— a per-process ceiling, not a cluster's:
 
 | Metric | Median | Runs |
 |---|---|---|
 | MB/s (encoded) | 115.6 | 115.57, 120.20, 115.57 |
 | rows/s | 449,182 | 449182, 467149, 449182 |
 
-Both comfortably clear the 30 MB/s floor below which the spec's fallback (a
-compiled producer) would be worth building; nothing here calls for it.
-
-Use the median to size a shard count for an offer:
+Both clear the 30 MB/s floor below which the spec's fallback, a compiled
+producer, would be worth building. Size an offer's shard count from the median:
 
 ```
 shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
 ```
 
-e.g. offering 500 MB/s needs `ceil(500 / 115.6 * 1.5) = 7` shards. Rerun the
-script after a change to the producer or the encoder, and on the machine that
-will actually run the offer — this figure is one laptop's, not a promise
-about any other host.
+Offering 500 MB/s needs `ceil(500 / 115.6 * 1.5) = 7` shards. Rerun the script
+after a change to the producer or the encoder, and on the machine that will run
+the offer — this figure is one laptop's.
 
 ## The run directory
 
@@ -147,12 +159,11 @@ the scorer reads the offered side from there rather than from the local disk.
 
 ## Reading the verdict
 
-**`run_valid`** is the only field that decides whether a result may be
-published. It is true when all five hold: the table held the corpus's columns,
-it drained, the freshness p95 stayed inside the spec's bound, exactness found
-no loss, duplication or corruption in any offered batch, and the producer kept
-to its schedule. It is false for a run still going — a partial run's lag is a
-lower bound and its exactness an upper one.
+**`run_valid`** is the only field that decides whether a result may be published.
+It is true when all five hold: the table held the corpus's columns, it drained,
+the freshness p95 stayed inside the spec's bound, exactness found no loss,
+duplication or corruption, and the producer kept to its schedule. It is false for
+a run still going — a partial run's lag is a lower bound, its exactness an upper.
 
 **`state`** says how the run ended.
 
@@ -160,16 +171,15 @@ lower bound and its exactness an upper one.
 - `idle_stop` — the table stopped taking commits with rows still outstanding.
   The engine died, fell behind past the scorer's patience, or never consumed.
 - `producer_bound` — see below.
-- `void` — the table does not hold the columns the corpus published, so
-  nothing measured against it describes the corpus. `reason` names each
-  column that is missing or of the wrong type.
+- `void` — the table's columns are not the ones the corpus published, so nothing
+  measured against it describes the corpus. `reason` names each column that is
+  missing, of the wrong type, or optional where the corpus is required.
 
-**`producer_bound`** means the offer, not the engine, set the rate: some batch
-was acked more than `producer.behind_max_ms` after it was due, or a delivery
-errored. Such a run says nothing about how fresh an engine kept the table, so
-it is void rather than reported as engine lag. It usually means the producer
-was starved of CPU by everything else on the machine — the first thing to try
-is a smaller corpus or a lower `--speed`.
+**`producer_bound`** means the offer, not the engine, set the rate: a batch was
+acked more than `producer.behind_max_ms` after it was due, or a delivery errored.
+Such a run says nothing about how fresh an engine kept the table. It usually
+means the producer was starved of CPU by everything else on the machine; try a
+smaller corpus or a lower `--speed`.
 
 Beyond those: `prefix` against `last_batch` is how far the contiguous
 completeness watermark got, `freshness.window` carries the p50/p95/p99/max lag
@@ -177,10 +187,10 @@ in seconds after the warmup, and `keepup.absorbed_at_offer_end` is the fraction
 of the offer that had already landed when the last batch was acked.
 
 A breached freshness bound with clean exactness and a `drained` state is not a
-malfunction: it is the fleet being too small for the offer, which is the thing
-the benchmark exists to detect. `engines/flink/README.md` carries the two
-measured points for the smoke corpus.
+malfunction: it is the fleet being too small for the offer, which is what the
+benchmark exists to detect. `engines/flink/README.md` carries two measured
+points for the smoke corpus.
 
-`gate --out runs/<run_id>/scores` answers `PASS`, `UNDERSIZED` or `VOID` from
-the same artifacts while a run is still going, which is what a sweep uses to
-abandon an undersized fleet early.
+`gate --out runs/<run_id>/scores` answers `PASS`, `UNDERSIZED` or `VOID` from the
+same artifacts while a run is still going, which a sweep uses to abandon an
+undersized fleet early.

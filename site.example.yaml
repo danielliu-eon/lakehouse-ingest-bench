@@ -6,9 +6,10 @@ kafka:
   # No replication knob: staging counts the cluster's brokers and asks for
   # min(3, brokers) replicas. See docs/running.md.
   bootstrap_servers: YOUR_BOOTSTRAP:9092
-  security: {}                      # optional librdkafka security.* / sasl.* keys; never copied into run.json
+  security: {}                      # optional librdkafka security.* / sasl.* keys, passed to every client
+                                    # verbatim. Use ${env:NAME} for a secret; see docs/running.md.
 catalog:
-  props:                            # passed to pyiceberg and rendered into engine configs
+  props:                            # passed to pyiceberg and rendered into engine configs; ${env:NAME} works here too
     uri: http://YOUR_CATALOG:8181
     warehouse: s3://YOUR_BUCKET/warehouse
 kubernetes: {}                      # phase 2: context, service account, node placement

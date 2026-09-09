@@ -8,6 +8,7 @@ import pytest
 
 from ingest_bench import uri
 from ingest_bench.corpus import generate, preset
+from ingest_bench.producer import cli as producer_cli
 from ingest_bench.producer import pacing, produce, publish_log
 
 WORKLOADS = Path(__file__).resolve().parents[1] / "workloads"
@@ -109,6 +110,7 @@ def test_run_writes_publish_log_and_fails_on_delivery_error(tmp_path: Path, corp
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        kafka_props={},
     )
     fp = FakeProducer(clock)
     assert produce.run(args, lambda cfg: fp, clock, log) == 0
@@ -154,6 +156,7 @@ def test_key_column_must_have_a_sidecar(tmp_path: Path, corpus_uri: str) -> None
         publish_log_path=tmp_path / "p.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        kafka_props={},
     )
     with pytest.raises(ValueError, match="kafka_key_columns"):
         produce.run(args, lambda cfg: FakeProducer(clock), clock, io.StringIO())
@@ -188,6 +191,7 @@ def test_done_trailer_marks_the_shard_finished(tmp_path: Path, corpus_uri: str) 
         publish_log_path=finished,
         behind_max_ms=5000,
         upload_prefix=None,
+        kafka_props={},
     )
     assert produce.run(args, lambda cfg: FakeProducer(clock), clock, log) == 0
     assert "PRODUCE DONE" in log.getvalue()
@@ -237,9 +241,100 @@ def test_upload_prefix_publishes_the_log(tmp_path: Path, corpus_uri: str) -> Non
         publish_log_path=tmp_path / "local" / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=str(uploads),
+        kafka_props={},
     )
     assert produce.run(args, lambda cfg: FakeProducer(clock), clock, io.StringIO()) == 0
     uploaded = uploads / "producer" / "publish_log-0.jsonl"
     assert uploaded.read_bytes() == (tmp_path / "local" / "publish_log-0.jsonl").read_bytes()
     assert [r.batch for r in publish_log.read_all(str(uploads / "producer"))] == [0, 1, 2, 3]
     assert publish_log.shard_done(uploaded)
+
+
+def test_kafka_props_apply_over_the_producer_defaults(tmp_path: Path, corpus_uri: str) -> None:
+    clock = FakeClock(1_700_000_000_000)
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9092",
+        topic="t",
+        epoch_ms=clock.now_ms(),
+        speed=1000.0,
+        shard=0,
+        shards=1,
+        seconds=None,
+        key_column=None,
+        publish_log_path=tmp_path / "publish_log-0.jsonl",
+        behind_max_ms=5000,
+        upload_prefix=None,
+        kafka_props={"security.protocol": "SASL_SSL", "linger.ms": "20"},
+    )
+    configs: list[dict[str, object]] = []
+
+    def factory(config: dict[str, object]) -> produce.FrameProducer:
+        configs.append(config)
+        return FakeProducer(clock)
+
+    assert produce.run(args, factory, clock, io.StringIO()) == 0
+    # The site's properties win, and the defaults it says nothing about stand.
+    assert configs[0]["security.protocol"] == "SASL_SSL" and configs[0]["linger.ms"] == "20"
+    assert configs[0]["bootstrap.servers"] == "fake:9092" and configs[0]["enable.idempotence"] is True
+
+
+def test_the_cli_resolves_a_kafka_prop_reference(
+    tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IB_TEST_SASL_PASSWORD", "s3cret")
+    seen: list[produce.ProduceArgs] = []
+
+    def capture(
+        args: produce.ProduceArgs,
+        factory: Callable[[dict[str, object]], produce.FrameProducer],
+        clock: object,
+        log: object,
+    ) -> int:
+        seen.append(args)
+        return 0
+
+    # The CLI reaches the loop through its own module attribute, so this is the
+    # function it will call.
+    monkeypatch.setattr(producer_cli, "run", capture)
+    assert (
+        producer_cli.main(
+            [
+                "--corpus",
+                corpus_uri,
+                "--bootstrap",
+                "fake:9092",
+                "--topic",
+                "t",
+                "--epoch",
+                "1700000000",
+                "--publish-log",
+                str(tmp_path / "publish_log-0.jsonl"),
+                "--kafka-prop",
+                "security.protocol=SASL_SSL",
+                "--kafka-prop",
+                "sasl.password=${env:IB_TEST_SASL_PASSWORD}",
+            ]
+        )
+        == 0
+    )
+    assert seen[0].kafka_props == {"security.protocol": "SASL_SSL", "sasl.password": "s3cret"}
+
+    monkeypatch.delenv("IB_TEST_SASL_PASSWORD")
+    with pytest.raises(ValueError, match="IB_TEST_SASL_PASSWORD"):
+        producer_cli.main(
+            [
+                "--corpus",
+                corpus_uri,
+                "--bootstrap",
+                "fake:9092",
+                "--topic",
+                "t",
+                "--epoch",
+                "1700000000",
+                "--publish-log",
+                str(tmp_path / "publish_log-0.jsonl"),
+                "--kafka-prop",
+                "sasl.password=${env:IB_TEST_SASL_PASSWORD}",
+            ]
+        )

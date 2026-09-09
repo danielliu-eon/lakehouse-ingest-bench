@@ -89,6 +89,19 @@ def test_catalog_props_files_then_flags(tmp_path: Path) -> None:
         cat.table_identifier("t")
 
 
+def test_catalog_props_resolve_an_environment_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IB_TEST_CATALOG_TOKEN", "t0ken")
+    f = tmp_path / "p.props"
+    f.write_text("uri=http://a\ntoken=${env:IB_TEST_CATALOG_TOKEN}\n")
+    # A property file may be checked in, so it names the credential rather than
+    # holding it, and only the catalog client ever sees the value.
+    assert cat.load_catalog_props([], [str(f)])["token"] == "t0ken"
+    assert cat.load_catalog_props(["token=${env:IB_TEST_CATALOG_TOKEN}"])["token"] == "t0ken"
+    monkeypatch.delenv("IB_TEST_CATALOG_TOKEN")
+    with pytest.raises(ValueError, match="IB_TEST_CATALOG_TOKEN"):
+        cat.load_catalog_props([], [str(f)])
+
+
 def test_ddl_only_prints_the_ddl_and_reaches_no_catalog(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, corpus: metadata.CorpusMetadata
 ) -> None:

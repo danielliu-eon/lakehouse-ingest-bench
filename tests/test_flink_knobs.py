@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from engines.flink import job, knobs
+from engines.flink import job, knobs, script
 from ingest_bench import uri
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.specs import derive, model
@@ -174,3 +174,34 @@ def test_the_external_example_is_what_the_renderer_produces(meta: metadata.Corpu
     example = ROOT / "docs" / "examples" / "external-flink"
     for name, content in knobs.render(spec, site, placeholders, meta).items():
         assert (example / name).read_text() == content, f"{example / name} is stale; re-render it"
+
+
+def test_a_secret_is_named_in_the_rendered_files_and_read_in_the_container(
+    meta: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    spec = replace(
+        spec, engine_block={**spec.engine_block, "extra_flink_conf": {"custom.secret": "${env:IB_TEST_FLINK_SECRET}"}}
+    )
+    site = replace(
+        _site(),
+        kafka_security={"security.protocol": "SASL_SSL", "sasl.password": "${env:IB_TEST_FLINK_SECRET}"},
+    )
+    d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    rendered = knobs.render(spec, site, d, meta)
+
+    # The renderer runs in the harness and writes what a reader may keep: the
+    # variable's name, never its value.
+    assert "'properties.sasl.password' = '${env:IB_TEST_FLINK_SECRET}'" in rendered[knobs.SQL_FILE]
+    assert "custom.secret: ${env:IB_TEST_FLINK_SECRET}" in rendered[knobs.CONF_FILE]
+
+    conf_path = tmp_path / knobs.CONF_FILE
+    conf_path.write_text(rendered[knobs.CONF_FILE])
+    monkeypatch.setenv("IB_TEST_FLINK_SECRET", "s3cret")
+    assert "'properties.sasl.password' = 's3cret'" in script.substitute_env(rendered[knobs.SQL_FILE])
+    assert job.read_conf(conf_path)["custom.secret"] == "${env:IB_TEST_FLINK_SECRET}"
+    assert script.substitute_env(job.read_conf(conf_path)["custom.secret"]) == "s3cret"
+
+    monkeypatch.delenv("IB_TEST_FLINK_SECRET")
+    with pytest.raises(ValueError, match=r"\$\{env:IB_TEST_FLINK_SECRET\} is not set in the environment"):
+        script.substitute_env(rendered[knobs.SQL_FILE])

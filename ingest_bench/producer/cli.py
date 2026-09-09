@@ -14,8 +14,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from ingest_bench.catalog import parse_key_values
 from ingest_bench.clock import SystemClock
 from ingest_bench.producer.produce import FrameProducer, ProduceArgs, run
+from ingest_bench.specs.env import resolve_env_placeholders
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--upload-prefix", metavar="URI", help="copy the publish log under this prefix as it is written"
     )
+    parser.add_argument(
+        "--kafka-prop",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="a librdkafka client property (security.protocol=..., sasl.username=...), repeatable. Applied over "
+        "the producer's own defaults; a ${env:NAME} value is read from the environment of this process",
+    )
     return parser
 
 
@@ -60,6 +70,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         publish_log_path=Path(str(parsed.publish_log)),
         behind_max_ms=int(parsed.behind_max_ms),
         upload_prefix=None if parsed.upload_prefix is None else str(parsed.upload_prefix),
+        kafka_props=resolve_env_placeholders(
+            parse_key_values([str(prop) for prop in parsed.kafka_prop], "--kafka-prop")
+        ),
     )
     return run(args, _confluent_producer, SystemClock(), sys.stdout)
 
