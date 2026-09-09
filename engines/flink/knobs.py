@@ -45,8 +45,11 @@ HASH = "hash"
 RANGE = "range"
 DISTRIBUTION_MODES = frozenset({NONE, HASH, RANGE})
 
-# The image the operator starts, under the registry the site names.
-_IMAGE_REPOSITORY = "lakehouse-ingest-bench/flink"
+# The image the operator starts, under the registry the site names. Public
+# because it is one of three statements of this name — `push-images.sh` pushes
+# it and `deploy/aws/setup.sh` creates the repository — and a test holds the
+# three together.
+IMAGE_REPOSITORY = "lakehouse-ingest-bench/flink"
 
 # The Flink the image carries, in the two spellings the documents need: the
 # operator's version label, and the jar whose driver runs a Python job.
@@ -669,7 +672,7 @@ def render_flinkdeployment(
         "kind": "FlinkDeployment",
         "metadata": {"name": kubernetes_name(derived.run_id), "namespace": cluster.namespace},
         "spec": {
-            "image": f"{cluster.registry}/{_IMAGE_REPOSITORY}:{image_tag}",
+            "image": f"{cluster.registry}/{IMAGE_REPOSITORY}:{image_tag}",
             "flinkVersion": _FLINK_VERSION_LABEL,
             # Standalone and not the operator's native mode: native asks
             # Kubernetes for the taskmanagers the job's parallelism implies,

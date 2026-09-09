@@ -464,6 +464,32 @@ def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> No
     assert 'FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-' in setup, "the pin should be overridable"
 
 
+def test_every_engine_s_image_is_pushed_and_has_a_repository_to_be_pushed_to() -> None:
+    """One image name, stated in three places: the renderer, the push and the account.
+
+    A renderer naming a repository nothing pushes leaves the operator waiting on
+    an `ImagePullBackOff`, and a push to a repository `setup.sh` never created
+    fails on a registry 404 — both minutes into a campaign, and both from a name
+    that was only ever written down twice.
+    """
+    prefix = re.search(r"^IMAGE_REPOSITORY_PREFIX=(\S+)$", (SCRIPTS / "_k8s.sh").read_text(), re.M)
+    assert prefix is not None, "_k8s.sh no longer states the registry path both images are pushed under"
+    listed = re.search(r'^ECR_REPOSITORIES="([^"]+)"$', AWS_SETUP.read_text(), re.M)
+    assert listed is not None, "setup.sh no longer states one list of ECR repositories"
+    created = set(listed.group(1).split())
+
+    pushed = set(
+        re.findall(r'^\w+_REF="\$REGISTRY/\$IMAGE_REPOSITORY_PREFIX/(\S+):\$TAG"$', PUSH_IMAGES.read_text(), re.M)
+    )
+    assert pushed, "push-images.sh no longer builds any reference from the registry and the tag"
+    assert {f"{prefix.group(1)}/{name}" for name in pushed} == created
+
+    # The harness image is nobody's engine, so it is the one pushed repository
+    # with no renderer behind it.
+    rendered = {str(engines.knobs_for(engine).IMAGE_REPOSITORY) for engine in engines.MANAGED}
+    assert rendered == created - {f"{prefix.group(1)}/harness"}
+
+
 def test_the_setup_script_renders_only_the_placeholders_it_exports() -> None:
     """The envsubst argument in `setup.sh` and the documents' variables are one list.
 

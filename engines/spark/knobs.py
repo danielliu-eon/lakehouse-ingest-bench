@@ -65,7 +65,11 @@ REST = "rest"
 # The image the operator starts, under the registry the site names, and the
 # Spark inside it. `sparkVersion` is a required field of a SparkApplication;
 # a test holds this to the tag the Dockerfile pins so the two cannot drift.
-_IMAGE_REPOSITORY = "lakehouse-ingest-bench/spark"
+#
+# The repository is public because it is one of three statements of this name —
+# `push-images.sh` pushes it and `deploy/aws/setup.sh` creates the repository —
+# and a test holds the three together.
+IMAGE_REPOSITORY = "lakehouse-ingest-bench/spark"
 SPARK_VERSION = "3.5.9"
 
 # The job, as the operator submits it: a `local://` reference is a path inside
@@ -692,7 +696,7 @@ def render_sparkapplication(
             # the fleet a run is costed for is the fleet the cluster scheduled
             # rather than one attached to whatever submitted it.
             "mode": "cluster",
-            "image": f"{cluster.registry}/{_IMAGE_REPOSITORY}:{image_tag}",
+            "image": f"{cluster.registry}/{IMAGE_REPOSITORY}:{image_tag}",
             # The tag is a commit, so an image already on the node is the image
             # that tag names and pulling it again buys nothing.
             "imagePullPolicy": "IfNotPresent",
