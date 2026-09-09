@@ -19,6 +19,7 @@ import pytest
 
 from engines.flink import verify as verify_module
 from engines.flink.verify import duration_ms, verify
+from ingest_bench.specs import engines
 from ingest_bench.specs.model import RunSpec, load_run_spec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,18 @@ def _fetch(answers: dict[str, object]) -> Callable[[str], object]:
 
 def test_an_engine_that_honours_the_spec_reports_nothing() -> None:
     assert verify(_spec(), RUN_ID, _fetch(_answers())) == []
+
+
+def test_the_registry_finds_this_module_beside_the_knobs() -> None:
+    """A managed engine registers one module, and its siblings are found by it.
+
+    So a driver that has a spec's engine name can reach this check without the
+    name of the module holding it, and an engine that ships none is a refusal
+    naming the engine rather than an import error from inside the harness.
+    """
+    assert engines.verify_for("flink") is verify_module
+    with pytest.raises(ValueError, match="unicorn"):
+        engines.verify_for("unicorn")
 
 
 @pytest.mark.parametrize(
