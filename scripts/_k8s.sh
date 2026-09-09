@@ -21,6 +21,11 @@ SITE_FILE="${SITE_FILE:-./site.yaml}"
 # reference is built from.
 IMAGE_REPOSITORY_PREFIX=lakehouse-ingest-bench
 
+# How often a Job's conditions are read while waiting on it. Ten seconds is
+# below the resolution of anything worth waiting for here and costs one API
+# request; the wait itself is hours long for a corpus.
+K8S_JOB_POLL_S="${K8S_JOB_POLL_S:-10}"
+
 # ---------------------------------------------------------------------------
 # Reading the site
 # ---------------------------------------------------------------------------
@@ -99,20 +104,43 @@ k8s_render_apply() {
 		kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" apply -f - >&2
 }
 
-# Wait for a Job to complete, and print its own log if it does not.
+_k8s_job_tail() {
+	log "--- last 40 lines of job/$1 ---"
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "job/$1" --tail=40 >&2 || true
+}
+
+# Wait for a Job to reach one of its two ends, and print its own log unless it
+# was the good one.
 #
-# A Job that failed holds no `complete` condition and so waits out the whole
-# timeout; the log printed on the way out is what says which of the two
-# happened. Size the timeout to the command, not to the wait.
+# Both conditions are read, rather than waiting on `condition=complete` alone: a
+# failed Job never gains that condition, so a single wait would spend the whole
+# timeout — hours, for a generation — to report a failure the Job announced in
+# seconds. Size the timeout to the command, not to the wait.
 k8s_wait_job() {
-	local name=$1 timeout_s=$2
+	local name=$1 timeout_s=$2 waited=0 conditions=""
 	log "waiting up to ${timeout_s}s for job/$name"
-	if ! kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" \
-		wait --for=condition=complete --timeout="${timeout_s}s" "job/$name" >&2; then
-		log "--- last 40 lines of job/$name ---"
-		kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "job/$name" --tail=40 >&2 || true
-		die "job/$name did not complete within ${timeout_s}s; the lines above are its own log"
-	fi
+	while :; do
+		# Only the conditions the API says are true, one type per line, so a
+		# `Failed: False` cannot be read as a failure.
+		conditions="$(kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "job/$name" \
+			-o 'jsonpath={range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}')" ||
+			die "could not read job/$name; try: kubectl get job/$name"
+		case "$conditions" in
+		*Failed*)
+			_k8s_job_tail "$name"
+			die "job/$name failed; the lines above are its own log"
+			;;
+		*Complete*)
+			log "job/$name completed"
+			return 0
+			;;
+		esac
+		((waited < timeout_s)) || break
+		sleep "$K8S_JOB_POLL_S"
+		waited=$((waited + K8S_JOB_POLL_S))
+	done
+	_k8s_job_tail "$name"
+	die "job/$name did not complete within ${timeout_s}s; the lines above are its own log"
 }
 
 # One Job's log, on stdout, because a driver parses it: the harness commands
