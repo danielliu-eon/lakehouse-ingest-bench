@@ -68,9 +68,11 @@ ignore_missing_imports = true
 
 # PyFlink is installed in the engine's image, never in this environment: it
 # ships only x86_64 Linux and macOS wheels, and the harness has no reason to
-# import the submitter that uses it.
+# import the submitter that uses it. PySpark is the same arrangement: the job
+# runs inside the Spark image, and the module holding it is importable here so
+# that the renderer can be checked against it.
 [[tool.mypy.overrides]]
-module = ["pyflink.*"]
+module = ["pyflink.*", "pyspark.*"]
 ignore_missing_imports = true
 
 # `confluent_kafka.admin` ships type information but declares no `__all__`, so

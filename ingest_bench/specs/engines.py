@@ -13,7 +13,7 @@ from __future__ import annotations
 import importlib
 from types import ModuleType
 
-MANAGED: dict[str, str] = {"flink": "engines.flink.knobs"}
+MANAGED: dict[str, str] = {"flink": "engines.flink.knobs", "spark": "engines.spark.knobs"}
 
 KNOBS_MODULE = "knobs"
 FLEET_MODULE = "fleet"
