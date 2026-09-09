@@ -29,7 +29,7 @@ def test_avro_schema_types() -> None:
     fields = {f["name"]: f["type"] for f in schema["fields"]}  # type: ignore[attr-defined]
     assert fields["id"] == "long"
     assert fields["partition_key"] == "string"
-    assert fields["event_time"] == {"type": "long", "logicalType": "timestamp-micros"}
+    assert fields["event_time"] == {"type": "long", "logicalType": "timestamp-millis"}
     assert fields["payload"] == "bytes"
     assert schema["name"] == "event"
 
@@ -64,10 +64,13 @@ def test_overrides_patch_one_column() -> None:
 
 def test_iceberg_type_names() -> None:
     assert c.iceberg_type_name("long") == "long"
-    assert c.iceberg_type_name({"type": "long", "logicalType": "timestamp-micros"}) == "timestamp"
+    assert c.iceberg_type_name({"type": "long", "logicalType": "timestamp-millis"}) == "timestamp"
     assert c.iceberg_type_name("bytes") == "binary"
     with pytest.raises(ValueError):
         c.iceberg_type_name("float")
+    # Not a type any corpus publishes, so it has no name to hand an engine.
+    with pytest.raises(ValueError):
+        c.iceberg_type_name({"type": "long", "logicalType": "timestamp-micros"})
 
 
 def test_events_json_has_no_internal_vocabulary() -> None:

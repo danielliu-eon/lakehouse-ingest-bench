@@ -151,18 +151,18 @@ def test_the_reader_schema_is_the_corpus_schema_with_zoneless_timestamps(
 ) -> None:
     """`from_avro` has to yield the zoneless timestamp the table's column is.
 
-    Avro's `timestamp-micros` and `local-timestamp-micros` annotate the same
+    Avro's `timestamp-millis` and `local-timestamp-millis` annotate the same
     `long` and encode identically — the annotation is not on the wire — so the
     rewrite reads the corpus's bytes unchanged while making Spark produce a
     `TimestampNTZ` rather than a zoned instant, which would land in a
     `timestamptz` column the table does not have.
     """
-    published = {"type": "long", "logicalType": "timestamp-micros"}
-    zoneless = {"type": "long", "logicalType": "local-timestamp-micros"}
+    published = {"type": "long", "logicalType": "timestamp-millis"}
+    zoneless = {"type": "long", "logicalType": "local-timestamp-millis"}
     fields = cast(list[dict[str, object]], meta.schema["fields"])
     expected = [{**field, "type": zoneless} if field["type"] == published else field for field in fields]
     assert [field for field in expected if field["type"] == zoneless], (
-        "the corpus publishes no microsecond timestamp, so the rewrite is untested"
+        "the corpus publishes no millisecond timestamp, so the rewrite is untested"
     )
     assert json.loads(knobs.render_reader_schema(meta)) == {**meta.schema, "fields": expected}
 

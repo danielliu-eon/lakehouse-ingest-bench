@@ -55,7 +55,12 @@ ADD https://repo1.maven.org/maven2/org/xerial/snappy/snappy-java/${SNAPPY_JAVA_V
 # resolves the pod's own credentials, so an MSK IAM connection needs a region
 # and no secret anywhere.
 ADD https://repo1.maven.org/maven2/software/amazon/msk/aws-msk-iam-auth/${MSK_IAM_AUTH_VERSION}/aws-msk-iam-auth-${MSK_IAM_AUTH_VERSION}-all.jar .
-ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro/${FLINK_VERSION}/flink-sql-avro-${FLINK_VERSION}.jar .
+# The registry jar and not the plain `flink-sql-avro`: it is a shading run over
+# that module plus the Confluent registry format and its client, and its
+# factory service file registers `avro` alongside `avro-confluent`. So this one
+# jar serves both formats a run can ask for, where the two jars together would
+# carry the same shaded Avro and `flink-avro` classes twice.
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/${FLINK_VERSION}/flink-sql-avro-confluent-registry-${FLINK_VERSION}.jar .
 # Iceberg's Flink runtime resolves a table through Hadoop's `Configuration`
 # whichever FileIO then reads it, so Hadoop is needed even for object storage.
 #

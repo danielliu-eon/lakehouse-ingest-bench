@@ -25,7 +25,10 @@ Six rules. Break one and the run is not comparable to any other.
    nullable; a corpus column that is dropped, renamed, retyped or optional voids
    the run. `corpus.json` publishes the Iceberg type of every column, and the
    scorer checks the table's columns, their types and their required-ness
-   against it the first time it loads the table. Nullability counts because an
+   against it the first time it loads the table. One column needs a word of its
+   own: the event-time column is Avro `timestamp-millis` on the wire and Iceberg
+   `timestamp` — zoneless, microsecond — in the table, so an engine widens the
+   millisecond it read and never rounds it. Nullability counts because an
    optional column is encoded differently, so the file geometry two runs are
    compared on would stop being a fact about their engines. This is the rule
    that matters when the engine creates the table, since the harness then never
@@ -89,10 +92,10 @@ credential, where the registry needs one, is the operator's and is not in
 Nothing else about the run changes: the rows, the keys, the table and the
 scoring are what a raw-Avro run's are.
 
-The shipped external spec for this is `runs/smoke-external-confluent.yaml`.
-Flink cannot be the engine on it — its registry format cannot plan the
-corpus's microsecond timestamp column, and `engines/flink/README.md` has the
-two upstream reasons — so the walk-through below is a raw-Avro run.
+The shipped external spec for this is `runs/smoke-external-confluent.yaml`, and
+both managed engines read the framing too — `runs/smoke-flink-confluent.yaml`
+and `runs/smoke-spark-confluent.yaml`. The walk-through below is a raw-Avro run,
+since the framing is the one thing about it that would differ.
 
 ## Walk-through: an engine the harness does not manage
 

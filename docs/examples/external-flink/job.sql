@@ -1,7 +1,7 @@
 CREATE TABLE kafka_source (
   id BIGINT NOT NULL,
   partition_key STRING NOT NULL,
-  event_time TIMESTAMP(6) NOT NULL,
+  event_time TIMESTAMP(3) NOT NULL,
   event_id STRING NOT NULL,
   event_type STRING NOT NULL,
   user_id STRING NOT NULL,

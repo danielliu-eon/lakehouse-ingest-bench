@@ -10,15 +10,15 @@ from ingest_bench.corpus import values as v
 
 SCHEMAS = Path(__file__).resolve().parents[1] / "workloads" / "schemas"
 COLUMNS = c.load_schema(SCHEMAS / "events.json")
-EPOCH_US = 1_767_225_600_000_000  # 2026-01-01T00:00:00Z
-INTERVAL_US = 1_000_000
+EPOCH_MS = 1_767_225_600_000  # 2026-01-01T00:00:00Z
+INTERVAL_MS = 1000
 
 
 def _block(seed: int = 7, batch: int = 3, start: int = 0, rows: int = 64) -> v.RowBlock:
     cdf = v.zipf_cdf(64, 1.0)
     keys = v.draw_partition_keys(seed, batch, start, rows, cdf)
     width = v.calibrate_payload_width(seed, 256, COLUMNS)
-    return v.build_row_block(seed, batch, start, keys, width, EPOCH_US + batch * INTERVAL_US, INTERVAL_US, COLUMNS)
+    return v.build_row_block(seed, batch, start, keys, width, EPOCH_MS + batch * INTERVAL_MS, INTERVAL_MS, COLUMNS)
 
 
 def test_ids_are_batch_block_plus_position() -> None:
@@ -45,8 +45,14 @@ def test_records_decode_with_fastavro_under_the_published_schema() -> None:
         row = cast(dict[str, object], fastavro.schemaless_reader(io.BytesIO(data[offsets[i] : offsets[i + 1]]), schema))
         assert row["id"] == block.ids[i]
         assert row["partition_key"] == v.partition_label(int(block.partition_keys[i]))
+        drawn = cast(int, block.values["event_time"][i])
+        assert EPOCH_MS + 3 * INTERVAL_MS <= drawn < EPOCH_MS + 4 * INTERVAL_MS
+        # fastavro renders `timestamp-millis` as an aware datetime, and the
+        # instant it renders is the drawn epoch millisecond with nothing finer
+        # under it — which is what the engines have to commit unchanged.
         event_time = cast(datetime, row["event_time"])
-        assert EPOCH_US + 3 * INTERVAL_US <= event_time.timestamp() * 1e6 < EPOCH_US + 4 * INTERVAL_US
+        assert round(event_time.timestamp() * 1000) == drawn
+        assert event_time.microsecond % 1000 == 0
 
 
 def test_calibration_lands_within_two_percent() -> None:

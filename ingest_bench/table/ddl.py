@@ -14,7 +14,7 @@ from ingest_bench.table.create import IDENTITY, UNPARTITIONED, Partition
 
 # The Spark SQL type each type name a corpus publishes is declared as.
 # `TIMESTAMP_NTZ` rather than `TIMESTAMP`: the corpus carries wall-clock
-# microseconds with no zone, and Spark's zoned `TIMESTAMP` maps to Iceberg's
+# milliseconds with no zone, and Spark's zoned `TIMESTAMP` maps to Iceberg's
 # `timestamptz`, which is a different Iceberg type than `create` builds.
 _TYPES = {
     "long": "BIGINT",

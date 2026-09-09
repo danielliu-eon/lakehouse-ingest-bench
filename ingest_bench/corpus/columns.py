@@ -100,7 +100,7 @@ AVRO_TYPE_BY_KIND: dict[str, object] = {
     KIND_INTEGER: "long",
     KIND_DECIMAL: "double",
     KIND_BOOLEAN: "boolean",
-    KIND_TIMESTAMP: {"type": "long", "logicalType": "timestamp-micros"},
+    KIND_TIMESTAMP: {"type": "long", "logicalType": "timestamp-millis"},
     KIND_BLOB: "bytes",
 }
 
@@ -451,6 +451,8 @@ def iceberg_type_name(avro_type: object) -> str:
         return "string"
     if avro_type == "bytes":
         return "binary"
-    if isinstance(avro_type, dict) and avro_type.get("logicalType") == "timestamp-micros":
+    # Iceberg's `timestamp` is microsecond-precision and has no narrower form,
+    # so a millisecond event time lands in it widened rather than truncated.
+    if isinstance(avro_type, dict) and avro_type.get("logicalType") == "timestamp-millis":
         return "timestamp"
     raise ValueError(f"unsupported corpus Avro type: {avro_type!r}")

@@ -9,7 +9,7 @@ or serializer is written here — so a Flink result is Flink's.
 | Piece | What it is |
 |---|---|
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
-| Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
+| Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro-confluent-registry:1.20.1` — one shaded jar registering both the `avro` and the `avro-confluent` format |
 | Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
@@ -162,34 +162,39 @@ unchanged bar one, and `type` is translated rather than passed on:
 | `s3.{endpoint,access-key-id,secret-access-key,path-style-access}` | unchanged |
 | `site.warehouse` on `s3://` / `gs://` | adds the matching `'io-impl'`. The catalog's own `warehouse` is not always a location — a Glue REST endpoint takes the account id there — so the scheme is read off the site's warehouse instead |
 
-## Confluent wire format: refused, and why
+## Wire formats and the timestamp column
 
-`kafka.value_encoding: confluent` is refused at stage time for a Flink run —
-`knobs.validate` raises, before a topic exists — because Flink 1.20.1 cannot
-read such a topic without changing the data. Two upstream facts, the second of
-which rules out the way round the first:
+A run's `kafka.value_encoding` picks the source's format, and both formats read
+the same DDL:
 
-- **`avro-confluent` cannot plan a `TIMESTAMP(6)` column.** It builds its
-  reader schema from the DDL under Flink's legacy Avro timestamp mapping, which
-  caps SQL `TIMESTAMP` at milliseconds, and it declares no option to disable
-  that mapping (`avro.timestamp_mapping.legacy` belongs to the plain `avro`
-  format; an unknown `avro-confluent.*` key fails validation). Its own `schema`
-  option does not help: `RegistryAvroFormatFactory` passes the DDL conversion
-  to `Optional.orElse`, which evaluates eagerly, so the conversion runs — and
-  throws — even when a reader schema is stated. Still the case on Flink master.
-- **The column cannot be rebuilt from a `BIGINT`.** Declaring it `BIGINT` and
-  converting in the insert needs `TO_TIMESTAMP_LTZ`, whose runtime accepts
-  second and millisecond precision only, and Flink SQL has no exact
-  microsecond route. The run would commit event times truncated to
-  milliseconds — a column the corpus published, changed by the reader, in the
-  column freshness is measured on.
+| `kafka.value_encoding` | `'format'` | Options rendered beside it |
+|---|---|---|
+| `avro` (the default) | `avro` | `'avro.timestamp_mapping.legacy' = 'false'` |
+| `confluent` | `avro-confluent` | `'avro-confluent.url'` from `site.kafka.schema_registry.url`, plus `'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'` and `'avro-confluent.basic-auth.user-info'` where the site names a credential |
 
-Every corpus carries `event_time` among its reserved fields, so this is not a
-workload one can avoid. Offer the corpus to Flink as `avro`, which is what
-`runs/smoke-flink.yaml` does; a Confluent-framed run belongs to an engine that
-reads the five-byte header itself — `runs/smoke-external-confluent.yaml` is
-that spec. The harness half is unaffected: staging registers the schema and
-the producer frames every value whatever engine is reading.
+`avro-confluent` resolves each value's writer schema by the id in that value's
+five-byte header, so the registry is not optional for it: `knobs.render_sql`
+refuses a `confluent` run against a site that declares none, and staging
+refuses it earlier still. `runs/smoke-flink-confluent.yaml` is the shipped run;
+it is `smoke-flink.yaml` plus the encoding, and a test holds the pair to that.
+
+The corpus's `event_time` is what makes one DDL serve both. It is Avro
+`timestamp-millis`, so the column is `TIMESTAMP(3)` — and 3 is the widest
+timestamp `avro-confluent` can plan, because it converts the DDL to a reader
+schema under Flink's legacy Avro timestamp mapping and declares no option to
+disable that mapping (`avro.timestamp_mapping.legacy` belongs to the plain
+`avro` format; an unknown `avro-confluent.*` key fails validation). Its own
+`schema` option is no way round it either: `RegistryAvroFormatFactory` passes
+the DDL conversion to `Optional.orElse`, which evaluates eagerly, so the
+conversion runs even when a reader schema is stated.
+
+Under `avro` the non-legacy mapping sends `TIMESTAMP(3)` to
+`local-timestamp-millis` and under `avro-confluent` the legacy one sends it to
+`timestamp-millis`. Both annotate the same `long`, an Avro logical type is not
+on the wire, and Java Avro resolves a writer against a reader of a different
+record name by field name — so either format reads the corpus's bytes and
+commits the millisecond the producer wrote, widened into the table's
+microsecond `timestamp` column.
 
 `site.kafka.security` reaches the source as `properties.*` verbatim, with
 one translation. `sasl.mechanism: OAUTHBEARER` beside the harness's own

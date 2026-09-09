@@ -498,7 +498,7 @@ def unbounded_column(
     raise ValueError(f"column {column.name} has no unbounded value generator for kind {column.kind!r}")
 
 
-def timestamp_offsets(column: ColumnDistribution, words: np.ndarray, window_us: int) -> np.ndarray:
+def timestamp_offsets(column: ColumnDistribution, words: np.ndarray, window_ms: int) -> np.ndarray:
     """Jitter inside the batch's arrival window, so event time still tracks batch order.
 
     The fraction is scaled by the window rather than by a mean gap, which is
@@ -509,7 +509,7 @@ def timestamp_offsets(column: ColumnDistribution, words: np.ndarray, window_us: 
         fractions = word_fractions(words)
     else:
         fractions = column_ranks(column, words).astype(np.float64) / column.cardinality
-    return np.floor(fractions * window_us).astype(np.int64)
+    return np.floor(fractions * window_ms).astype(np.int64)
 
 
 def column_block(
@@ -519,8 +519,8 @@ def column_block(
     row_start: int,
     rows: int,
     payload_width: int,
-    batch_start_us: int,
-    batch_interval_us: int,
+    batch_start_ms: int,
+    batch_interval_ms: int,
 ) -> ColumnBlock:
     """One column of a row block, drawn from its own counter-mode stream."""
     blocks_per_row = column_word_blocks(column, payload_width)
@@ -530,7 +530,7 @@ def column_block(
     # block, so the rest of the block is skipped rather than carried forward.
     leading = words[::words_per_row]
     if column.kind == KIND_TIMESTAMP:
-        return long_column(timestamp_offsets(column, leading, batch_interval_us) + batch_start_us)
+        return long_column(timestamp_offsets(column, leading, batch_interval_ms) + batch_start_ms)
     if column.cardinality == UNBOUNDED_CARDINALITY:
         return unbounded_column(column, words, leading, rows, words_per_row, payload_width)
     return bounded_column(column, seed, column_ranks(column, leading), payload_width)
@@ -616,8 +616,8 @@ def build_row_block(
     row_start: int,
     keys: np.ndarray,
     payload_width: int,
-    batch_start_us: int,
-    batch_interval_us: int,
+    batch_start_ms: int,
+    batch_interval_ms: int,
     columns: tuple[ColumnDistribution, ...],
 ) -> RowBlock:
     """The rows ``[row_start, row_start + len(keys))`` of one batch.
@@ -636,7 +636,7 @@ def build_row_block(
             encoded = reserved_column_block(column, ids, keys, labels, rows)
         else:
             encoded = column_block(
-                column, seed, batch, row_start, rows, payload_width, batch_start_us, batch_interval_us
+                column, seed, batch, row_start, rows, payload_width, batch_start_ms, batch_interval_ms
             )
         values[column.name] = encoded.values
         encoders.append(encoded.encode)
@@ -656,17 +656,17 @@ def column_strings(block: RowBlock, name: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 CALIBRATION_ROWS = 4096
-CALIBRATION_INTERVAL_US = 1_000_000
+CALIBRATION_INTERVAL_MS = 1000
 # A row's identity and its event time are zigzag varints, so each costs what
 # its magnitude costs. An identity carries its batch's block, so it is five
-# bytes for every batch past the first; an event time carries microseconds
-# since the Unix epoch, so it is eight bytes for any epoch between 1975 and
-# 2041. At batch zero and epoch zero those two measure three and two bytes
-# instead — the one width no written row has — and the payload budget would
-# absorb the difference under a calibrated name. So the sample sits past the
-# first identity block, at a wall-clock epoch whose exact value is immaterial.
+# bytes for every batch past the first; an event time carries milliseconds
+# since the Unix epoch, so it is six bytes for any epoch between 1970 and
+# 2039. At batch zero and epoch zero both collapse to widths no written row
+# has, and the payload budget would absorb the difference under a calibrated
+# name. So the sample sits past the first identity block, at a wall-clock
+# epoch whose exact value is immaterial.
 CALIBRATION_BATCH = 1
-CALIBRATION_EPOCH_US = 1_767_225_600_000_000  # 2026-01-01T00:00:00Z
+CALIBRATION_EPOCH_MS = 1_767_225_600_000  # 2026-01-01T00:00:00Z
 
 
 def realized_encoded_row_size(seed: int, payload_width: int, columns: tuple[ColumnDistribution, ...]) -> float:
@@ -683,8 +683,8 @@ def realized_encoded_row_size(seed: int, payload_width: int, columns: tuple[Colu
         0,
         keys,
         payload_width,
-        CALIBRATION_EPOCH_US,
-        CALIBRATION_INTERVAL_US,
+        CALIBRATION_EPOCH_MS,
+        CALIBRATION_INTERVAL_MS,
         columns,
     )
     return float(block.encoded_sizes.mean())

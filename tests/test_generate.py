@@ -1,6 +1,7 @@
 import io
 import json
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +28,7 @@ def tiny(tmp_path_factory: pytest.TempPathFactory) -> tuple[preset.Preset, str, 
 
 def test_layout_and_manifest(tiny: tuple[preset.Preset, str, dict[str, object]]) -> None:
     p, corpus_uri, meta = tiny
-    assert meta["batch_count"] == 6 and meta["generator_version"] == "4"
+    assert meta["batch_count"] == 6 and meta["generator_version"] == "5"
     manifest = [
         generate.BatchRecord.from_json(line)
         for line in uri.read_text(uri.join(corpus_uri, "manifest.jsonl")).splitlines()
@@ -184,6 +185,33 @@ def test_verify_batch_catches_a_sidecar_with_an_extra_frame(
 
 def test_naive_corpus_epoch_is_refused(tiny: tuple[preset.Preset, str, dict[str, object]]) -> None:
     p, _, _ = tiny
-    assert generate.epoch_us(p) == 1_767_225_600_000_000
+    assert generate.epoch_ms(p) == 1_767_225_600_000
     with pytest.raises(ValueError, match="corpus_epoch"):
-        generate.epoch_us(replace(p, corpus_epoch="2026-01-01T00:00:00"))
+        generate.epoch_ms(replace(p, corpus_epoch="2026-01-01T00:00:00"))
+
+
+def test_event_times_are_whole_milliseconds_in_their_batch_window(
+    tiny: tuple[preset.Preset, str, dict[str, object]],
+) -> None:
+    """The published corpus's own event times, read back the way an engine reads them.
+
+    Every engine reads this column off the wire as a `long` of epoch
+    milliseconds and commits it into a microsecond Iceberg column, so a value
+    with anything under a millisecond in it would be one no engine could
+    reproduce. The window is the batch's, since event time has to track batch
+    order for the freshness measurement to mean anything.
+    """
+    p, corpus_uri, _ = tiny
+    published = cast(dict[str, object], json.loads(uri.read_text(uri.join(corpus_uri, "schema.avsc"))))
+    fields = cast(list[dict[str, object]], published["fields"])
+    event_time_field = next(field for field in fields if field["name"] == "event_time")
+    assert event_time_field["type"] == {"type": "long", "logicalType": "timestamp-millis"}
+    schema = fastavro.parse_schema(published)
+    record = generate.BatchRecord.from_json(uri.read_text(uri.join(corpus_uri, "manifest.jsonl")).splitlines()[2])
+    data = frames.decompress(uri.read_bytes(uri.join(corpus_uri, record.uri)))
+    start_ms = generate.epoch_ms(p) + record.offset_ms
+    for frame in frames.iter_frames(data):
+        row = cast(dict[str, object], fastavro.schemaless_reader(io.BytesIO(frame), schema))
+        event_time = cast(datetime, row["event_time"])
+        assert event_time.microsecond % 1000 == 0
+        assert start_ms <= round(event_time.timestamp() * 1000) < start_ms + p.batch_interval_ms

@@ -1,12 +1,8 @@
 # The external smoke, offered in the Confluent wire format instead of raw Avro.
 # Everything else is `smoke-external.yaml`: what this spec exists to exercise
 # is the schema registration at staging and the five-byte header on every
-# value, which is what an engine that reads only Confluent Avro needs.
-#
-# External and not Flink: Flink's `avro-confluent` format cannot plan the
-# corpus's microsecond timestamp column, so `engines/flink/knobs.py` refuses
-# this encoding and says why. Start your own engine against the facts, as
-# docs/adding-an-engine.md describes.
+# value, read by an engine the harness does not manage. Start your own engine
+# against the facts, as docs/adding-an-engine.md describes.
 #
 # The site has to declare `kafka.schema_registry`; staging refuses this spec
 # before it touches the cluster otherwise.

@@ -48,10 +48,10 @@ def column_value_bytes(value: object) -> bytes:
     """
     if isinstance(value, bytes):
         return value
-    # A decoded timestamp-micros arrives as a datetime; the epoch integer is
+    # A decoded timestamp-millis arrives as a datetime; the epoch integer is
     # the value the generator actually drew.
     if isinstance(value, datetime):
-        return int(value.timestamp() * 1_000_000).to_bytes(8, "big", signed=True)
+        return round(value.timestamp() * 1000).to_bytes(8, "big", signed=True)
     if isinstance(value, str):
         return value.encode()
     if isinstance(value, bool):
@@ -179,7 +179,7 @@ def observe_block(block: RowBlock, column_stats: dict[str, ColumnStats], global_
     rather than of the batch, so the stride selects the same rows in a shard as
     in the unsharded corpus and the merged statistic is identical. The values
     sampled are the ones the generator drew, so a timestamp is characterized as
-    the epoch microseconds it is rather than as a decoder's rendering of them.
+    the epoch milliseconds it is rather than as a decoder's rendering of them.
     """
     for index in range(-global_row_start % stride, block.rows, stride):
         for name, values in block.values.items():

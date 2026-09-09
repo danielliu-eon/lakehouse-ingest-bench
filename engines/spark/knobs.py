@@ -127,13 +127,13 @@ _SPARK_CATALOG_CLASS = "org.apache.iceberg.spark.SparkCatalog"
 # the sink's write options available to the session.
 _ICEBERG_EXTENSIONS = "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
 
-# The corpus carries zoneless microseconds and the table's column is a zoneless
+# The corpus carries zoneless milliseconds and the table's column is a zoneless
 # `timestamp`, so the reader schema annotates the same `long` as Avro's local
 # variant: identical on the wire — the annotation is not encoded — and it is
 # what makes `from_avro` yield a `TimestampNTZ` rather than a zoned instant
 # that would land in a `timestamptz` column instead.
-_TIMESTAMP_MICROS = "timestamp-micros"
-_LOCAL_TIMESTAMP_MICROS = "local-timestamp-micros"
+_TIMESTAMP_MILLIS = "timestamp-millis"
+_LOCAL_TIMESTAMP_MILLIS = "local-timestamp-millis"
 
 # Amazon MSK's IAM authentication, as the Java client spells it. The harness
 # signals it with librdkafka's `OAUTHBEARER` beside its own `aws.region`
@@ -528,10 +528,10 @@ def _flag(value: bool) -> str:
 
 
 def _zoneless(node: object) -> object:
-    """``node`` with every microsecond timestamp annotated as its local variant."""
+    """``node`` with every millisecond timestamp annotated as its local variant."""
     if isinstance(node, dict):
         return {
-            key: (_LOCAL_TIMESTAMP_MICROS if key == "logicalType" and value == _TIMESTAMP_MICROS else _zoneless(value))
+            key: (_LOCAL_TIMESTAMP_MILLIS if key == "logicalType" and value == _TIMESTAMP_MILLIS else _zoneless(value))
             for key, value in cast(dict[str, object], node).items()
         }
     if isinstance(node, list):

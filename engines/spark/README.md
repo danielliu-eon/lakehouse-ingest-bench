@@ -91,13 +91,19 @@ width is the writer count, and two hundred writers per commit is that many files
 
 ## The timestamp rewrite
 
-The corpus publishes `event_time` as Avro `timestamp-micros`; the table's column
-is a zoneless Iceberg `timestamp`. `from_avro` maps `timestamp-micros` to a
+The corpus publishes `event_time` as Avro `timestamp-millis`; the table's column
+is a zoneless Iceberg `timestamp`. `from_avro` maps `timestamp-millis` to a
 zoned instant, which would want a `timestamptz` column instead. So `knobs.py`
-renders `reader-schema.avsc` as the corpus schema with every `timestamp-micros`
-rewritten to `local-timestamp-micros`. The two annotate the same `long` and
+renders `reader-schema.avsc` as the corpus schema with every `timestamp-millis`
+rewritten to `local-timestamp-millis`. The two annotate the same `long` and
 encode identically — an Avro logical type is not on the wire — so the rewrite
 reads the corpus's bytes unchanged and yields `TimestampNTZ`. A test pins it.
+
+Iceberg's `timestamp` is microsecond-precision and has no narrower form, so the
+committed value is the corpus's millisecond widened, never rounded. Milliseconds
+are what the corpus carries because every engine reads one wire format at that
+precision — Flink's `avro-confluent` can plan no finer — and a freshness bound
+measured in seconds loses nothing to it.
 
 ## Confluent values
 

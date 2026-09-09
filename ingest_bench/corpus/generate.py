@@ -29,7 +29,7 @@ from ingest_bench.corpus.stats import (
     stats_stride,
 )
 
-GENERATOR_VERSION = "4"
+GENERATOR_VERSION = "5"
 PARTITION_SHARE_MAX_DEVIATION = 0.05
 # The share gate's floor is the coldest key's expected row count, not the
 # corpus's total rows: the noise on a key's realized share falls with the rows
@@ -91,8 +91,8 @@ class BatchFill:
     partition_encoded: np.ndarray
 
 
-def epoch_us(preset: Preset) -> int:
-    """The instant the corpus's first batch arrives, in microseconds since the Unix epoch.
+def epoch_ms(preset: Preset) -> int:
+    """The instant the corpus's first batch arrives, in milliseconds since the Unix epoch.
 
     A timestamp without an offset is refused rather than resolved in local time.
     The offset does not enter the corpus hash, so a naive epoch would let two
@@ -102,7 +102,7 @@ def epoch_us(preset: Preset) -> int:
     moment = datetime.fromisoformat(preset.corpus_epoch.replace("Z", "+00:00"))
     if moment.tzinfo is None:
         raise ValueError(f"corpus_epoch {preset.corpus_epoch!r} needs an explicit UTC offset or a trailing Z")
-    return int(moment.timestamp() * 1_000_000)
+    return round(moment.timestamp() * 1000)
 
 
 def fill_batch(
@@ -122,8 +122,7 @@ def fill_batch(
     batch's rows are always the rows the block generator produces at those
     positions and a regenerated batch is byte-identical.
     """
-    start_us = epoch_us(preset) + batch * preset.batch_interval_ms * 1000
-    interval_us = preset.batch_interval_ms * 1000
+    start_ms = epoch_ms(preset) + batch * preset.batch_interval_ms
     chunks: list[bytes] = []
     sizes: list[np.ndarray] = []
     ids: list[np.ndarray] = []
@@ -136,7 +135,9 @@ def fill_batch(
     total = 0
     while total < preset.batch_bytes:
         block_keys = v.draw_partition_keys(seed, batch, rows, row_block, cdf)
-        block = v.build_row_block(seed, batch, rows, block_keys, payload_width, start_us, interval_us, preset.columns)
+        block = v.build_row_block(
+            seed, batch, rows, block_keys, payload_width, start_ms, preset.batch_interval_ms, preset.columns
+        )
         chunks.append(block.avro_records_bytes())
         sizes.append(block.encoded_sizes)
         ids.append(block.ids)
