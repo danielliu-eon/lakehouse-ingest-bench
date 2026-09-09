@@ -10,19 +10,24 @@ collect --run-dir runs/<run_id> --site site.yaml \
         --out results/flink --variant hash                   # → results/flink/<name>.json
 ```
 
-`--out` pointed at a directory is filled with
-`<collected date>-<engine>-<corpus>-<variant>.json`; pointed at a file it is
-taken as given; left out it writes `run.json` beside the run.
+`--out` at a directory is filled with
+`<collected date>-<engine>-<corpus>-<variant>.json`; at a file it is taken as
+given; left out it writes `run.json` beside the run.
 
 ## Redaction
 
 Three rules, applied to the whole document on the way out — so an artifact that
 grows a new field carrying a path is covered without an edit here.
 
-1. **Site roots are substituted.** Any string under `site.corpus_root`,
-   `site.runs_root` or `site.warehouse` has that root replaced by the literal
-   `<corpus_root>`, `<runs_root>` or `<warehouse>`. The longest matching root
-   wins, and a root matches only at a path boundary, so a sibling prefix
+1. **Site roots are substituted** by the root's own name in angle brackets.
+   Five roots: `site.corpus_root` → `<corpus_root>`, `site.runs_root` →
+   `<runs_root>`, `site.warehouse` → `<warehouse>`,
+   `site.kubernetes.registry` → `<registry>`, and the catalog's own
+   `warehouse` property → `<catalog_warehouse>` where it differs from the
+   three before it. The last two are roots because neither is a path under the
+   object-store three: an image reference starts with the registry host, and a
+   Glue REST catalog's warehouse is a bare account id. The longest matching
+   root wins, and a root matches only at a path boundary, so a sibling prefix
    (`corpus-archive` beside `corpus`) is left alone. Paths under nobody's root
    are published as they stand.
 2. **Credential-shaped properties are replaced** by `"<redacted>"`: any
@@ -58,15 +63,12 @@ result was measured against, and the prices.
 | `spec` | `spec.yaml` copied verbatim, so defaults are not printed as choices |
 | `engine` | `spec.engine` |
 | `engine_versions` | `{image, digest}` from `engine-image.json` for a managed engine; the spec's `external` block otherwise; `null` when neither was recorded |
-| `fleet` | `[{role, count, vcpu, gib, machine_type}]` — the engine's own `fleet(spec)` for a managed run, `spec.fleet` for an external one. `machine_type` is `unspecified` where the spec named none |
+| `fleet` | `[{role, count, vcpu, gib, machine_type}]` — the engine's own `fleet(spec)` for a managed run, `spec.fleet` for an external one. What the run asked for; see [`methodology.md`](methodology.md) §Cost |
 | `site_pricing` | `{vcpu_hour_usd, gib_hour_usd}` from the site |
 | `catalog_props` | `facts.catalog_props`, redacted |
 | `epoch_ms` | the run's time origin; `null` for a run that was staged but never launched |
 | `corpus_hash` | from `summary.json` |
 | `compression` | `spec.producer.compression` — the codec the offer crossed the link with, resolved rather than left to the copied spec's defaults |
-
-The fleet is what the run *asked for* — container requests, not the nodes they
-landed on — so it is the same number however the cluster packed it.
 
 ## `artifacts`
 
@@ -125,11 +127,9 @@ scorer's own reading stands in for `behind_ms_max` and `errors`, and the rate is
 `null`. `producer_bound` is always the scorer's — it is an input to `run_valid`,
 and a second implementation here could disagree with the verdict.
 
-**`cost`.** `usd_per_hour` is `Σ count × (vcpu × vcpu_hour_usd + gib ×
-gib_hour_usd)` over the fleet. `run_hours` runs from the epoch to the later of
-the producer's last acknowledgement and the table's last commit: a fleet is not
-released when the offer stops, and the drain is on the bill. `usd` is the
-product, and is `null` where the run has no epoch or no end.
+**`cost`.** `usd_per_hour` over the fleet, `run_hours` from the epoch to the
+run's real end, and their product — `null` where the run has no epoch or no end.
+[`methodology.md`](methodology.md) §Cost is how each is defined.
 
 ## `missing`
 
@@ -145,4 +145,5 @@ are routinely missing from the first document and present in the second. Which
 input is absent is what decides whether the document is publishable: a result
 with no geometry is still a result, one with no scores is not. `run_valid` in
 `data.summary` is the field that decides publication — see
-[`running.md`](running.md) and the rules in `results/README.md`.
+[`methodology.md`](methodology.md) §The verdict, and the rules in
+[`../results/README.md`](../results/README.md).
