@@ -41,6 +41,7 @@ drop-topic = "ingest_bench.kafka_admin:main"
 render-k8s = "ingest_bench.k8s.render:main"
 engine-k8s = "ingest_bench.k8s.engine:main"
 verify-flink = "engines.flink.verify:main"
+verify-spark = "engines.spark.verify:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-PyYAML"]
