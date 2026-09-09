@@ -43,6 +43,7 @@ class AddedFile:
     path: str
     file_format: str
     record_count: int
+    size_bytes: int
 
 
 def load_table(props: dict[str, str], table: str) -> Table:
@@ -146,7 +147,7 @@ def snapshots_in_order(metadata: TableMetadata) -> list[SnapshotInfo]:
     return infos
 
 
-def _snapshot_by_id(metadata: TableMetadata, snapshot_id: int) -> Snapshot:
+def snapshot_by_id(metadata: TableMetadata, snapshot_id: int) -> Snapshot:
     for snapshot in metadata.snapshots:
         if snapshot.snapshot_id == snapshot_id:
             return snapshot
@@ -167,7 +168,7 @@ def added_files(metadata: TableMetadata, snapshot_id: int, io: FileIO) -> list[A
     and a position-delete file carries no row ids at all.
     """
     added: list[AddedFile] = []
-    for manifest in _snapshot_by_id(metadata, snapshot_id).manifests(io):
+    for manifest in snapshot_by_id(metadata, snapshot_id).manifests(io):
         # The entry filter below is the truth; this one is what keeps the score
         # loop linear. A manifest is immutable, so an ADDED entry can only live
         # in the manifest the same commit wrote — a manifest rewrite carries
@@ -188,6 +189,7 @@ def added_files(metadata: TableMetadata, snapshot_id: int, io: FileIO) -> list[A
                     path=data_file.file_path,
                     file_format=data_file.file_format.name.lower(),
                     record_count=data_file.record_count,
+                    size_bytes=data_file.file_size_in_bytes,
                 )
             )
     return added

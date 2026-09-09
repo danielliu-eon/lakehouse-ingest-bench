@@ -23,8 +23,14 @@ from ingest_bench.table import ddl
 from ingest_bench.table.create import create_table, drop_table, parse_partition
 
 
-def add_catalog_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--table", required=True, metavar="NAMESPACE.NAME", help="the table to act on")
+def add_catalog_arguments(parser: argparse.ArgumentParser, *, table_required: bool = True) -> None:
+    """The table and the properties that reach its catalog.
+
+    ``table_required`` is off for a command that can read a copied metadata
+    document instead, where naming a table and naming a document are the two
+    exclusive ways of saying which table is meant.
+    """
+    parser.add_argument("--table", required=table_required, metavar="NAMESPACE.NAME", help="the table to act on")
     parser.add_argument(
         "--catalog-prop",
         action="append",

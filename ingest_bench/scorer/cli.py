@@ -1,4 +1,4 @@
-"""Command lines for scoring a run and for judging one while it goes.
+"""Command lines for scoring a run, judging one while it goes, and its geometry.
 
 `score` is the measurement and `gate` is the decision drawn from it, and they
 are separate commands because they run on different rhythms: one process scores
@@ -7,6 +7,11 @@ minute or so whether the run is still worth paying for. The gate therefore
 reads the scorer's artifacts rather than the table — the scorer has already
 paid for that read, and two readers of one table would disagree about when a
 commit became visible.
+
+`file-sizes` is third because it is the one figure that is cheaper after the
+run than during it: geometry is a read of the metadata document, so it costs
+nothing to leave until the fleet is gone, and doing it there keeps a manifest
+walk off the poll loop that is timing commits.
 """
 
 from __future__ import annotations
@@ -20,14 +25,22 @@ from typing import cast
 
 from ingest_bench.catalog import load_catalog_props, table_identifier
 from ingest_bench.clock import SystemClock
+from ingest_bench.scorer import geometry
 from ingest_bench.scorer import score as score_loop
 from ingest_bench.scorer.gate import PASS, UNDERSIZED, VOID, gate_verdict
+from ingest_bench.scorer.snapshots import load_table, read_metadata
+from ingest_bench.specs.model import DEFAULT_GEOMETRY_OFFSETS_S
 from ingest_bench.table.cli import add_catalog_arguments
 
 # A verdict is an exit code so a shell driver can branch on it without parsing
 # output. They are distinct and non-adjacent to keep an undersized fleet from
 # being read as a scorer that failed.
 EXIT_CODES = {PASS: 0, UNDERSIZED: 3, VOID: 5}
+
+# What `file-sizes` exits when the table it was pointed at holds no commit, so
+# there is no geometry to report. Distinct from argparse's own 2, which says
+# the command line was wrong rather than that the run committed nothing.
+NO_GEOMETRY = 4
 
 DEFAULT_ADAPTATION_S = 120
 DEFAULT_FLOOR_WINDOW_S = 60
@@ -197,3 +210,93 @@ def gate(argv: Sequence[str] | None = None) -> int:
         epoch_ms=int(cast(int, summary["epoch_ms"])),
     )
     return _report(verdict, reason)
+
+
+def _offsets(raw: str) -> tuple[int, ...]:
+    """The geometry ladder, as ``--offsets 600,1200,1800`` gives it."""
+    try:
+        offsets = tuple(int(part) for part in raw.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"--offsets must be comma-separated seconds, got {raw!r}") from error
+    if any(offset < 0 for offset in offsets):
+        raise argparse.ArgumentTypeError(f"--offsets are seconds from the epoch, so none may be negative: {raw!r}")
+    if any(later <= earlier for earlier, later in zip(offsets, offsets[1:], strict=False)):
+        raise argparse.ArgumentTypeError(
+            f"--offsets must ascend, since each rung reports the commits since the one before it: {raw!r}"
+        )
+    return offsets
+
+
+def build_file_sizes_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="file-sizes",
+        description="Report the table's file geometry at points along the run and as the run left it.",
+    )
+    add_catalog_arguments(parser, table_required=False)
+    parser.add_argument(
+        "--metadata",
+        metavar="URI_OR_PATH",
+        help="a metadata document to read the table out of, instead of --table. This is what a teardown copied, "
+        "so the geometry of a finished run can be read once its catalog and its cluster are gone. The catalog "
+        "properties are still read, for the object-store settings among them",
+    )
+    parser.add_argument(
+        "--epoch",
+        required=True,
+        type=float,
+        metavar="UNIX_SECONDS",
+        help="the run's time origin, the same one the scorer was given; the offsets are measured from it",
+    )
+    parser.add_argument(
+        "--offsets",
+        type=_offsets,
+        default=DEFAULT_GEOMETRY_OFFSETS_S,
+        metavar="SECONDS,…",
+        help="the points after the epoch the table is measured at. Every run reports the same ladder so two "
+        "runs' geometry columns line up",
+    )
+    parser.add_argument("--out", required=True, metavar="DIR", help="the directory geometry.json is written to")
+    return parser
+
+
+def file_sizes(argv: Sequence[str] | None = None) -> int:
+    parser = build_file_sizes_parser()
+    args = parser.parse_args(argv)
+    metadata_location = None if args.metadata is None else str(args.metadata)
+    table = None if args.table is None else str(args.table)
+    # Naming both would leave which document was read up to the order of two
+    # branches, and the two can disagree: the copy is the run's last state
+    # while the live table has since been compacted, or dropped and recreated.
+    if (metadata_location is None) == (table is None):
+        parser.error("give exactly one of --metadata (a copied document) and --table (through a catalog)")
+    try:
+        props = load_catalog_props(
+            [str(prop) for prop in args.catalog_prop], [str(name) for name in args.catalog_prop_file]
+        )
+        if table is not None:
+            table_identifier(table)
+    except ValueError as error:
+        parser.error(str(error))
+    if metadata_location is not None:
+        document, io = geometry.open_metadata_document(metadata_location, props)
+    else:
+        loaded = load_table(props, cast(str, table))
+        document, io = read_metadata(loaded), loaded.io
+    report = geometry.geometry_report(document, io, round(float(args.epoch) * 1000), tuple(args.offsets))
+    out_dir = Path(str(args.out))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / geometry.GEOMETRY_FILE
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    final = cast(dict[str, object] | None, report["final"])
+    # The empty document is still published: `collect` records that geometry
+    # was measured, and a missing file would read as a step never run.
+    if final is None:
+        print(f"the table holds no commit, so it has no geometry; wrote {path}", file=sys.stderr)
+        return NO_GEOMETRY
+    live = cast(dict[str, object], final["live"])
+    quantiles = cast(dict[str, float | None], live["size_quantiles"])
+    print(
+        f"GEOMETRY out={path} files={live['files']} rows={live['rows']} bytes={live['bytes']} "
+        f"p50_bytes={quantiles['p50']} small_file_share_32mib={live['small_file_share_32mib']}"
+    )
+    return 0

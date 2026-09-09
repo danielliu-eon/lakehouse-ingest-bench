@@ -263,6 +263,7 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `scores/freshness.json` | scorer | the lag quantiles and the whole lag curve, on both clocks |
 | `scores/exactness.json` | scorer | loss, duplication, corruption, and the first violations |
 | `scores/keepup.json` | scorer | the keep-up scalars |
+| `scores/geometry.json` | `file-sizes` | the file geometry along the run and at its end |
 | `scores/snapshots.jsonl` | scorer | one line per commit the table took |
 | `scores/keepup_samples.jsonl` | scorer | offered against committed, once per poll |
 
@@ -306,6 +307,17 @@ points for the smoke corpus.
 `gate --out runs/<run_id>/scores` answers `PASS`, `UNDERSIZED` or `VOID` from the
 same artifacts while a run is still going, which a sweep uses to abandon an
 undersized fleet early.
+
+**`scores/geometry.json`** holds what no verdict field covers: the live files,
+rows and bytes, the file-size p50/p90/p99 with min and max, the share of files
+under 32 MiB and under 8 MiB, a log2 histogram of sizes, and per-commit
+quantiles of files added and of their sizes — at each of
+`scoring.geometry_offsets_s`, `absent` for a rung the run never reached, and at
+the final snapshot. `file-sizes --metadata runs/<run_id>/table-metadata.final.json
+--epoch <facts.epoch> --out runs/<run_id>/scores` writes it: run it after
+teardown, from the copied document rather than the catalog, and before anything
+expires the run's snapshots, since the manifests an expiry drops are where every
+figure in it is read from.
 
 One recorded run of the smoke, with the two artifacts behind its verdict, is in
 [`examples/smoke-flink/`](examples/smoke-flink/). A first run of the same

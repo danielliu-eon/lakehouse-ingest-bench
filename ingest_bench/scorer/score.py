@@ -404,6 +404,7 @@ def _read_inputs(state: ScoreState, clock: Clock) -> bool:
                 "first_seen_ms": first_seen_ms,
                 "added_files": len(files),
                 "added_rows": sum(data_file.record_count for data_file in files),
+                "added_bytes": sum(data_file.size_bytes for data_file in files),
                 "prefix_after": state.tally.prefix(),
             },
         )
