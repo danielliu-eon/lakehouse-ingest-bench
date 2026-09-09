@@ -127,6 +127,12 @@ on a Job, fetching artifacts, judging a verdict. So the harness image carries no
 `yq` and `git` locally. Each driver takes `--site` (default `./site.yaml`) and
 reads the cluster, the registry, the identities and the roots out of it.
 
+Install the harness itself with its `aws` extra — `uv sync --extra aws` in a
+checkout, or `pip install '.[aws]'` — because `teardown.sh` reads the table's
+last metadata document through the catalog, and pyiceberg imports `boto3` only
+when it comes to sign a Glue request. A default install reaches the catalog and
+then fails on that import.
+
 ### What the site declares
 
 **Identity.** Nothing is passed to a pod. `setup.sh` binds one IAM role to both

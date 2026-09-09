@@ -22,6 +22,11 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 # to agree, inside a pod that has to be scheduled and pull an image.
 DROP_WAIT_S="${DROP_WAIT_S:-600}"
 
+# What `table-metadata` exits when the catalog holds no such table, as
+# ingest_bench.table.cli.TABLE_ABSENT. Any other non-zero exit is a catalog this
+# script could not reach, which is a failure and not an absent table.
+TABLE_ABSENT=3
+
 usage() {
 	cat <<'USAGE'
 usage: scripts/teardown.sh <run_id> [options]
@@ -151,15 +156,22 @@ while IFS= read -r pair; do
 	CATALOG_PROPS+=(--catalog-prop "$pair")
 done <<<"$CATALOG_PAIRS"
 
-# A teardown converges: a run that failed before it created the table has no
-# document to copy, and refusing here would leave the topic dropped and the
-# teardown reported as failed.
-if METADATA="$(harness_local table-metadata --table "$TABLE" "${CATALOG_PROPS[@]}")"; then
+# A teardown converges over an absent table: a run that failed before it created
+# one has no document to copy, and refusing there would leave the topic dropped
+# and the teardown reported as failed. Every other failure — an unreachable
+# catalog, expired credentials, a harness that is not installed — is reported,
+# because it says nothing about whether the document exists.
+METADATA_STATUS=0
+METADATA="$(harness_local --extra aws table-metadata --table "$TABLE" ${CATALOG_PROPS[@]+"${CATALOG_PROPS[@]}"})" ||
+	METADATA_STATUS=$?
+if ((METADATA_STATUS == 0)); then
 	FINAL="$RUNS_ROOT/$RUN_ID/table-metadata.final.json"
 	log "copying $TABLE's metadata document to $FINAL"
 	aws s3 cp "$METADATA" "$FINAL" >&2 || log "could not copy $METADATA to $FINAL; the table still holds it"
+elif ((METADATA_STATUS == TABLE_ABSENT)); then
+	log "no table $TABLE in the catalog, so there is no metadata document to copy"
 else
-	log "no metadata document for $TABLE, so the table was never created"
+	die "could not read $TABLE's metadata document: table-metadata exited $METADATA_STATUS; the lines above are its own error"
 fi
 
 log "torn down $RUN_ID; its table and the warehouse data are untouched"

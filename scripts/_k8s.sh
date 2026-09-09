@@ -88,13 +88,23 @@ site_pairs() {
 # so a value carrying whitespace would arrive as two arguments. Refused here
 # rather than reaching a client as a truncated property.
 site_flags() {
+	# Assigned before the loop reads it, and checked explicitly rather than
+	# through `set -e`. Two reasons, and both end the same way — an empty string
+	# returned as success, so a Job is launched with none of the site's
+	# properties. A `die` inside the loop's own redirection would end only that
+	# redirection's subshell; and bash suspends `-e` inside a command
+	# substitution, which is where this function itself runs, so a failure would
+	# fall through to the `printf` below.
+	local pairs
+	pairs="$(site_pairs "$1")" ||
+		die "cannot build the $2 flags a Job's command line needs; the line above says why"
 	local flags="" pair
 	while IFS= read -r pair; do
 		[[ -n $pair ]] || continue
 		[[ $pair != *[[:space:]]* ]] ||
 			die "$SITE_FILE sets ${1#.} entry '$pair', and whitespace in it cannot survive a Job's command line"
 		flags="$flags $2 $pair"
-	done <<<"$(site_pairs "$1")"
+	done <<<"$pairs"
 	printf '%s' "$flags"
 }
 
@@ -150,13 +160,25 @@ k8s_image_tag() {
 # Its stdout is the command's own, because callers parse it. Every path handed
 # to one of these must be absolute: the checkout fallback runs from the
 # repository root and not from the operator's working directory.
+#
+# A leading `--extra <name>`, repeatable, reaches the checkout fallback's `uv
+# run`. A command that opens a catalog needs the `aws` extra, because pyiceberg
+# imports boto3 only when it comes to sign a Glue request and a plain `uv sync`
+# installs no cloud SDK. The installed-harness path takes no extras — an
+# installed harness carries whatever it was installed with, which is why
+# docs/running.md says to install it with that extra.
 harness_local() {
+	local extras=()
+	while [[ ${1:-} == --extra ]]; do
+		extras+=(--extra "${2:?--extra needs the name of an optional dependency group}")
+		shift 2
+	done
 	local name=$1
 	shift
 	if command -v "$name" >/dev/null 2>&1; then
 		"$name" "$@"
 	elif command -v uv >/dev/null 2>&1; then
-		(cd -- "$REPO_ROOT" && uv run --frozen "$name" "$@")
+		(cd -- "$REPO_ROOT" && uv run --frozen ${extras[@]+"${extras[@]}"} "$name" "$@")
 	else
 		die "neither $name nor uv is on PATH; install this harness or install uv — see $PREREQ_DOC"
 	fi
@@ -177,7 +199,10 @@ k8s_render_apply() {
 	for pair in "$@"; do
 		set_args+=(--set "$pair")
 	done
-	harness_local render-k8s "$REPO_ROOT/$template" "${set_args[@]}" |
+	# `${a[@]+"${a[@]}"}` here and below, because an empty array expanded plainly
+	# is an unbound-variable error under `set -u` on bash 3.2 — which is what
+	# `/bin/bash` still is on macOS.
+	harness_local render-k8s "$REPO_ROOT/$template" ${set_args[@]+"${set_args[@]}"} |
 		kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" apply -f - >&2
 }
 
@@ -205,7 +230,7 @@ k8s_configmap_from_file() {
 		from+=(--from-file "$pair")
 	done
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" create configmap "$name" \
-		"${from[@]}" --dry-run=client -o yaml |
+		${from[@]+"${from[@]}"} --dry-run=client -o yaml |
 		kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" apply -f - >&2
 }
 

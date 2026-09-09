@@ -12,7 +12,10 @@ artifacts before the table is left behind.
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
+
+from pyiceberg.exceptions import NoSuchTableError
 
 from ingest_bench.catalog import load_catalog_props, open_catalog, parse_key_values, table_identifier
 from ingest_bench.corpus import metadata
@@ -82,6 +85,13 @@ def build_drop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# `table-metadata` answers "no such table" as a code rather than as a traceback,
+# so a caller can tell a table that is not there from a catalog it could not
+# reach. A teardown has to act differently on those two: the first is the normal
+# end of a run that never created its table, the second is a failure to report.
+TABLE_ABSENT = 3
+
+
 def build_metadata_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="table-metadata", description="Print where a table's current metadata document is."
@@ -120,7 +130,8 @@ def metadata_location(argv: Sequence[str] | None = None) -> int:
 
     The catalog's answer rather than one assembled from the table's location:
     a table holds every metadata document it has ever had, and only the catalog
-    says which of them is current.
+    says which of them is current. A table the catalog does not hold exits
+    ``TABLE_ABSENT``.
     """
     parser = build_metadata_parser()
     args = parser.parse_args(argv)
@@ -132,7 +143,12 @@ def metadata_location(argv: Sequence[str] | None = None) -> int:
         )
     except ValueError as error:
         parser.error(str(error))
-    print(open_catalog(props).load_table(table).metadata_location)
+    try:
+        loaded = open_catalog(props).load_table(table)
+    except NoSuchTableError:
+        print(f"no table {table} in this catalog, so it has no metadata document", file=sys.stderr)
+        return TABLE_ABSENT
+    print(loaded.metadata_location)
     return 0
 
 

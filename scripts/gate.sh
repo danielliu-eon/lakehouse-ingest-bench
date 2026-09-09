@@ -21,6 +21,7 @@ usage: scripts/gate.sh <run_id> [options]
 
   <run_id>           a launched run, whose scorer is publishing under the runs prefix
   --site PATH        the site config naming the runs prefix (default: ./site.yaml)
+  --image-tag TAG    passed to teardown.sh, which runs one harness Job (default: this checkout's commit)
   --teardown         tear the run down when the verdict is not PASS
 
 Environment: RUNS_DIR.
@@ -31,10 +32,15 @@ USAGE
 
 RUN_ID=""
 TEARDOWN=0
+IMAGE_TAG=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--site)
 		SITE_FILE="${2:?--site needs a path}"
+		shift 2
+		;;
+	--image-tag)
+		IMAGE_TAG="${2:?--image-tag needs a tag}"
 		shift 2
 		;;
 	--teardown)
@@ -97,6 +103,10 @@ if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)); then
 	# Any non-zero answer, including a gate that found no measurement to judge:
 	# each of them says the run is not worth paying for another minute of.
 	log "the verdict is not PASS, so tearing $RUN_ID down"
-	"$REPO_ROOT/scripts/teardown.sh" "$RUN_ID" --site "$SITE_FILE"
+	# The tag reaches teardown.sh, whose drop-topic Job would otherwise default
+	# to this checkout's commit — which need not be the commit that was pushed.
+	TEARDOWN_ARGS=("$RUN_ID" --site "$SITE_FILE")
+	[[ -z $IMAGE_TAG ]] || TEARDOWN_ARGS+=(--image-tag "$IMAGE_TAG")
+	"$REPO_ROOT/scripts/teardown.sh" "${TEARDOWN_ARGS[@]}"
 fi
 exit "$VERDICT_STATUS"

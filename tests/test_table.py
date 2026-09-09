@@ -144,5 +144,26 @@ def test_table_metadata_prints_the_metadata_location(
     assert capsys.readouterr().out == f"{table.metadata_location}\n"
 
 
+def test_table_metadata_answers_an_absent_table_with_a_code(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A table the catalog does not hold is a code, never a traceback.
+
+    A teardown has to tell a table that was never created — the normal end of a
+    run that failed early — from a catalog it could not reach. Both are non-zero
+    exits, and only a distinct code separates them.
+    """
+    props = sqlite_props(tmp_path)
+    # One table in the namespace, so what is missing is the table and not the
+    # namespace around it.
+    create.create_table(props, "bench.present", corpus, create.parse_partition("unpartitioned"), {})
+    flags = [flag for key, value in props.items() for flag in ("--catalog-prop", f"{key}={value}")]
+
+    assert cli.metadata_location(["--table", "bench.absent", *flags]) == cli.TABLE_ABSENT
+    captured = capsys.readouterr()
+    assert captured.out == "", "the location is the only thing this prints on stdout"
+    assert "no table bench.absent" in captured.err
+
+
 def test_type_maps_cover_the_same_published_types() -> None:
     assert set(create._TYPES) == set(ddl._TYPES)

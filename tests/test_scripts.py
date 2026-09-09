@@ -675,15 +675,24 @@ class DriverRun:
     applied: list[dict[str, object]]
 
 
-def _run_driver(script: Path, arguments: list[str], tmp_path: Path, environment: dict[str, str]) -> DriverRun:
+def _run_driver(
+    script: Path,
+    arguments: list[str],
+    tmp_path: Path,
+    environment: dict[str, str],
+    site: str | None = None,
+    programs: dict[str, str] | None = None,
+) -> DriverRun:
     """Run one driver in its own working directory with `kubectl` and `aws` stubbed.
 
     The working directory is the operator's: `./site.yaml` and `./runs` are
-    resolved against it, so nothing here writes into the checkout.
+    resolved against it, so nothing here writes into the checkout. ``programs``
+    stubs a harness command as well, which shadows the installed one because
+    the stub directory is first on `PATH`.
     """
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
-    (work / "site.yaml").write_text(_filled_site())
+    (work / "site.yaml").write_text(site if site is not None else _filled_site())
     applied_dir = tmp_path / "applied"
     applied_dir.mkdir(exist_ok=True)
     calls = tmp_path / "kubectl-calls.log"
@@ -692,7 +701,7 @@ def _run_driver(script: Path, arguments: list[str], tmp_path: Path, environment:
     aws_calls.touch()
     job_log = tmp_path / "job.log"
     job_log.write_text(STAGE_JOB_LOG)
-    stubs = _stub_bin(tmp_path / "bin", {"kubectl": KUBECTL_STUB, "aws": AWS_STUB})
+    stubs = _stub_bin(tmp_path / "bin", {"kubectl": KUBECTL_STUB, "aws": AWS_STUB, **(programs or {})})
 
     result = subprocess.run(
         [str(script), *arguments],
@@ -845,3 +854,104 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--kafka-prop aws.region=eu-west-1" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
+
+
+# `table-metadata` as the driver calls it, answering whatever the case under
+# test needs: a location, the absent-table code, or a failure of its own.
+TABLE_METADATA_STUB = """
+printf '%s\\n' "$*" >>"$STUB_METADATA_LOG"
+[[ -z ${STUB_METADATA_ERROR:-} ]] || printf '%s\\n' "$STUB_METADATA_ERROR" >&2
+[[ -z ${STUB_METADATA_OUT:-} ]] || printf '%s\\n' "$STUB_METADATA_OUT"
+exit "${STUB_METADATA_STATUS:-0}"
+"""
+
+
+@needs_shell_tools
+def test_launch_refuses_a_site_whose_properties_it_cannot_read(tmp_path: Path) -> None:
+    """A site `yq` cannot flatten stops the launch instead of dropping the properties.
+
+    The catalog properties and the Kafka security block are the only way a pod
+    is told how to reach either service, so a reader that answered "no
+    properties" would apply a scorer that cannot open the table and a producer
+    that cannot authenticate — minutes of pods to say what this says at once.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+
+    # A nested map under a properties block: `yq` refuses to concatenate it into
+    # `key=value` and exits non-zero.
+    broken = _filled_site().replace(
+        "    rest.signing-name: glue\n",
+        "    rest.signing-name: glue\n    nested:\n      deeper: value\n",
+    )
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {}, site=broken)
+
+    assert run.result.returncode != 0
+    assert "could not read catalog.props out of ./site.yaml" in run.result.stderr
+    assert run.applied == [], "nothing may be applied once the site cannot be read"
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    "status, copied, refused",
+    [
+        (0, True, False),
+        # The absent-table code: a run that failed before it created its table
+        # has no document, and a teardown converges over that.
+        (3, False, False),
+        # Any other failure is a catalog this machine could not reach, which
+        # says nothing about whether the document exists.
+        (1, False, True),
+    ],
+)
+def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
+    tmp_path: Path, status: int, copied: bool, refused: bool
+) -> None:
+    """An absent table is not the same answer as an unreachable catalog.
+
+    Reading every non-zero exit as "the table was never created" would report a
+    teardown as clean while an expired credential, a missing harness or an
+    unreachable catalog quietly cost the run its last artifact.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
+    (run_dir / "flink-job-configmap.yaml").write_text("# flink-job-configmap.yaml\n")
+    metadata_calls = tmp_path / "table-metadata-calls.log"
+    metadata_calls.touch()
+
+    location = "s3://a-bucket/warehouse/ingest_bench/t_x/metadata/00003-abc.metadata.json"
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_METADATA_LOG": str(metadata_calls),
+            "STUB_METADATA_STATUS": str(status),
+            "STUB_METADATA_OUT": location if status == 0 else "",
+            "STUB_METADATA_ERROR": "" if status == 0 else "could not reach the catalog",
+        },
+        programs={"table-metadata": TABLE_METADATA_STUB},
+    )
+
+    # Everything destructive happens before the document is read, so it happens
+    # whatever the answer was.
+    assert f"delete -f ./runs/{RUN_ID}/flinkdeployment.yaml" in run.calls
+    assert f"delete job producer-{RUN_ID}" in run.calls and f"delete job scorer-{RUN_ID}" in run.calls
+    drop = [document for document in run.applied if document["kind"] == "Job"]
+    assert len(drop) == 1
+    command = _job_command(drop[0])
+    assert f"drop-topic --bootstrap {BOOTSTRAP} --topic {RUN_ID}" in command
+    assert "--kafka-prop security.protocol=SASL_SSL" in command
+
+    # The catalog is addressed with every property the site declares.
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in metadata_calls.read_text()
+
+    assert (f"s3 cp {location}" in run.aws_calls) is copied
+    assert (run.result.returncode != 0) is refused
+    if refused:
+        assert "table-metadata exited 1" in run.result.stderr
+        assert "could not reach the catalog" in run.result.stderr

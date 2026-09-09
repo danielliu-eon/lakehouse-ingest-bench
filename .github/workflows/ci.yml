@@ -9,6 +9,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: {enable-cache: true}
+      # The cluster drivers read the site with `yq` and a run's facts with `jq`,
+      # and their tests skip themselves without both. A pinned release binary
+      # rather than snap: snap is not available on every runner image, and the
+      # version a channel serves changes under the test suite.
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: |
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run mypy
