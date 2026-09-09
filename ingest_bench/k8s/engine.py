@@ -30,8 +30,10 @@ def render(engine: str, requested: Sequence[str]) -> str:
     printed.
     """
     texts = kubernetes_for(engine).texts()
-    missing = sorted(set(texts) ^ set(FIELDS))
-    if missing:
+    # Both directions: a descriptor missing a field leaves a driver with an
+    # empty name, and one printing a field no driver reads is a name nobody
+    # acts on. Either way it is not this descriptor.
+    if set(texts) != set(FIELDS):
         raise ValueError(f"{engine}'s descriptor prints {sorted(texts)}, and its fields are {list(FIELDS)}")
     unknown = [field for field in requested if field not in texts]
     if unknown:
