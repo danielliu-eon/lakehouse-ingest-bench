@@ -545,9 +545,20 @@ def _cluster(site: SiteConfig) -> KubernetesConfig:
     return site.kubernetes
 
 
+def kubernetes_name(run_id: str) -> str:
+    """The run id as a Kubernetes object name.
+
+    An RFC 1123 subdomain is lowercase, and a run id's stamp is not: the `T`
+    and the `Z` in it are refused by the API server. Only the names are
+    lowercased — the run id itself is the identifier the topic, the table and
+    the run directory are addressed by, and it stays as it is.
+    """
+    return run_id.lower()
+
+
 def configmap_name(derived: Derived) -> str:
     """The ConfigMap the run's rendered files are mounted from."""
-    return f"{derived.run_id}-flink-job"
+    return f"{kubernetes_name(derived.run_id)}-flink-job"
 
 
 def render_flinkdeployment(
@@ -594,8 +605,7 @@ def render_flinkdeployment(
     document: dict[str, object] = {
         "apiVersion": "flink.apache.org/v1beta1",
         "kind": "FlinkDeployment",
-        # A run id is already a DNS label, so it names the object as it stands.
-        "metadata": {"name": derived.run_id, "namespace": cluster.namespace},
+        "metadata": {"name": kubernetes_name(derived.run_id), "namespace": cluster.namespace},
         "spec": {
             "image": f"{cluster.registry}/{_IMAGE_REPOSITORY}:{image_tag}",
             "flinkVersion": _FLINK_VERSION_LABEL,

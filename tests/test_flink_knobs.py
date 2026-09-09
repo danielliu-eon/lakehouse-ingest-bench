@@ -329,7 +329,7 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
     assert document == {
         "apiVersion": "flink.apache.org/v1beta1",
         "kind": "FlinkDeployment",
-        "metadata": {"name": "smoke-flink-20260908T000000Z", "namespace": "ingest-bench"},
+        "metadata": {"name": "smoke-flink-20260908t000000z", "namespace": "ingest-bench"},
         "spec": {
             "image": "registry.example/ingest-bench/lakehouse-ingest-bench/flink:0.1.0-abc1234",
             "flinkVersion": "v1_20",
@@ -365,7 +365,7 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
                     "volumes": [
                         {
                             "name": "job",
-                            "configMap": {"name": "smoke-flink-20260908T000000Z-flink-job"},
+                            "configMap": {"name": "smoke-flink-20260908t000000z-flink-job"},
                         }
                     ],
                     "containers": [
@@ -382,6 +382,29 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
             },
         },
     }
+
+
+def test_kubernetes_name_lowercases_a_run_id() -> None:
+    assert knobs.kubernetes_name("smoke-flink-20260908T000000Z") == "smoke-flink-20260908t000000z"
+    assert knobs.kubernetes_name("already-lower-1") == "already-lower-1"
+
+
+def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> None:
+    """A run id reaches the two documents as itself everywhere it is not a name.
+
+    An RFC 1123 name is lowercase and a run id's stamp is not, so the objects
+    are named by the lowercased id. The settings carrying the id are not names
+    Kubernetes reads, and lowercasing one of them would point a run's
+    checkpoints at a prefix no other reader of the run addresses.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    site = _aws_site()
+    d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    document = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))
+    conf = document["spec"]["flinkConfiguration"]
+    assert conf["pipeline.name"] == d.run_id
+    assert conf["state.checkpoints.dir"].endswith(f"/{d.run_id}/checkpoints")
+    assert f"'topic' = '{d.run_id}'" in knobs.render_sql(spec, site, d, meta)
 
 
 def test_the_amd64_pin_wins_and_a_cluster_off_aws_names_no_region(meta: metadata.CorpusMetadata) -> None:
@@ -445,7 +468,7 @@ def test_render_job_configmap(meta: metadata.CorpusMetadata) -> None:
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     document = yaml.safe_load(knobs.render_job_configmap(spec, site, d, meta))
     assert document["apiVersion"] == "v1" and document["kind"] == "ConfigMap"
-    assert document["metadata"] == {"name": "smoke-flink-20260908T000000Z-flink-job", "namespace": "ingest-bench"}
+    assert document["metadata"] == {"name": "smoke-flink-20260908t000000z-flink-job", "namespace": "ingest-bench"}
     files = knobs.render(spec, site, d, meta, image_tag="t")
     assert document["data"] == {knobs.SQL_FILE: files[knobs.SQL_FILE], knobs.CONF_FILE: files[knobs.CONF_FILE]}
 

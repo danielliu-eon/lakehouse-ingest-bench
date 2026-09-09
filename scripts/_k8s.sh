@@ -309,14 +309,28 @@ k8s_flinkdeployment_state() {
 # A run's object names
 # ---------------------------------------------------------------------------
 
+# A run id as a Kubernetes object name — the same rule as
+# `knobs.kubernetes_name`, spelled in both languages because the drivers
+# address the objects the renderer named. An RFC 1123 subdomain is lowercase
+# and the `T` and `Z` in a run id's stamp are not, so an object named by the id
+# as it stands is refused by the API server.
+#
+# Names only: the topic, the table, the run directory and the bucket prefixes
+# are addressed by the run id itself and are not lowercased anywhere.
+k8s_object_name() {
+	printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 # The two Jobs `launch.sh` creates and `teardown.sh` deletes, named in one place
-# so a rename cannot leave a producer fleet running after a teardown. The
-# engine's own objects are named by the documents that render them, and are
-# deleted through those documents rather than by a name restated here.
+# so a rename cannot leave a producer fleet running after a teardown — which is
+# also why both take a run id and lowercase it here rather than at each of the
+# four call sites. The engine's own objects are named by the documents that
+# render them, and are deleted through those documents rather than by a name
+# restated here.
 producer_job() {
-	printf 'producer-%s' "$1"
+	printf 'producer-%s' "$(k8s_object_name "$1")"
 }
 
 scorer_job() {
-	printf 'scorer-%s' "$1"
+	printf 'scorer-%s' "$(k8s_object_name "$1")"
 }

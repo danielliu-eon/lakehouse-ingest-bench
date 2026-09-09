@@ -122,7 +122,7 @@ k8s_delete job "$(scorer_job "$RUN_ID")"
 # 3. The topic
 # ---------------------------------------------------------------------------
 
-DROP_JOB="drop-topic-$RUN_ID"
+DROP_JOB="drop-topic-$(k8s_object_name "$RUN_ID")"
 DROP_COMMAND="drop-topic --bootstrap $BOOTSTRAP --topic $RUN_ID$(site_flags '.kafka.security' --kafka-prop)"
 log "dropping topic $RUN_ID as job/$DROP_JOB"
 k8s_delete job "$DROP_JOB"

@@ -663,7 +663,7 @@ case "$*" in
 *"get job/"*) printf 'Complete\\n' ;;
 *"logs job/scorer-"*) printf 'POLL t=0.1 prefix=0/0\\n' ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
-*"get flinkdeployment/"*) printf 'RUNNING\\n' ;;
+*"get flinkdeployment/"*) printf '%s\\n' "${STUB_FLINK_STATE:-RUNNING}" ;;
 esac
 """
 
@@ -678,6 +678,9 @@ fi
 """
 
 RUN_ID = "smoke-flink-20260908T120000Z"
+# What the same run's Kubernetes objects are named, since an RFC 1123 name is
+# lowercase and the stamp in a run id is not.
+RUN_OBJECT = RUN_ID.lower()
 BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
 
 # What the stage Job printed, in the shape `stage` prints it: the run id first,
@@ -835,7 +838,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
         "flink-job-configmap.yaml",
         "flinkdeployment.yaml",
     ]
-    assert f"get flinkdeployment/{RUN_ID}" in run.calls
+    assert f"get flinkdeployment/{RUN_OBJECT}" in run.calls
 
     jobs = [document for document in run.applied if document["kind"] == "Job"]
     assert len(jobs) == 1, "staging applies one Job"
@@ -880,8 +883,8 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     # read would have rows committed by the first sample, and the keep-up curve
     # would start part way up.
     assert [str(_mapping(document["metadata"])["name"]) for document in run.applied] == [
-        f"scorer-{RUN_ID}",
-        f"producer-{RUN_ID}",
+        f"scorer-{RUN_OBJECT}",
+        f"producer-{RUN_OBJECT}",
     ]
     scorer, producer = (_job_command(document) for document in run.applied)
 
@@ -992,7 +995,7 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     # Everything destructive happens before the document is read, so it happens
     # whatever the answer was.
     assert f"delete -f ./runs/{RUN_ID}/flinkdeployment.yaml" in run.calls
-    assert f"delete job producer-{RUN_ID}" in run.calls and f"delete job scorer-{RUN_ID}" in run.calls
+    assert f"delete job producer-{RUN_OBJECT}" in run.calls and f"delete job scorer-{RUN_OBJECT}" in run.calls
     drop = [document for document in run.applied if document["kind"] == "Job"]
     assert len(drop) == 1
     command = _job_command(drop[0])
@@ -1007,3 +1010,64 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     if refused:
         assert "table-metadata exited 1" in run.result.stderr
         assert "could not reach the catalog" in run.result.stderr
+
+
+@needs_shell_tools
+def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -> None:
+    """Every object a teardown deletes is named by the lowercased run id.
+
+    An RFC 1123 subdomain is lowercase and the `T`/`Z` in a run id's stamp are
+    not, so an object named by the id as it stands is refused by the API server
+    rather than by anything a driver can see. The topic and the run directory
+    are the published identifier and stay as they are, which is why the two
+    spellings have to be told apart per use rather than once per run.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
+
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_METADATA_LOG": str(tmp_path / "metadata.log"), "STUB_METADATA_STATUS": "3"},
+        programs={"table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+
+    for deleted in ("producer", "scorer", "drop-topic"):
+        assert f"delete job {deleted}-{RUN_OBJECT}" in run.calls, deleted
+        assert f"delete job {deleted}-{RUN_ID}" not in run.calls, deleted
+    drop = [document for document in run.applied if document["kind"] == "Job"]
+    assert [str(_mapping(document["metadata"])["name"]) for document in drop] == [f"drop-topic-{RUN_OBJECT}"]
+
+    # The topic and the run directory are the run's published identifier, and
+    # neither is a name Kubernetes reads.
+    assert f"--topic {RUN_ID}" in _job_command(drop[0])
+    assert f"delete -f ./runs/{RUN_ID}/flinkdeployment.yaml" in run.calls
+
+
+@needs_shell_tools
+def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Path) -> None:
+    """The one place a driver reads the operator's own Deployment by name.
+
+    A tail under the un-lowercased name answers "not found" and the refusal
+    carries no jobmanager log, which is the whole of what says why the engine
+    never ran.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_STAGE_DIR": str(staged), "STUB_FLINK_STATE": "FAILED"},
+    )
+    assert run.result.returncode != 0
+    assert f"flinkdeployment/{RUN_OBJECT} went to FAILED" in run.result.stderr
+    assert f"logs deploy/{RUN_OBJECT} --tail=40" in run.calls

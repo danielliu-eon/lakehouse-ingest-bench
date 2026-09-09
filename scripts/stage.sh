@@ -126,6 +126,9 @@ RUN_ID="$(awk -F': ' '/^run_id: /{print $2; exit}' <<<"$LOGS")"
 [[ -n $RUN_ID ]] || die "job/$STAGE_JOB printed no run_id line; read its log with: kubectl logs job/$STAGE_JOB"
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
+# What the engine's two documents named their objects, which the polling and
+# the tailing below address.
+RUN_OBJECT="$(k8s_object_name "$RUN_ID")"
 mkdir -p "$RUN_DIR"
 log "fetching the run directory into $RUN_DIR"
 aws s3 sync "$RUNS_ROOT/$RUN_ID/stage/" "$RUN_DIR/" >&2 ||
@@ -155,23 +158,23 @@ else
 
 	# The deployment is named after the run, so this also confirms that the job
 	# reaching RUNNING is the one just applied.
-	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for flinkdeployment/$RUN_ID to reach RUNNING"
+	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for flinkdeployment/$RUN_OBJECT to reach RUNNING"
 	waited=0
 	while :; do
-		state="$(k8s_flinkdeployment_state "$RUN_ID")"
+		state="$(k8s_flinkdeployment_state "$RUN_OBJECT")"
 		case "$state" in
 		RUNNING)
-			log "flinkdeployment/$RUN_ID is RUNNING"
+			log "flinkdeployment/$RUN_OBJECT is RUNNING"
 			break
 			;;
 		FAILED | CANCELED | FINISHED)
-			k8s_deployment_tail "$RUN_ID"
-			die "flinkdeployment/$RUN_ID went to $state before it ran; the lines above are the jobmanager's own log"
+			k8s_deployment_tail "$RUN_OBJECT"
+			die "flinkdeployment/$RUN_OBJECT went to $state before it ran; the lines above are the jobmanager's own log"
 			;;
 		esac
 		if ((waited >= ENGINE_RUNNING_WAIT_S)); then
-			k8s_deployment_tail "$RUN_ID"
-			die "flinkdeployment/$RUN_ID did not reach RUNNING within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported})"
+			k8s_deployment_tail "$RUN_OBJECT"
+			die "flinkdeployment/$RUN_OBJECT did not reach RUNNING within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported})"
 		fi
 		sleep "$ENGINE_POLL_S"
 		waited=$((waited + ENGINE_POLL_S))
