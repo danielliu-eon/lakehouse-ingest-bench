@@ -14,7 +14,7 @@ catalog:
     warehouse: s3://YOUR_BUCKET/warehouse
 kubernetes: {}                      # empty means no cluster, and everything runs where it is started. A
                                     # cluster sets context, namespace, harness_service_account,
-                                    # flink_service_account, registry and aws_region, and may add
+                                    # flink_service_account and registry, and may add aws_region,
                                     # service_account_annotations, node_selector and tolerations.
 pricing:
   vcpu_hour_usd: 0.0

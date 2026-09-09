@@ -108,6 +108,17 @@ def test_the_placement_keys_are_optional(tmp_path: Path) -> None:
     assert loaded.service_account_annotations == {} and loaded.node_selector == {} and loaded.tolerations == []
 
 
+def test_the_aws_region_is_optional_but_never_empty(tmp_path: Path) -> None:
+    """A cluster on another cloud leaves the key out; an empty one names no region at all."""
+    elsewhere = {key: value for key, value in CLUSTER.items() if key != "aws_region"}
+    loaded = model.load_site(_cluster_site(tmp_path, elsewhere)).kubernetes
+    assert loaded is not None and loaded.aws_region is None
+    on_aws = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
+    assert on_aws is not None and on_aws.aws_region == "eu-west-1"
+    with pytest.raises(ValueError, match="aws_region is empty"):
+        model.load_site(_cluster_site(tmp_path, {**CLUSTER, "aws_region": ""}))
+
+
 def test_the_kubernetes_block_refuses_what_it_does_not_recognise(tmp_path: Path) -> None:
     for cluster, message in (
         ({**CLUSTER, "zone": "eu-west-1a"}, "unknown keys"),

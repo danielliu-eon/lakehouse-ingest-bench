@@ -363,6 +363,10 @@ class KubernetesConfig:
     cloud grants an identity to a (namespace, service account) pair, and it is
     granted once by whoever stood the cluster up — so a run that invented its
     own namespace would have no credentials in it.
+
+    ``aws_region`` is absent on a cluster that is not on AWS. Where it is set it
+    reaches every pod as ``AWS_REGION``, which is what an AWS SDK reads when
+    nothing else names a region for it.
     """
 
     context: str
@@ -371,7 +375,7 @@ class KubernetesConfig:
     flink_service_account: str
     service_account_annotations: dict[str, str]
     registry: str
-    aws_region: str
+    aws_region: str | None
     node_selector: dict[str, str]
     tolerations: list[dict[str, str]]
 
@@ -429,6 +433,14 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
     if not block:
         return None
     _refuse_unknown(block, _KUBERNETES_KEYS, where)
+    # An absent region is the answer for a cluster that is not on AWS. An empty
+    # one is no answer at all: it would reach a pod as an `AWS_REGION` that no
+    # SDK can resolve, which surfaces as a signing failure far from this file.
+    aws_region: str | None = None
+    if "aws_region" in block:
+        aws_region = _as_str(block["aws_region"], f"{where}.aws_region")
+        if not aws_region:
+            raise ValueError(f"{where}.aws_region is empty; leave the key out where there is no AWS region")
     return KubernetesConfig(
         context=_as_str(_required(block, "context", where), f"{where}.context"),
         namespace=_as_str(_required(block, "namespace", where), f"{where}.namespace"),
@@ -442,7 +454,7 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
         if "service_account_annotations" not in block
         else _as_string_map(block["service_account_annotations"], f"{where}.service_account_annotations"),
         registry=_as_str(_required(block, "registry", where), f"{where}.registry"),
-        aws_region=_as_str(_required(block, "aws_region", where), f"{where}.aws_region"),
+        aws_region=aws_region,
         node_selector={}
         if "node_selector" not in block
         else _as_string_map(block["node_selector"], f"{where}.node_selector"),
