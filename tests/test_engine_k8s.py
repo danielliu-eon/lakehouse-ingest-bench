@@ -57,7 +57,9 @@ def test_the_spark_descriptor_names_what_the_operator_named() -> None:
     # How many executors there are, and whether their CPU is guaranteed, are
     # properties of the pods and are reported nowhere in the driver's answers.
     assert for_name(descriptor.pods_selector, RUN_OBJECT) == f"sparkoperator.k8s.io/app-name={RUN_OBJECT}"
-    assert descriptor.failed_states == ("FAILED", "SUBMISSION_FAILED", "FAILING")
+    # A query that ended — cleanly or not — leaves no fleet, and at staging
+    # time the topic is empty, so any of the five means the run cannot start.
+    assert descriptor.failed_states == ("FAILED", "SUBMISSION_FAILED", "FAILING", "COMPLETED", "SUCCEEDING")
 
 
 def test_the_flink_descriptor_names_what_the_operator_named() -> None:

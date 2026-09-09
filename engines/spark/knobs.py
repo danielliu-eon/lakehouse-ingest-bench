@@ -95,9 +95,12 @@ _JOB_VOLUME = "job"
 KUBERNETES = EngineKubernetes(
     kind="sparkapplication",
     running_state="RUNNING",
-    # A submission the operator could not make, an application that failed and
-    # one on its way to failing: none of the three has a fleet left to wait for.
-    failed_states=("FAILED", "SUBMISSION_FAILED", "FAILING"),
+    # A submission the operator could not make, an application that failed or
+    # is on its way to failing, and one that ended cleanly: none of the five
+    # has a fleet left to wait for. A streaming query that reached COMPLETED
+    # before the run started is as unrunnable as one that failed, and waiting
+    # it out would only postpone the same refusal.
+    failed_states=("FAILED", "SUBMISSION_FAILED", "FAILING", "COMPLETED", "SUCCEEDING"),
     state_jsonpath="{.status.applicationState.state}",
     rest_service_suffix="-ui-svc",
     rest_port=4040,

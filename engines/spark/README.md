@@ -57,8 +57,10 @@ the node can reclaim would make a measured rate the node's answer. Both carry
 `AWS_REGION` and `AWS_DEFAULT_REGION`, because an executor signs its own broker
 token and writes the table's files itself.
 
-`verify-spark` reads the driver's UI through a tunnel to `<application>-ui-svc`
-on 4040 and the pods through `kubectl`: one application named after the run,
+`verify-spark` reads the driver's UI through a tunnel from `localhost:18081` to
+`<application>-ui-svc`'s 4040, and the pods through `kubectl`: one application
+named after the run — under either spelling of it, since the object's name is
+the lowercased run id and the submitted `spark.app.name` is not —
 every setting the fleet is sized by as the driver reports it, and a driver plus
 `executors` executors `Running` and Guaranteed. **Not the trigger interval.**
 It is a `writeStream` argument, Spark 3.5 publishes no REST resource for a

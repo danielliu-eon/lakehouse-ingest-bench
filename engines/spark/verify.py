@@ -34,7 +34,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from engines.spark.knobs import Knobs, read
+from engines.spark.knobs import Knobs, kubernetes_name, read
 from ingest_bench.readings import (
     DRIFT_EXIT,
     NOT_REPORTED,
@@ -71,11 +71,6 @@ _GUARANTEED = "Guaranteed"
 # makes its absence the checkable half of the cadence — see the module note.
 _TRIGGER_PREFIX = "spark.sql.streaming.trigger"
 
-# What a setting the driver does not report at all reads as. Absence is a
-# reading about the run rather than an unreadable document, so it is compared
-# like any other value.
-_NOT_SET = "not set"
-
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
     """The value the query was submitted with for ``key``.
@@ -93,14 +88,27 @@ def _application(run_id: str, answer: object) -> tuple[str, list[str]]:
     """The run's application id, and the drift when there is not exactly one.
 
     Read by name rather than taken as the only one listed: the endpoint is
-    reached through a tunnel, which is addressed by port and not by pod, so the
-    name is what says the application read is the run just applied.
+    reached through a tunnel, which is addressed by a port and not by a pod, so
+    the name is what says the application read is the run just applied.
+
+    Either spelling of that name is accepted. `render_conf` submits
+    `spark.app.name` as the run id, whose stamp carries an uppercase `T` and
+    `Z`, while the SparkApplication object is named by `kubernetes_name` — the
+    same id lowercased, because an RFC 1123 name has to be. Whether the
+    operator's own `spark.app.name` displaces the submitted one decides which
+    of the two the driver reports, and both name this run, so holding out for
+    one of them would fail a staging over a letter's case.
     """
+    accepted = sorted({run_id, kubernetes_name(run_id)})
     applications = documents(answer, APPLICATIONS)
-    named = [entry for entry in applications if str_field(entry, "name", APPLICATIONS) == run_id]
+    listed = [str_field(entry, "name", APPLICATIONS) for entry in applications]
+    named = [name for name in listed if name in accepted]
     if len(named) != 1:
-        return "", [line("applications named after the run", 1, len(named))]
-    return str_field(named[0], "id", APPLICATIONS), []
+        # The names and not only how many: the likeliest cause of this line is
+        # an application called something nobody predicted, and neither the
+        # operator nor this says what that was.
+        return "", [line("applications named after the run", f"one of {accepted}", listed or "none listed")]
+    return str_field(applications[listed.index(named[0])], "id", APPLICATIONS), []
 
 
 def _properties(answer: object, where: str) -> dict[str, str]:
@@ -143,7 +151,9 @@ def _conf_drift(knobs: Knobs, fetch: Callable[[str], object], application: str) 
     lines: list[str] = []
     for what, key, knob in settings:
         expected = _effective(knobs, key, knob)
-        actual = properties[key] if key in properties else _NOT_SET
+        # Absence is a reading about the run rather than an unreadable
+        # document, so it is compared like any other value.
+        actual = properties[key] if key in properties else NOT_REPORTED
         if expected != actual:
             lines.append(line(what, expected, actual))
     pretended = sorted(key for key in properties if key.startswith(_TRIGGER_PREFIX))
@@ -247,7 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="the run, which is also the application's name — so this is what says the one read is the one started",
     )
     parser.add_argument(
-        "--rest", required=True, metavar="URL", help="the driver's UI endpoint, e.g. http://localhost:14040"
+        "--rest",
+        required=True,
+        metavar="URL",
+        help="the driver's UI endpoint. `stage.sh` tunnels the driver's 4040 to http://localhost:18081",
     )
     parser.add_argument(
         "--pods",

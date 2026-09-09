@@ -152,7 +152,7 @@ def test_a_setting_the_driver_was_not_given_is_named_rather_than_guessed() -> No
     drift rather than raised as a document that could not be read.
     """
     assert _drift(answers=_answers(drop=("spark.executor.instances",))) == [
-        "executors: spec 2, engine not set",
+        "executors: spec 2, engine not reported",
     ]
 
 
@@ -205,31 +205,54 @@ def test_a_setting_that_pretends_to_move_the_cadence_is_refused() -> None:
     ]
 
 
+# The lowercased run id, which is what the SparkApplication object is called
+# because an RFC 1123 name has to be lowercase.
+OBJECT_NAME = RUN_ID.lower()
+
+
+@pytest.mark.parametrize("reported", [RUN_ID, OBJECT_NAME])
+def test_either_spelling_of_the_run_s_name_identifies_its_driver(reported: str) -> None:
+    """The submitted app name and the object's name differ only in case.
+
+    `render_conf` submits the run id, whose stamp is uppercase; the object is
+    named by the lowercased id. Which of the two the driver reports depends on
+    whether the operator's own `spark.app.name` displaces the submitted one —
+    so refusing either would fail a staging over a letter's case.
+    """
+    assert _drift(answers=_answers(name=reported)) == []
+
+
 @pytest.mark.parametrize(
-    ("listed", "expected"),
+    ("listed", "shown"),
     [
-        ([], 0),
-        ([{"id": "other", "name": "someone-elses-run", "attempts": []}], 0),
+        ([], "none listed"),
+        ([{"id": "other", "name": "someone-elses-run", "attempts": []}], "['someone-elses-run']"),
         (
             [
                 {"id": APPLICATION, "name": RUN_ID, "attempts": []},
-                {"id": "second", "name": RUN_ID, "attempts": []},
+                {"id": "second", "name": OBJECT_NAME, "attempts": []},
             ],
-            2,
+            f"['{RUN_ID}', '{OBJECT_NAME}']",
         ),
     ],
 )
-def test_an_endpoint_that_is_not_this_runs_driver_is_the_only_reading_made(
-    listed: list[dict[str, object]], expected: int
+def test_an_endpoint_that_is_not_this_runs_driver_names_what_it_found(
+    listed: list[dict[str, object]], shown: str
 ) -> None:
-    """A tunnel is addressed by port, so the name is what identifies the driver.
+    """A tunnel is addressed by a port, so the name is what identifies the driver.
 
-    Nothing is read out of an application that is not the run's: its settings
-    describe someone else's fleet. The pods are still reported, because they
-    are what say whether this run has a driver at all.
+    The names are in the line and not just how many there were: this is the
+    check most likely to fail on a live cluster, the cause is an application
+    called something nobody predicted, and nothing else in the run says what
+    the operator called it. Nothing further is read either — the settings of an
+    application that is not the run's describe someone else's fleet — but the
+    pods are still reported, because they are what say whether this run has a
+    driver at all.
     """
+    # Sorted, so an uppercase stamp comes before its lowercased twin.
+    accepted = f"['{RUN_ID}', '{OBJECT_NAME}']"
     assert _drift(answers=_answers(applications=listed)) == [
-        f"applications named after the run: spec 1, engine {expected}",
+        f"applications named after the run: spec one of {accepted}, engine {shown}",
     ]
 
 
