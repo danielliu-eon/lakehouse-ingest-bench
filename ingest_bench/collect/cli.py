@@ -1,21 +1,26 @@
-"""The command that turns a finished run into a publishable result.
+"""The commands that turn a finished run into a publishable result, and that
+turn a directory of results into the table a reader compares them on.
 
-Run once by teardown, so a run has a document even if nothing else is ever done
-with it, and again by finish once the geometry has been measured. Both write the
-same document; the second one is simply the one with every input present.
+`collect` is run once by teardown, so a run has a document even if nothing else
+is ever done with it, and again by finish once the geometry has been measured.
+Both write the same document; the second one is simply the one with every
+input present. `results-table` is run over `results/` itself, by a contributor
+publishing a result and by CI checking that nobody forgot to.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import cast
 
-from ingest_bench.collect.run_json import RUN_JSON_FILE, build_run_json
+from ingest_bench.collect.run_json import RUN_JSON_FILE, SCHEMA_VERSION, build_run_json
+from ingest_bench.collect.table import render_results_table
 from ingest_bench.specs.model import load_site
 
 DISTRIBUTION = "lakehouse-ingest-bench"
@@ -112,6 +117,55 @@ def main(argv: Sequence[str] | None = None) -> int:
     # while one with no scores is not.
     for name in missing:
         print(f"  missing: {name}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# results-table
+# ---------------------------------------------------------------------------
+
+
+def load_results(results_dir: Path) -> list[tuple[Path, dict[str, object]]]:
+    """Every `run.json` under `results_dir`, refusing anything that is not one.
+
+    A directory nobody has published to yet has no JSON files at all, so an
+    empty list is a normal answer, not an error — `results/` starts and ends a
+    dry spell with its table still valid.
+    """
+    documents: list[tuple[Path, dict[str, object]]] = []
+    for path in sorted(results_dir.glob("**/*.json")):
+        document = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+        schema_version = document["schema_version"] if "schema_version" in document else None
+        if schema_version != SCHEMA_VERSION:
+            raise ValueError(
+                f"{path}: schema_version {schema_version!r} is not {SCHEMA_VERSION}, so it is not a result document"
+            )
+        documents.append((path, document))
+    return documents
+
+
+def build_results_table_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="results-table",
+        description="Render every published result under a results directory into RESULTS.md.",
+    )
+    parser.add_argument("results_dir", metavar="DIR", help="the results directory to read, e.g. results/")
+    parser.add_argument("--out", required=True, metavar="PATH", help="where to write the rendered table")
+    return parser
+
+
+def results_table_main(argv: Sequence[str] | None = None) -> int:
+    args = build_results_table_parser().parse_args(argv)
+    results_dir = Path(str(args.results_dir))
+    try:
+        documents = load_results(results_dir)
+        text = render_results_table(documents)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    out_path = Path(str(args.out))
+    out_path.write_text(text, encoding="utf-8")
+    print(f"RESULTS_TABLE out={out_path} rows={len(documents)}")
     return 0
 
 
