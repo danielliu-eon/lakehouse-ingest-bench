@@ -149,6 +149,15 @@ _spark_active_queries() {
 	printf '%s' "$count"
 }
 
+# The driver is the process, so a driver that exited is a run that has already
+# ended. Both waits below poll it: without this, a driver that dies before it
+# ever serves its UI reports a timeout rather than the failure that stopped it.
+_die_if_the_spark_driver_exited() {
+	if compose ps --status exited --services 2>/dev/null | grep -qx spark-job; then
+		die "the spark driver exited before its query started; check: compose logs spark-job"
+	fi
+}
+
 # The application is named after the run — `spark.app.name` is the run id — so
 # this is also the check that the driver answering on the UI is running the job
 # just started, rather than one a previous `--keep` left behind.
@@ -157,7 +166,8 @@ wait_for_spark_query() {
 	while ((waited < SPARK_APP_WAIT_S)); do
 		running="$(curl -sf --max-time 5 "$SPARK_UI/api/v1/applications" 2>/dev/null |
 			jq -r --arg name "$name" 'map(select(.name == $name)) | length' 2>/dev/null || true)"
-		[[ $running == 1 ]] && break
+		if [[ $running == 1 ]]; then break; fi
+		_die_if_the_spark_driver_exited
 		sleep 2
 		waited=$((waited + 2))
 	done
@@ -171,12 +181,7 @@ wait_for_spark_query() {
 			log "spark has $queries active streaming query(ies)"
 			return 0
 		fi
-		# The driver is the process, so a driver that exited is a run that has
-		# already ended: waiting the timeout out would report a query that
-		# never started rather than the failure that stopped it.
-		if compose ps --status exited --services 2>/dev/null | grep -qx spark-job; then
-			die "the spark driver exited before its query started; check: compose logs spark-job"
-		fi
+		_die_if_the_spark_driver_exited
 		sleep 2
 		waited=$((waited + 2))
 	done

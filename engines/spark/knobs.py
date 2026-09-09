@@ -395,10 +395,6 @@ def render_conf(spec: RunSpec, site: SiteConfig, derived: Derived) -> dict[str, 
     conf = {
         "spark.sql.extensions": _ICEBERG_EXTENSIONS,
         **_catalog_conf(site),
-        # A streaming query with no checkpoint location refuses to start, and
-        # naming it here rather than on the writer keeps the job free of any
-        # knowledge of where the run's artifacts live.
-        "spark.sql.streaming.checkpointLocation": checkpoint_uri(site, derived),
         "spark.executor.cores": str(knobs.executor_cores),
         "spark.executor.memory": f"{knobs.executor_mem_mb}m",
         "spark.driver.cores": str(knobs.driver_cores),
@@ -494,6 +490,16 @@ def render_job(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMe
             # read. Not a knob — it is a consequence of the decode, not an axis
             # a run varies.
             "check-nullability": "false",
+            # The writer's own option and not the session's
+            # `spark.sql.streaming.checkpointLocation`, which Spark treats as a
+            # parent: `createQuery` joins it with the query's name, and an
+            # unnamed query gets a fresh random one on every start. The query
+            # would then resume from no state after a driver restart, read the
+            # topic from `earliest` again, and duplicate every row already
+            # committed — which is the column exactness measures. A location
+            # given here is used as it stands, so one run has one checkpoint
+            # whatever restarts it.
+            "checkpointLocation": checkpoint_uri(site, derived),
         },
         "trigger_interval": knobs.trigger_interval,
         "max_offsets_per_trigger": knobs.max_offsets_per_trigger,

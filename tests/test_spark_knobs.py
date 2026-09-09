@@ -106,7 +106,6 @@ def test_render_conf(meta: metadata.CorpusMetadata) -> None:
         # The one property pyiceberg and Iceberg's Java library spell
         # differently; every other key above carries through untouched.
         "spark.sql.catalog.ice.client.region": "us-east-1",
-        "spark.sql.streaming.checkpointLocation": f"s3a://runs/{d.run_id}/checkpoints",
         "spark.executor.cores": "2",
         "spark.executor.memory": "2048m",
         "spark.driver.cores": "1",
@@ -180,7 +179,12 @@ def test_render_job(meta: metadata.CorpusMetadata) -> None:
         "table": f"ice.ingest_bench.t_{d.run_id.replace('-', '_')}",
         "columns": meta.field_names(),
         "kafka_options": {},
-        "write_options": {"distribution-mode": "hash", "fanout-enabled": "false", "check-nullability": "false"},
+        "write_options": {
+            "distribution-mode": "hash",
+            "fanout-enabled": "false",
+            "check-nullability": "false",
+            "checkpointLocation": f"s3a://runs/{d.run_id}/checkpoints",
+        },
         "trigger_interval": "10 seconds",
         "max_offsets_per_trigger": None,
     }
@@ -215,6 +219,7 @@ def test_the_job_reads_back_what_the_renderer_wrote(meta: metadata.CorpusMetadat
         "distribution-mode": "hash",
         "fanout-enabled": "false",
         "check-nullability": "false",
+        "checkpointLocation": f"s3a://runs/{d.run_id}/checkpoints",
     }
     assert parsed.trigger_interval == "10 seconds"
     assert stream_to_iceberg.source_options(parsed) == {
@@ -235,6 +240,29 @@ def test_a_limited_micro_batch_reaches_the_source(meta: metadata.CorpusMetadata,
     assert document["write_options"]["fanout-enabled"] == "true"
     parsed = stream_to_iceberg.read_job(_written(knobs.render(spec, site, d, meta), knobs.JOB_FILE, tmp_path))
     assert stream_to_iceberg.source_options(parsed)["maxOffsetsPerTrigger"] == "5000"
+
+
+def test_the_checkpoint_location_is_the_querys_own_and_not_a_parent(
+    meta: metadata.CorpusMetadata, tmp_path: Path
+) -> None:
+    """One run has one checkpoint, whatever restarts it.
+
+    Spark's `spark.sql.streaming.checkpointLocation` is a parent path:
+    `createQuery` joins it with the query's name, and an unnamed query gets a
+    fresh random one on every start. The query would then resume from no state
+    after a driver restart, read the topic from `earliest` again, and duplicate
+    every row already committed. The writer's own option is used as it stands,
+    so it is where the location goes.
+    """
+    site = _site()
+    d = _derived(site, meta)
+    conf = knobs.render_conf(_spec(), site, d)
+    assert "spark.sql.streaming.checkpointLocation" not in conf
+    written = json.loads(knobs.render_job(_spec(), site, d, meta))["write_options"]["checkpointLocation"]
+    assert written == knobs.checkpoint_uri(site, d)
+    # And the job hands every write option to the writer, so it arrives there.
+    parsed = stream_to_iceberg.read_job(_written(knobs.render(_spec(), site, d, meta), knobs.JOB_FILE, tmp_path))
+    assert parsed.write_options["checkpointLocation"] == written
 
 
 def test_the_checkpoint_path_is_the_scheme_spark_reaches_storage_by(meta: metadata.CorpusMetadata) -> None:

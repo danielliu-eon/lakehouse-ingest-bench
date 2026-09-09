@@ -2,8 +2,8 @@
 
 Stock Apache Spark 3.5.9 driven by Structured Streaming. `knobs.py` renders the
 properties, the reader schema and the job document; `stream_to_iceberg.py` reads
-those three and starts one query. No source, sink or serializer is written
-here — so a Spark result is Spark's.
+those three and starts one query. No source, sink or serializer is written here,
+so a Spark result is Spark's.
 
 ## What runs
 
@@ -18,14 +18,13 @@ here — so a Spark result is Spark's.
 
 The three compression codecs `kafka-clients` needs — zstd, lz4, snappy — are
 already in the image, because Spark uses the same three. `commons-pool2` is not:
-the image ships `commons-pool` **1.x**, which is a different package, and the
-Kafka source's consumer pool needs the 2.x one.
+the image ships `commons-pool` **1.x**, a different package, and the Kafka
+source's consumer pool needs 2.x.
 
 The client is the **plain connector plus an unshaded `kafka-clients`** rather
-than an uber jar with `org.apache.kafka` relocated. Amazon MSK's
+than an uber jar with `org.apache.kafka` relocated: Amazon MSK's
 `IAMClientCallbackHandler` implements the unshaded
-`AuthenticateCallbackHandler`, so a shaded client can never load it — the two
-class names never meet.
+`AuthenticateCallbackHandler`, so a shaded client can never load it.
 
 ## The local stack
 
@@ -33,17 +32,18 @@ The `spark` profile is one service. `--master local[executors × executor_cores]
 runs the executors as threads inside the driver's own JVM, so there is no second
 container to scale and `executor_mem_mb` is never spent: `driver_mem_mb` is the
 heap the whole fleet decodes and buffers Parquet in. That costs a cluster-shaped
-run and buys a stack that fits on a laptop, which is all the local smoke is for.
-Set `RUN_DIR` to the staged run directory or the mount fails.
+run and buys a stack that fits on a laptop, which is all the smoke is for.
+Set `RUN_DIR` to the staged run directory or the mount fails. `job.env`'s keys —
+`LOCAL_CORES`, `DRIVER_MEM_MB` — are unprefixed as `flink.env`'s are: the file is
+sourced into one engine's own compose command and nothing else reads it.
 
 Readiness is read off the driver's own UI. **Spark 3.5 publishes no REST
 resource for Structured Streaming** — `api/v1/applications/<id>/streaming` is the
-DStream one and is registered only where a `StreamingContext` exists, so it
-answers 404 — so `wait_for_spark_query` polls `/api/v1/applications` for an
-application named after the run and then the Structured Streaming tab for an
-active query. A run whose `extra_spark_conf` sets
-`spark.sql.streaming.ui.enabled=false` has nothing left to read and will never
-be seen as ready.
+DStream one, registered only where a `StreamingContext` exists, so it answers
+404 — so `wait_for_spark_query` polls `/api/v1/applications` for an application
+named after the run and then the Structured Streaming tab for an active query. A
+run whose `extra_spark_conf` sets `spark.sql.streaming.ui.enabled=false` has
+nothing left to read and is never seen as ready.
 
 ## Knobs
 
@@ -63,53 +63,57 @@ be seen as ready.
 
 `spark.sql.shuffle.partitions` is set to `executors × executor_cores` rather
 than left at Spark's default two hundred: under `hash` or `range` the shuffle
-width is the writer count, and two hundred writers per commit would be two
-hundred files.
+width is the writer count, and two hundred writers per commit is that many files.
 
 ## The timestamp rewrite
 
 The corpus publishes `event_time` as Avro `timestamp-micros`; the table's column
 is a zoneless Iceberg `timestamp`. `from_avro` maps `timestamp-micros` to a
 zoned instant, which would want a `timestamptz` column instead. So `knobs.py`
-renders `reader-schema.avsc` as the corpus schema with every
-`timestamp-micros` rewritten to `local-timestamp-micros`. The two annotate the
-same `long` and encode identically — an Avro logical type is not on the wire —
-so the rewrite reads the corpus's bytes unchanged and yields `TimestampNTZ`.
-A test pins it against the corpus schema.
+renders `reader-schema.avsc` as the corpus schema with every `timestamp-micros`
+rewritten to `local-timestamp-micros`. The two annotate the same `long` and
+encode identically — an Avro logical type is not on the wire — so the rewrite
+reads the corpus's bytes unchanged and yields `TimestampNTZ`. A test pins it.
 
 ## Traps
 
 **`from_avro` returns a nullable struct whatever the schema says.** Every column
 read out of it is therefore nullable, and Iceberg's static write check refuses a
-table whose columns are required — twenty-three lines of *"should be required,
-but is optional"*, with the topic and the table already created. The write
-options carry `check-nullability=false` for that reason. What is skipped is a
-schema comparison that runs before any row is read; what remains is Spark's own
-`AssertNotNull` on each required column, which fails the run if a null ever
-actually arrives. It is not a knob: it is a consequence of the decode, not an
-axis a run varies.
+table whose columns are required — one *"should be required, but is optional"*
+per column, with the topic and the table already created. The write options
+carry `check-nullability=false` for that reason. What is skipped is a schema
+comparison that runs before any row is read; what remains is Spark's own
+`AssertNotNull` on each required column, which fails the run if a null actually
+arrives. Not a knob: a consequence of the decode, not an axis a run varies.
 
 **A trigger interval is a count and a whole unit word.**
-`Trigger.ProcessingTime` parses its argument as a SQL interval, and that parser
-takes `10 seconds`, `1 second`, `500 milliseconds`, `2 minutes`, `1 hour` — and
-rejects `10s`, `500ms`, `1m`, `1h`, `10 sec` and `10seconds` alike (checked
-against 3.5.9). `knobs.py` refuses the abbreviations up front, because a query
-that dies at its first micro-batch does so minutes into a staged run.
+`Trigger.ProcessingTime` parses its argument as a SQL interval, which takes
+`10 seconds`, `500 milliseconds`, `2 minutes`, `1 hour` and rejects `10s`,
+`500ms`, `1m`, `1h`, `10 sec` and `10seconds` alike (checked against 3.5.9).
+`knobs.py` refuses the abbreviations up front: a query that dies at its first
+micro-batch does so minutes into a staged run.
 
 **One object store, two spellings.** The table's data files go through
 Iceberg's own FileIO, configured by `spark.sql.catalog.ice.s3.*`; the query's
 checkpoints go through a Hadoop filesystem, configured by
 `spark.hadoop.fs.s3a.*`. Both are needed and neither replaces the other, so
 `knobs.py` renders the S3A half from the same catalog properties. `s3://` is a
-vendor alias a stock Spark leaves unbound, so the checkpoint path is rewritten
-to `s3a://`.
+vendor alias a stock Spark leaves unbound, so the checkpoint path is `s3a://`.
+
+**The checkpoint location is the writer's option, never the session conf.**
+`spark.sql.streaming.checkpointLocation` is a *parent* path:
+`StreamingQueryManager.createQuery` joins it with the query's name, and a query
+with no `queryName` gets a fresh random subdirectory on every start. A driver
+restart would then resume from no state, read the topic from `earliest` again,
+and duplicate every row already committed — which is the column exactness
+measures — leaving an orphan checkpoint behind each attempt. The
+`checkpointLocation` write option is used as it stands.
 
 **A secret in a no-cluster site's catalog properties lands in the properties
 file.** `spark-submit` reads `spark-defaults.conf` itself, so a `${env:NAME}`
-placeholder is not resolved there — unlike Flink, where the submitter resolves
-it. Only a site with no `kubernetes` block renders those four S3A lines; on a
-cluster storage is reached as the pod's own identity and no static key is
-rendered at all.
+placeholder is not resolved there — unlike Flink, whose submitter resolves it.
+Only a site with no `kubernetes` block renders those four S3A lines; a cluster
+reaches storage as the pod's own identity and no static key is rendered.
 
 ## Sizing
 
@@ -121,9 +125,8 @@ arm64, with `executors: 2, executor_cores: 2` — four cores in one JVM:
 | 30 s | absorbs ~63% at the offer's end, drains exactly in 7 s, freshness 12.5 s |
 | 300 s | absorbs ~96%, freshness p50 7.0 s / p95 11.9 s against a 60 s bound, drain ~10 s |
 
-The 30 s figure is the cold start showing through a run too short to amortise
-it, not a smaller fleet. Neither is a result: the stack shares one machine with
-the engine.
+The 30 s figure is a cold start showing through a run too short to amortise it.
+Neither is a result: the stack shares a machine with the engine.
 
 ## Catalog properties
 
