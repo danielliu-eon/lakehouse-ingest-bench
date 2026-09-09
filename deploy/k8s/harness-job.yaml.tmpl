@@ -20,6 +20,11 @@ spec:
   # an artifact, so a second attempt is not a repeat of the first — it is a
   # second run of a command whose first run left state behind.
   backoffLimit: 0
+  # An hour, because a driver that ends at this Job deletes nothing: a merge
+  # finishes `gen-corpus.sh`, so a finished one would otherwise sit in the
+  # namespace until the next generation runs. The hour is what leaves the log
+  # a refusal points at readable in the meantime.
+  ttlSecondsAfterFinished: 3600
   completions: 1
   template:
     metadata:

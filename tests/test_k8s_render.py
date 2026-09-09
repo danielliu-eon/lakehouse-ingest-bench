@@ -65,6 +65,13 @@ _MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
 # checked in tests/test_scripts.py beside the script that applies it.
 NOT_A_JOB = frozenset({"schema-registry.yaml.tmpl"})
 
+# The Jobs nothing deletes, which expire on their own. The two `gen-corpus.sh`
+# creates: it removes the previous Job of a name on its way in rather than the
+# one it just finished, so without this a namespace accumulates one generation
+# and one merge. Every other Job here is deleted by the driver that made it.
+EXPIRING = frozenset({"corpus-gen-job.yaml.tmpl", "harness-job.yaml.tmpl"})
+EXPIRY_S = 3600
+
 EXPECTATIONS = {
     "harness-job.yaml.tmpl": Expectation(_ONE_OFF, "500m", "1Gi", indexed=False, work_volume=False),
     "stage-job.yaml.tmpl": Expectation(_MOUNTED, "500m", "1Gi", indexed=False, work_volume=True),
@@ -173,6 +180,10 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
     # second time, and the scorer would read the repeat as the engine
     # duplicating rows.
     assert spec["backoffLimit"] == 0
+    if filename in EXPIRING:
+        assert spec["ttlSecondsAfterFinished"] == EXPIRY_S
+    else:
+        assert "ttlSecondsAfterFinished" not in spec, "a Job its driver deletes must not also expire under it"
     if expectation.indexed:
         assert spec["completionMode"] == "Indexed"
         assert spec["completions"] == 4 and spec["parallelism"] == 4
@@ -230,6 +241,21 @@ def test_the_stage_job_mounts_the_spec_and_the_site_read_only() -> None:
     assert set(volumes) == set(mounts)
     assert _mapping(volumes["spec"]["configMap"])["name"] == SAMPLE["SPEC_CONFIGMAP"]
     assert _mapping(volumes["site"]["configMap"])["name"] == SAMPLE["SITE_CONFIGMAP"]
+
+
+@pytest.mark.parametrize("filename", sorted(EXPECTATIONS))
+def test_a_site_naming_no_placement_renders_a_job_the_scheduler_still_takes(filename: str) -> None:
+    """A site that names no nodes and no taints renders an empty map and list.
+
+    That is the common case — a cluster whose one node pool needs neither —
+    and the values reach the manifest as the JSON the drivers render a map and
+    a list in, so `{}` and `[]` have to parse in the position they land in
+    rather than leaving a Job the API server reads as malformed.
+    """
+    expectation = EXPECTATIONS[filename]
+    values = {key: SAMPLE[key] for key in expectation.markers} | {"NODE_SELECTOR": "{}", "TOLERATIONS": "[]"}
+    pod = _pod_spec(_mapping(yaml.safe_load(render_template(TEMPLATES / filename, values))))
+    assert pod["nodeSelector"] == {} and pod["tolerations"] == []
 
 
 def test_a_site_naming_no_region_renders_an_empty_env() -> None:

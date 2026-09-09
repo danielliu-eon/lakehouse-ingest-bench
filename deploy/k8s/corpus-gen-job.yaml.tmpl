@@ -15,6 +15,11 @@ metadata:
     lakehouse-ingest-bench: "true"
 spec:
   backoffLimit: 0
+  # An hour, because nothing deletes this Job: `gen-corpus.sh` removes the
+  # previous one of this name on its way in, so a finished generation would
+  # otherwise sit in the namespace until the next generation runs. The hour is
+  # what leaves the log a refusal points at readable in the meantime.
+  ttlSecondsAfterFinished: 3600
   completionMode: Indexed
   completions: __COUNT__
   parallelism: __COUNT__
