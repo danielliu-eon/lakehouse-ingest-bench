@@ -30,6 +30,27 @@ RUN_DIR = Path("/opt/bench/run")
 JOB_DOCUMENT = RUN_DIR / "job.json"
 READER_SCHEMA = RUN_DIR / "reader-schema.avsc"
 
+# What a value's bytes are, as the run's spec named them. Spelled here rather
+# than imported from the harness's spec package: this module is the only Python
+# the engine image carries, so it cannot reach that package — a test holds the
+# two copies together.
+VALUE_ENCODING_AVRO = "avro"
+VALUE_ENCODING_CONFLUENT = "confluent"
+
+# The expression yielding a value's Avro bytes, per encoding. A Confluent value
+# is the same Avro binary behind five bytes — a zero magic byte, then the
+# schema's registry id as a four-byte big-endian integer — so decoding one is
+# the raw case with those five dropped, and Spark's `substring` is 1-based.
+#
+# The id in the header is not read. One run registers exactly one schema, so
+# every header in it names that one id, and the reader schema the renderer
+# wrote from the corpus is already the schema those bytes were written against
+# — a registry lookup would fetch what this job was handed.
+VALUE_EXPRESSIONS = {
+    VALUE_ENCODING_AVRO: "value",
+    VALUE_ENCODING_CONFLUENT: "substring(value, 6, length(value) - 5)",
+}
+
 
 @dataclass(frozen=True)
 class Job:
@@ -38,6 +59,7 @@ class Job:
     topic: str
     bootstrap: str
     group_id: str
+    value_encoding: str
     table: str
     columns: tuple[str, ...]
     kafka_options: dict[str, str]
@@ -81,6 +103,7 @@ def read_job(path: Path) -> Job:
         topic=_str_at(document, "topic", path),
         bootstrap=_str_at(document, "bootstrap", path),
         group_id=_str_at(document, "group_id", path),
+        value_encoding=_str_at(document, "value_encoding", path),
         table=_str_at(document, "table", path),
         columns=tuple(str(name) for name in cast(list[object], columns)),
         kafka_options=_string_map_at(document, "kafka_options", path),
@@ -115,23 +138,34 @@ def source_options(job: Job) -> dict[str, str]:
     return options
 
 
+def value_expression(encoding: str) -> str:
+    """The expression yielding the Avro bytes of a value framed as ``encoding``."""
+    if encoding not in VALUE_EXPRESSIONS:
+        raise ValueError(f"value encoding {encoding!r} is not one this job decodes: {sorted(VALUE_EXPRESSIONS)}")
+    return VALUE_EXPRESSIONS[encoding]
+
+
 def main() -> int:
     job = read_job(JOB_DOCUMENT)
     schema = READER_SCHEMA.read_text()
+    # Resolved before a session exists, so an encoding this job has no branch
+    # for ends the run here rather than at its first micro-batch.
+    value = value_expression(job.value_encoding)
 
     from pyspark.sql import SparkSession
     from pyspark.sql.avro.functions import from_avro
-    from pyspark.sql.functions import col
+    from pyspark.sql.functions import col, expr
 
     # No settings here: every one of them is in the properties file
     # `spark-submit` was given, which is the file a reader diffs between runs.
     spark = SparkSession.builder.getOrCreate()
     records = spark.readStream.format("kafka").options(**source_options(job)).load()
-    # The value bytes are Avro's single-record encoding, so the reader schema is
-    # the whole of the decoding. The columns are then named individually rather
-    # than expanded, so a corpus column the schema stopped carrying fails here
-    # instead of committing a table one column short.
-    rows = records.select(from_avro(col("value"), schema).alias("record")).select(
+    # Under whatever framing the encoding puts around it, a value is the Avro
+    # single-record encoding of one row, so that expression and the reader
+    # schema are the whole of the decoding. The columns are then named
+    # individually rather than expanded, so a corpus column the schema stopped
+    # carrying fails here instead of committing a table one column short.
+    rows = records.select(from_avro(expr(value), schema).alias("record")).select(
         *(col(f"record.{name}").alias(name) for name in job.columns)
     )
     query = (

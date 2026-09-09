@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, fields
 from typing import cast
 
-from engines.spark.stream_to_iceberg import JOB_DOCUMENT, READER_SCHEMA
+from engines.spark.stream_to_iceberg import JOB_DOCUMENT, READER_SCHEMA, VALUE_EXPRESSIONS
 from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
@@ -291,16 +291,27 @@ def read(block: dict[str, object]) -> Knobs:
 
 
 def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> None:
-    """Refuse a Spark block that cannot describe a runnable job.
+    """Refuse a Spark block that cannot describe a runnable job, or a run it cannot read.
 
-    ``spec`` and ``meta`` are unread: every knob here is about the compute, and
-    neither the topic nor the corpus constrains one — Spark's Kafka source
-    spreads a topic's partitions over whatever cores it has, so a fleet wider
-    than the topic costs idle cores rather than a reader with nothing to read.
-    They stay in the signature because the harness calls every managed
-    engine's validator the same way.
+    ``meta`` is unread: every knob here is about the compute, and neither the
+    topic nor the corpus constrains one — Spark's Kafka source spreads a
+    topic's partitions over whatever cores it has, so a fleet wider than the
+    topic costs idle cores rather than a reader with nothing to read. It stays
+    in the signature because the harness calls every managed engine's validator
+    the same way.
+
+    ``spec`` is read for its value encoding, and both of the ones the harness
+    offers pass: the job strips a Confluent header before it decodes, so
+    neither framing needs anything of the compute. What this refuses is an
+    encoding the spec surface grew without a branch in the job, which would
+    otherwise fail inside the image with a topic and a table already created.
     """
     read(block)
+    if spec.kafka.value_encoding not in VALUE_EXPRESSIONS:
+        raise ValueError(
+            f"spec.kafka.value_encoding is {spec.kafka.value_encoding!r} and a Spark run decodes "
+            f"{sorted(VALUE_EXPRESSIONS)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +485,10 @@ def render_job(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMe
         "topic": derived.topic,
         "bootstrap": site.kafka_bootstrap,
         "group_id": derived.run_id,
+        # How each value is framed, which is what the job decodes through.
+        # Carried from the spec rather than re-derived, so the framing the job
+        # reads is the one the producer wrote and staging registered for.
+        "value_encoding": spec.kafka.value_encoding,
         "table": f"{CATALOG_NAME}.{namespace}.{table}",
         "columns": meta.field_names(),
         "kafka_options": kafka_options(site.kafka_security),

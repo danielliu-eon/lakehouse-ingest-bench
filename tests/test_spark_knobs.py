@@ -176,6 +176,7 @@ def test_render_job(meta: metadata.CorpusMetadata) -> None:
         # The run id, so a consumer group an abandoned run left behind names
         # the run that left it.
         "group_id": d.run_id,
+        "value_encoding": "avro",
         "table": f"ice.ingest_bench.t_{d.run_id.replace('-', '_')}",
         "columns": meta.field_names(),
         "kafka_options": {},
@@ -188,6 +189,60 @@ def test_render_job(meta: metadata.CorpusMetadata) -> None:
         "trigger_interval": "10 seconds",
         "max_offsets_per_trigger": None,
     }
+
+
+def _confluent(spec: model.RunSpec) -> model.RunSpec:
+    return replace(spec, kafka=replace(spec.kafka, value_encoding="confluent"))
+
+
+def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.CorpusMetadata) -> None:
+    """Spark reads either framing, so the encoding constrains the compute not at all.
+
+    The refusal is for an encoding the spec surface grew without a branch in
+    the job: it would otherwise reach the image and fail there, with a topic
+    and a table already created.
+    """
+    spec = _spec()
+    knobs.validate(spec.engine_block, spec, meta)
+    knobs.validate(spec.engine_block, _confluent(spec), meta)
+    unreadable = replace(spec, kafka=replace(spec.kafka, value_encoding="protobuf"))
+    with pytest.raises(ValueError, match="value_encoding"):
+        knobs.validate(spec.engine_block, unreadable, meta)
+
+
+def test_the_job_document_carries_the_encoding_and_nothing_else_changes_with_it(
+    meta: metadata.CorpusMetadata,
+) -> None:
+    """The framing is the only difference between the two runs.
+
+    Both are decoded against the same reader schema and committed by the same
+    writer, so a second difference here would be a difference in the run rather
+    than in what the producer put in front of each value.
+    """
+    site = _site()
+    d = _derived(site, meta)
+    raw = json.loads(knobs.render_job(_spec(), site, d, meta))
+    framed = json.loads(knobs.render_job(_confluent(_spec()), site, d, meta))
+    assert raw["value_encoding"] == "avro" and framed["value_encoding"] == "confluent"
+    assert {key: value for key, value in framed.items() if key != "value_encoding"} == {
+        key: value for key, value in raw.items() if key != "value_encoding"
+    }
+    # And the names are the harness's own, not a second spelling of them.
+    assert stream_to_iceberg.VALUE_ENCODING_AVRO == model.VALUE_ENCODING_AVRO
+    assert stream_to_iceberg.VALUE_ENCODING_CONFLUENT == model.VALUE_ENCODING_CONFLUENT
+
+
+def test_a_confluent_value_is_decoded_with_its_five_byte_header_dropped() -> None:
+    """The strip is the whole of what the encoding costs the job.
+
+    A Confluent value is a zero magic byte, then the schema's registry id as a
+    four-byte big-endian integer, then the Avro binary a raw run carries. So
+    the sixth byte is where the raw case starts, and `substring` is 1-based.
+    """
+    assert stream_to_iceberg.value_expression("avro") == "value"
+    assert stream_to_iceberg.value_expression("confluent") == "substring(value, 6, length(value) - 5)"
+    with pytest.raises(ValueError, match="protobuf"):
+        stream_to_iceberg.value_expression("protobuf")
 
 
 def _written(files: dict[str, str], name: str, run_dir: Path) -> Path:
@@ -214,6 +269,7 @@ def test_the_job_reads_back_what_the_renderer_wrote(meta: metadata.CorpusMetadat
 
     parsed = stream_to_iceberg.read_job(_written(files, knobs.JOB_FILE, tmp_path))
     assert parsed.topic == d.topic and parsed.group_id == d.run_id
+    assert parsed.value_encoding == "avro"
     assert parsed.columns == tuple(meta.field_names())
     assert parsed.write_options == {
         "distribution-mode": "hash",

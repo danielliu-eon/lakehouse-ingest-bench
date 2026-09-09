@@ -75,6 +75,18 @@ rewritten to `local-timestamp-micros`. The two annotate the same `long` and
 encode identically — an Avro logical type is not on the wire — so the rewrite
 reads the corpus's bytes unchanged and yields `TimestampNTZ`. A test pins it.
 
+## Confluent values
+
+`kafka.value_encoding: confluent` frames every value as a zero magic byte, the
+schema's registry id as a four-byte big-endian integer, and then the same Avro
+binary a raw run carries. The job drops those five bytes —
+`substring(value, 6, length(value) - 5)` — and decodes the rest against
+`reader-schema.avsc`, so both encodings share one decode. No registry client:
+one run registers exactly one schema, so every header in it names the same id
+and the reader schema is already the writer's. Staging still needs
+`site.kafka.schema_registry` to get that id, and refuses a `confluent` spec
+without one. `runs/smoke-spark-confluent.yaml` is the shipped run.
+
 ## Traps
 
 **`from_avro` returns a nullable struct whatever the schema says.** Every column
