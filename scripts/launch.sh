@@ -92,6 +92,11 @@ IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 BOOTSTRAP="$(jq -r .bootstrap "$FACTS")"
 CORPUS_URI="$(jq -r .corpus_uri "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
+# The topic staging created, rather than the run id it was named after: the two
+# are the same string today, and a producer that rebuilt the name would publish
+# to a topic of its own the day they stop being.
+TOPIC="$(jq -r .topic "$FACTS")"
+[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS names no topic, so there is nothing for the producer to publish to"
 # `key_column` is null when the spec asked for unkeyed records, and the flag is
 # then left off rather than passed empty.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$FACTS")"
@@ -182,7 +187,7 @@ done
 (($(date +%s) + 30 <= EPOCH)) || die "epoch $EPOCH is under 30s away; raise EPOCH_LEAD_S (currently $EPOCH_LEAD_S) and relaunch"
 
 PRODUCER_JOB="$(producer_job "$RUN_ID")"
-PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $RUN_ID --epoch $EPOCH"
+PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $TOPIC --epoch $EPOCH"
 # `$JOB_COMPLETION_INDEX` is escaped here and expanded by the shell that is the
 # image's entrypoint, so one rendered command serves every shard.
 PRODUCE="$PRODUCE --shard \$JOB_COMPLETION_INDEX --shards $SHARDS"

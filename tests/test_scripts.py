@@ -1366,6 +1366,38 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
 
 
 @needs_shell_tools
+@pytest.mark.parametrize("script", [LAUNCH, TEARDOWN])
+def test_a_driver_addresses_the_topic_staging_named(tmp_path: Path, script: Path) -> None:
+    """The topic comes off `facts.json`, because staging is what created it.
+
+    It is named after the run id today, and a driver that rebuilt the name
+    from the id would publish to — or drop — a topic of its own the day the
+    two stop being the same string, leaving the run's own behind.
+    """
+    topic = f"{RUN_ID}-as-staged"
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps({**FACTS, "topic": topic}))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(
+        script,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_METADATA_LOG": str(tmp_path / "table-metadata-calls.log"), "STUB_METADATA_STATUS": "3"},
+        programs={"table-metadata": TABLE_METADATA_STUB},
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    commands = [_job_command(document) for document in run.applied]
+    published = [command for command in commands if "--topic" in command]
+    assert published, commands
+    for command in published:
+        assert f"--topic {topic}" in command, command
+
+
+@needs_shell_tools
 def test_a_failed_stage_takes_its_configmaps_with_it(tmp_path: Path) -> None:
     """The two ConfigMaps a stage Job mounts belong to that Job alone.
 

@@ -95,6 +95,11 @@ IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 
 BOOTSTRAP="$(jq -r .bootstrap "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
+# The topic staging created, rather than the run id it was named after: a
+# teardown that rebuilt the name would drop a topic of its own the day the two
+# stop being the same string, and leave this run's behind.
+TOPIC="$(jq -r .topic "$FACTS")"
+[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS names no topic, so nothing here knows which topic $RUN_ID published to"
 
 # The copied spec, because which engine a run started is what says how to stop
 # it — and the run directory is the record of what was asked for, so it is read
@@ -147,8 +152,8 @@ k8s_delete job "$(scorer_job "$RUN_ID")"
 # ---------------------------------------------------------------------------
 
 DROP_JOB="drop-topic-$(k8s_object_name "$RUN_ID")"
-DROP_COMMAND="drop-topic --bootstrap $BOOTSTRAP --topic $RUN_ID$(site_flags '.kafka.security' --kafka-prop)"
-log "dropping topic $RUN_ID as job/$DROP_JOB"
+DROP_COMMAND="drop-topic --bootstrap $BOOTSTRAP --topic $TOPIC$(site_flags '.kafka.security' --kafka-prop)"
+log "dropping topic $TOPIC as job/$DROP_JOB"
 k8s_delete job "$DROP_JOB"
 k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"NAME=$DROP_JOB" \
