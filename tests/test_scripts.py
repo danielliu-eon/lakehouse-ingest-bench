@@ -29,7 +29,7 @@ import pytest
 import yaml
 
 from ingest_bench.specs.derive import TABLE_NAMESPACE
-from ingest_bench.specs.model import load_site
+from ingest_bench.specs.model import KubernetesConfig, load_site
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
@@ -445,8 +445,20 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
     assert site.catalog_props["warehouse"] == "123456789012"
     assert site.catalog_props["uri"] == "https://glue.eu-west-1.amazonaws.com/iceberg"
     assert site.catalog_props["rest.signing-name"] == "glue"
-    assert site.kubernetes["namespace"] == "ingest-bench"
-    assert site.kubernetes["registry"] == "123456789012.dkr.ecr.eu-west-1.amazonaws.com"
+    # Compared whole rather than field by field: this block is the one part of
+    # the example a driver reads attribute by attribute, so a key that does not
+    # survive loading is a pod with no identity, registry or region.
+    assert site.kubernetes == KubernetesConfig(
+        context="a-cluster",
+        namespace="ingest-bench",
+        harness_service_account="ingest-bench-harness",
+        flink_service_account="ingest-bench-flink",
+        service_account_annotations={},
+        registry="123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+        aws_region="eu-west-1",
+        node_selector={},
+        tolerations=[],
+    )
 
 
 def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
