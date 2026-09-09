@@ -13,11 +13,11 @@
 # aarch64 wheel), so on an arm64 machine it runs emulated; the Spark image is
 # multi-arch and runs natively.
 #
-# RUN_DIR has to be set for *every* command against this project, not only the
-# one that mounts it: compose interpolates the whole model before it filters
-# by profile, so the submitter's required variable is resolved even by
-# `up kafka`. Any value will do for a command that does not start the
-# submitter — `RUN_DIR=unused docker compose up -d kafka minio …`.
+# RUN_DIR is needed only by the two commands that mount it, the Flink submitter
+# and the Spark driver. Compose interpolates the whole model before it filters by
+# profile, so each engine file gives the variable a default rather than requiring
+# it; that default is a path that cannot hold a run, so only an actual submission
+# without RUN_DIR fails, and it fails by name.
 name: ingest-bench
 
 # Relative paths inside an included file resolve against that file's own

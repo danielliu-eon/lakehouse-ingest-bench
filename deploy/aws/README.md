@@ -13,8 +13,20 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
   amd64-only, because PyFlink publishes no aarch64 wheel, and the preflight
   refuses a cluster without one. If you have no cluster,
   `eksctl-cluster.example.yaml` makes a minimal one — see the last section.
-- **`aws` CLI v2**, **`kubectl`**, **`helm`**, **`jq`** and **`envsubst`** (from
-  GNU gettext) on the machine you run these from.
+- **Host tools**, on the machine you run all of this from. Every script here and
+  every cluster driver under `scripts/` refuses up front on a missing one, and
+  points at this list:
+
+  | Tool | Needed by |
+  |---|---|
+  | `aws` CLI v2 | these two scripts and every driver |
+  | `kubectl` | these two scripts, and every driver that applies or reads an object |
+  | `helm` | `setup.sh` / `teardown.sh`, for the two operators |
+  | `envsubst` (GNU gettext) | `setup.sh`, for the IAM and namespace templates |
+  | `jq`, `yq` (mikefarah v4) | the drivers, to read a run's facts and the site |
+  | `git` | the drivers, for the image tag |
+  | `curl` | `stage.sh`, to read the engine's own endpoint |
+  | `docker` | `push-images.sh` |
 - Credentials for the account the cluster is in, with permission to create S3
   buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
   add-ons and pod identity associations.
@@ -43,11 +55,6 @@ this repository names an account, a region, a cluster or a bucket.
 | `MSK_ACTIVE_WAIT_S` | `3600` | How long `setup.sh` waits for MSK to reach `ACTIVE` |
 | `MSK_DELETED_WAIT_S` | `1800` | How long `teardown.sh` waits for MSK to disappear before deleting its security group |
 
-```bash
-export AWS_REGION=... CLUSTER_NAME=...
-deploy/aws/setup.sh
-```
-
 ## What `setup.sh` creates
 
 Preflight first, and each refusal names its fix: the caller's identity, the
@@ -57,8 +64,11 @@ add-on (installed and waited for if absent) and the
 `webhook.create=false` if absent, so no cert-manager is needed, and its chart
 version is printed either way). Then:
 
-- **S3** — the bucket, with public access blocked, versioning left off and the
-  `lakehouse-ingest-bench` tag.
+- **S3** — the bucket, with public access blocked, the `lakehouse-ingest-bench`
+  tag, and versioning **suspended if it was on** — a corpus is regenerated
+  rather than restored, and every deleted object of a hundred-gigabyte corpus
+  would otherwise keep being billed. That is a change to a bucket you may
+  already own.
 - **ECR** — `lakehouse-ingest-bench/harness`, `lakehouse-ingest-bench/flink` and
   `lakehouse-ingest-bench/spark`.
 - **MSK** — a provisioned cluster, IAM its only client authentication and no
@@ -78,19 +88,43 @@ version is printed either way). Then:
   creates its TaskManagers, and a Spark driver creates its executors. Then the
   **Kubeflow spark-operator**, installed when its CRD is absent — after the
   namespace, because its chart grants the controller a Role in each namespace
-  named by `spark.jobNamespaces`, which is what makes this one eligible. With
-  `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry` Deployment and Service
-  (Apicurio, in-memory storage), waited on until its rollout completes.
+  named by `spark.jobNamespaces`, which is what makes this one eligible. It is
+  installed with `webhook.enable=true`, because the webhook is what grafts a
+  run's ConfigMap volume onto the driver and executor pods — a `SparkApplication`
+  carries the volume and the CRD alone does not apply it, so a driver on an
+  install without it starts with no `/opt/bench/run` and dies opening the run's
+  job document. With `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry`
+  Deployment and Service (Apicurio, in-memory storage), waited on until its
+  rollout completes.
 
 It ends by printing the values to fill into `site.yaml` (copy
 `site.aws.example.yaml`), the IAM bootstrap string among them.
 
-With it filled in, `scripts/push-images.sh` builds and pushes the three images, and
-`scripts/gen-corpus.sh <preset>` builds a corpus into the bucket as a Job.
+## Once per account
+
+```bash
+export AWS_REGION=... CLUSTER_NAME=...
+deploy/aws/setup.sh                        # bucket, ECR, MSK, IAM, namespace, operators
+cp site.aws.example.yaml site.yaml         # setup.sh prints every value to fill in
+scripts/push-images.sh                     # harness and both engine images, tagged with this commit
+scripts/gen-corpus.sh smoke --shards 4     # a corpus in the bucket, as a Job
+```
+
+`push-images.sh` builds the harness and Spark images for `linux/amd64` by
+default; `--platform linux/arm64`, or two comma-separated platforms for a
+manifest list, builds for something else. The Flink image is amd64 whatever is
+passed. It refuses an uncommitted tree, because the tag is the commit and would
+then name something that is not in the image — `--allow-dirty` overrides that.
+
+`gen-corpus.sh <preset> --shards N` generates in N pods and merges them; see
+[`../../docs/corpus.md`](../../docs/corpus.md) for choosing a preset and a shard
+count. Then run a benchmark: [`../../docs/running.md`](../../docs/running.md) is
+the per-run driver sequence.
 
 > **MSK bills by the hour whether or not a run is using it,** and reaching
-> `ACTIVE` takes 15 to 30 minutes. Two `kafka.m5.large` brokers with 100 GiB
-> each are a few dollars a day. Tear it down between campaigns; `setup.sh`
+> `ACTIVE` takes 15 to 30 minutes. The default two `kafka.m5.large` brokers with
+> 100 GiB each cost a few dollars a day — check the current MSK price for your
+> region before a long campaign. Tear it down between campaigns; `setup.sh`
 > recreates it, and a re-run against an existing cluster changes nothing.
 
 ## `teardown.sh`

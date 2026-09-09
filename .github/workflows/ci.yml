@@ -28,7 +28,7 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run mypy
-      # Also collects the doc-size tests and, once added, the licence-header
-      # tests — both are plain pytest cases, not a separate step.
+      # Also collects the doc-size, licence-header and leak-scan tests: all
+      # three are plain pytest cases, not a separate step.
       - run: uv run pytest -q -m "not integration"
       - run: uv run python scripts/validate-results.py

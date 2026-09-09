@@ -2231,7 +2231,7 @@ def test_finish_refuses_to_publish_an_invalid_run_unless_told_to(tmp_path: Path)
 
     Publishing is refused before anything is written, and the refusal names the
     flag: a result whose validity state is disclosed is publishable under
-    §11.2, one that quietly stands beside the valid ones is not.
+    publication rules, one that quietly stands beside the valid ones is not.
     """
     _torn_down_run(tmp_path, run_valid=False)
     refused = _run_driver(
