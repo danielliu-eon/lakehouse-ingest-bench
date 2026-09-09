@@ -101,6 +101,30 @@ def _apply_override(raw: dict[str, object], assignment: str) -> None:
     raw[key] = parsed
 
 
+def _refuse_event_time_finer_than_the_batch(preset: Preset) -> None:
+    """Refuse an event-time cardinality the batch's own window cannot realize.
+
+    An event time's ranks are jitter buckets inside the window its batch owns,
+    and a bucket is floored to a millisecond — so a window of N milliseconds
+    holds at most N distinct event times whatever a column declares. A higher
+    cardinality is an axis the corpus flattens while `corpus.json` goes on
+    publishing the declaration, which is the one thing every consumer reads
+    the workload from.
+
+    The unbounded declaration asks for as many values as the window holds and
+    is always realizable.
+    """
+    for column in preset.columns:
+        if column.role != c.ROLE_EVENT_TIME or column.cardinality == c.UNBOUNDED_CARDINALITY:
+            continue
+        if column.cardinality > preset.batch_interval_ms:
+            raise ValueError(
+                f"column {column.name} declares cardinality {column.cardinality} inside a "
+                f"{preset.batch_interval_ms} ms batch window, which holds {preset.batch_interval_ms} distinct "
+                "event times; lower the cardinality or raise batch_interval_ms"
+            )
+
+
 def resolve_preset_path(source: str, workloads_dir: Path) -> Path:
     path = Path(source)
     if path.suffix in (".yaml", ".yml") and path.exists():
@@ -161,6 +185,9 @@ def load_preset(source: str, *, workloads_dir: Path, overrides: Sequence[str] = 
     ):
         raise ValueError("partition_count, duration_s, batch_interval_ms and offered_bytes_per_s must be positive")
     preset.batch_count  # noqa: B018 - validates divisibility at load time
+    # A column's own value space is checked where the column is declared; this
+    # one is bounded by a preset key instead, so it is checked here.
+    _refuse_event_time_finer_than_the_batch(preset)
     # The Iceberg partition column is written from a sidecar keyed by the Kafka
     # key, so the key columns always have to include it for that sidecar to exist.
     if "partition_key" not in preset.kafka_key_columns:

@@ -69,7 +69,9 @@ def test_metadata_refuses_a_shard(tmp_path: Path) -> None:
     published = json.loads(uri.read_text(uri.join(corpus_uri, "corpus.json")))
     published["generator_version"] = "0"
     uri.write_text(uri.join(corpus_uri, "corpus.json"), json.dumps(published))
-    with pytest.raises(ValueError, match="generator version 0"):
+    # The remedy as well as the disagreement: a corpus another build wrote is
+    # regenerated, and the refusal is the only place that says so.
+    with pytest.raises(ValueError, match="generator version 0.*gen-corpus"):
         metadata.read(corpus_uri)
     uri.write_text(uri.join(corpus_uri, "corpus.json"), json.dumps({"generator_version": generate.GENERATOR_VERSION}))
     with pytest.raises(ValueError, match="missing key 'shard_count'"):

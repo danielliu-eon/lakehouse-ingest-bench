@@ -661,11 +661,12 @@ CALIBRATION_INTERVAL_MS = 1000
 # A row's identity and its event time are zigzag varints, so each costs what
 # its magnitude costs. An identity carries its batch's block, so it is five
 # bytes for every batch past the first; an event time carries milliseconds
-# since the Unix epoch, so it is six bytes for any epoch between 1970 and
-# 2039. At batch zero and epoch zero both collapse to widths no written row
-# has, and the payload budget would absorb the difference under a calibrated
-# name. So the sample sits past the first identity block, at a wall-clock
-# epoch whose exact value is immaterial.
+# since the Unix epoch, so it is six bytes from mid-1970 — 2^34 ms in, where
+# the zigzagged value first needs a sixth seven-bit group — until 2039. At
+# batch zero and epoch zero both collapse to widths no written row has, and
+# the payload budget would absorb the difference under a calibrated name. So
+# the sample sits past the first identity block, at a wall-clock epoch whose
+# exact value is immaterial.
 CALIBRATION_BATCH = 1
 CALIBRATION_EPOCH_MS = 1_767_225_600_000  # 2026-01-01T00:00:00Z
 

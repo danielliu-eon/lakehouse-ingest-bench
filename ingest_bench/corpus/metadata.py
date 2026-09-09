@@ -79,7 +79,8 @@ def read(corpus_uri: str) -> CorpusMetadata:
         if version != GENERATOR_VERSION:
             raise ValueError(
                 f"{corpus_uri} was written by generator version {version}, and this build speaks "
-                f"version {GENERATOR_VERSION}"
+                f"version {GENERATOR_VERSION}; regenerate it with `gen-corpus`, which names a corpus "
+                "after its preset and so writes this same path"
             )
         shard_count = _as_int_value(raw["shard_count"])
         if shard_count != 1:

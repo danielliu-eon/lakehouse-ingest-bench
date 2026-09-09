@@ -68,3 +68,28 @@ def test_key_columns_must_exist() -> None:
 def test_key_column_must_be_a_string_column() -> None:
     with pytest.raises(ValueError, match="string"):
         p.load_preset("smoke", workloads_dir=WORKLOADS, overrides=["kafka_key_columns=[id]"])
+
+
+def test_an_event_time_finer_than_its_batch_window_is_refused() -> None:
+    """An event time's ranks are jitter buckets inside one batch's window.
+
+    The bucket is floored to a millisecond, so a window of N milliseconds
+    holds at most N distinct event times however many ranks are declared: a
+    higher cardinality is an axis the corpus flattens while `corpus.json` goes
+    on publishing the declaration. A cardinality at the window is the finest
+    one that is realized, and the unbounded declaration is always accepted —
+    it asks for as many values as the window holds.
+    """
+    at_the_window = p.load_preset(
+        "smoke", workloads_dir=WORKLOADS, overrides=["column_overrides.event_time.cardinality=1000"]
+    )
+    assert next(c for c in at_the_window.columns if c.name == "event_time").cardinality == 1000
+    with pytest.raises(ValueError, match="event_time"):
+        p.load_preset("smoke", workloads_dir=WORKLOADS, overrides=["column_overrides.event_time.cardinality=1001"])
+    # The window is a preset key, so a batch long enough for the declaration
+    # is the other half of the answer.
+    p.load_preset(
+        "smoke",
+        workloads_dir=WORKLOADS,
+        overrides=["column_overrides.event_time.cardinality=2000", "batch_interval_ms=2000"],
+    )
