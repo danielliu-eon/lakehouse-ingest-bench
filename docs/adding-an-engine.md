@@ -36,16 +36,23 @@ Six rules. Break one and the run is not comparable to any other.
 3. Append-only: no delete files, no upserts, no overwrites.
 4. Data files in Parquet or ORC.
 5. Commit through the catalog the harness names.
-6. No compaction, snapshot expiry or other table maintenance during the run
-   unless declared as a named variant in the result.
+6. No snapshot expiry during the run. Compaction and other rewrites only when
+   declared as a named variant in the result.
 
-Rule 1 is the one engines get wrong most often: a reader that starts at the
-latest offset skips the head of the topic, which the producer wrote before
-your engine was asked to consume, and the run is scored as having lost it.
+Rule 1 is the one engines get wrong most often. The engine is running before
+the producer publishes, but running is not assigned: a consumer gets its
+partitions from a group rebalance after it starts, and one that starts at the
+latest offset skips whatever landed before that assignment — and, after a
+restart with no committed offsets, whatever landed while it was down. Either
+way the run is scored as having lost those rows.
 
-Rule 6 is about the scoring window only. Compaction is a legitimate thing to
-measure; it just cannot run unannounced inside a freshness measurement, since
-a rewrite re-adds rows the scorer has already tallied.
+Rule 6 has two halves with different reasons. Snapshot expiry is off because
+the scorer reads every figure from the table's snapshot log and each snapshot's
+manifests; an expiry that drops a snapshot the scorer has not read yet takes
+those rows' commit time with it. Compaction is legitimate and does not disturb
+the tally — the scorer counts row ids from `append` commits only, so a rewrite's
+new files add nothing — but it changes the file geometry the result reports, so
+a run that compacts says so as a named variant and is compared with its like.
 
 ## What the harness hands you
 
