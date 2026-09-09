@@ -64,6 +64,8 @@ an engine is.
 
 - [`docs/running.md`](docs/running.md) — prerequisites, the smoke's flags, the
   run directory, and how to read the verdict.
+- [`deploy/aws/README.md`](deploy/aws/README.md) — what a run on AWS needs of an
+  account, what `setup.sh` builds, what it costs, and how to remove it.
 - [`docs/adding-an-engine.md`](docs/adding-an-engine.md) — the six-rule contract
   an engine must honour, a walk-through with an engine the harness does not
   manage, and what a managed engine's directory holds.

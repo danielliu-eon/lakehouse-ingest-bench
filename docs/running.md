@@ -1,9 +1,10 @@
 # Running a benchmark
 
-Phase 1 runs everything on one machine through Docker Compose. That is enough to
-check a change end to end, not to measure one: the harness, the broker, the
-object store and the engine share the machine's cores, and on an arm64 host the
-engine image is emulated. Local figures say the pieces agree, never how fast.
+The smoke runs everything on one machine through Docker Compose. That is
+enough to check a change end to end, not to measure one: the harness, the
+broker, the object store and the engine share the machine's cores, and on an
+arm64 host the engine image is emulated. Local figures say the pieces agree,
+never how fast. A measured run needs a cluster, which is "On a cloud" below.
 
 ## Prerequisites
 
@@ -54,6 +55,101 @@ whole lag curve. And `keepup.absorbed_at_offer_end` comes out near zero, because
 with a ten-second checkpoint interval there is barely one commit inside a
 thirty-second offer. It still checks that the table drains and that exactness is
 clean; only the freshness bound and the keep-up fraction need a longer corpus.
+
+## On a cloud
+
+A measured run needs a cluster: the engine, the offer and the reader each get
+their own pods, and the broker and the object store are managed services. The
+AWS shape is Amazon MSK with IAM authentication, one S3 bucket, the Glue Iceberg
+REST catalog and EKS. [`deploy/aws/README.md`](../deploy/aws/README.md) is what
+that builds, what it costs and how to remove it; this section is the order the
+drivers run in.
+
+**The cluster is yours.** Neither deploy script creates, deletes or reconfigures
+it, and it needs at least one **amd64** node: PyFlink publishes no aarch64 wheel
+in any release, so the engine image is amd64-only, the preflight refuses a
+cluster without such a node, and `push-images.sh` builds `linux/amd64` unless
+told otherwise. If you have no cluster,
+`deploy/aws/eksctl-cluster.example.yaml` makes a minimal one — see the last
+section of that README.
+
+### Once per account
+
+```bash
+export AWS_REGION=... CLUSTER_NAME=...
+deploy/aws/setup.sh                        # bucket, ECR, MSK, IAM, namespace
+cp site.aws.example.yaml site.yaml         # setup.sh prints every value to fill in
+scripts/push-images.sh                     # both images, tagged with this commit
+scripts/gen-corpus.sh events-100mbs-skew --shards 8
+```
+
+> **MSK bills by the hour whether or not a run is using it,** and reaching
+> `ACTIVE` takes 15 to 30 minutes. Two brokers with 100 GiB each are a few
+> dollars a day. Tear it down between campaigns with `deploy/aws/teardown.sh`
+> and stand it up again with `setup.sh`; a corpus in the bucket outlives both.
+
+### Once per run
+
+```bash
+RUN_ID=$(scripts/stage.sh runs/my-run.yaml | awk -F': ' '/^run_id: /{print $2}')
+scripts/launch.sh "$RUN_ID"
+scripts/gate.sh "$RUN_ID" --teardown       # every minute or so, while the run goes
+scripts/teardown.sh "$RUN_ID"              # once the offer has drained
+scripts/finish.sh "$RUN_ID"                # the verdict, read from the bucket
+```
+
+| Driver | What it does |
+|---|---|
+| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for a managed engine applies the two documents it rendered and waits for the job to reach `RUNNING`. Prints `run_id: <id>` |
+| `launch.sh <run_id>` | applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
+| `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing |
+| `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, and copies the table's last metadata document beside the run's artifacts |
+| `finish.sh <run_id>` | fetches `scores/` and prints the verdict block. Exits 0 only on `run_valid: true` |
+
+Teardown comes before `finish.sh` because the score is in the bucket either way,
+and every minute a drained run's fleet stays up is a minute paid for nothing.
+Neither `teardown.sh` nor anything else here deletes the table or the warehouse
+data: a run's table is its result. Drop one by hand with `drop-table --table
+<table>` when you are done with it.
+
+### Which steps run in the cluster, and why
+
+Two harness commands run as Jobs because they have to reach the broker:
+`stage`, which creates the run's topic, and `drop-topic`, which removes it. MSK
+brokers listen inside the VPC, and your laptop is not in it. The producer shards
+and the scorer are Jobs for a different reason — the offer is hundreds of
+megabytes a second into that same VPC, and the scorer reads the table on every
+poll.
+
+Everything else is your machine's: rendering manifests, applying them, waiting
+on a Job, fetching artifacts, judging a verdict. So the harness image carries no
+`kubectl` and no Kubernetes client, and the drivers need `kubectl`, `aws`, `jq`,
+`yq` and `git` locally. Each driver takes `--site` (default `./site.yaml`) and
+reads the cluster, the registry, the identities and the roots out of it.
+
+### What the site declares
+
+**Identity.** Nothing is passed to a pod. `setup.sh` binds one IAM role to both
+ServiceAccounts through EKS Pod Identity, and every cloud SDK in every pod picks
+its credentials up from the agent. The one value that must be stated is the
+region: `site.kubernetes.aws_region` reaches every pod as `AWS_REGION`, which is
+what an SDK reads when nothing else names one — both halves of an MSK IAM
+connection need it, the token signer and S3 under the table's FileIO. A cluster
+off AWS leaves the key out, and no pod is given the variable.
+
+**Placement.** `site.kubernetes.node_selector` and
+`site.kubernetes.tolerations` reach every Job and the engine's pods, and they
+are the only place a node pool, label or taint of yours is named — nothing in
+this repository knows about your cluster's shape. The engine's pods pin
+`kubernetes.io/arch: amd64` over whatever the site selects, for the reason
+above.
+
+**Where files go.** `stage.sh` fetches the run directory into `./runs/<run_id>/`
+beside your `site.yaml`, and `RUNS_DIR` moves that. The pods write to
+`site.runs_root` in the bucket instead, because a pod's filesystem goes with the
+pod: staging publishes its run directory, each producer shard its publish log,
+and the scorer mirrors every artifact on each poll. That is also why `gate.sh`
+and `finish.sh` read from the bucket rather than from anything still running.
 
 ## Generating a corpus
 
@@ -154,6 +250,8 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `job.sql` | stage | the engine's script, for a managed engine |
 | `flink-conf.yaml` | stage | the settings the script is submitted with |
 | `flink.env` | stage | the cluster's shape, which the stack sizes containers from |
+| `flinkdeployment.yaml` | stage | the engine as the Flink operator takes it, for a run on a cluster |
+| `flink-job-configmap.yaml` | stage | `job.sql` and `flink-conf.yaml`, as the ConfigMap the engine's pods mount |
 | `publish_log-0.jsonl` | producer | one record per batch: rows, bytes, when it was due, when it was acked |
 | `scores/summary.json` | scorer | the verdict, rewritten on every poll |
 | `scores/freshness.json` | scorer | the lag quantiles and the whole lag curve, on both clocks |
