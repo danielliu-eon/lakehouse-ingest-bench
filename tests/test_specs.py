@@ -41,6 +41,28 @@ def test_spec_refusals(tmp_path: Path) -> None:
             model.load_run_spec(p)
 
 
+def test_the_gate_keys_are_optional_and_typed(tmp_path: Path) -> None:
+    """A spec that says nothing about the gate leaves the gate its own defaults.
+
+    Absent rather than a copy of the scorer's numbers: two files carrying one
+    default drift, and the loser is the file nobody reread.
+    """
+    base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    shipped = model.load_run_spec(ROOT / "runs" / "smoke-external.yaml").scoring
+    assert shipped.gate_adaptation_s is None and shipped.gate_window_s is None
+
+    path = tmp_path / "s.yaml"
+    base["scoring"] = {**base["scoring"], "gate_adaptation_s": 300, "gate_window_s": 90}
+    path.write_text(yaml.safe_dump(base))
+    scoring = model.load_run_spec(path).scoring
+    assert scoring.gate_adaptation_s == 300 and scoring.gate_window_s == 90
+
+    base["scoring"] = {**base["scoring"], "gate_window_s": "90"}
+    path.write_text(yaml.safe_dump(base))
+    with pytest.raises(ValueError, match="gate_window_s"):
+        model.load_run_spec(path)
+
+
 def test_site_refuses_placeholders(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="YOUR_"):
         model.load_site(ROOT / "site.example.yaml")
@@ -191,14 +213,23 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     return out, preset.corpus_dir_name(p)
 
 
-def _site_file(tmp_path: Path, corpus_root: str, security: dict[str, str] | None = None, token: str = "shh") -> Path:
+def _site_file(
+    tmp_path: Path,
+    corpus_root: str,
+    security: dict[str, str] | None = None,
+    token: str = "shh",
+    cluster: dict[str, object] | None = None,
+    warehouse: str | None = None,
+) -> Path:
     path = tmp_path / "site.yaml"
     path.write_text(
         yaml.safe_dump(
             {
                 "corpus_root": corpus_root,
                 "runs_root": f"file://{tmp_path}/published",
-                "warehouse": f"file://{tmp_path}/wh",
+                # The storage warehouse, which is not the catalog's `warehouse`
+                # property: a Glue catalog reads an account id there.
+                "warehouse": warehouse or f"file://{tmp_path}/wh",
                 "kafka": {"bootstrap_servers": "localhost:9092", "security": security or {}},
                 "catalog": {
                     "props": {
@@ -208,7 +239,7 @@ def _site_file(tmp_path: Path, corpus_root: str, security: dict[str, str] | None
                         "token": token,
                     }
                 },
-                "kubernetes": {},
+                "kubernetes": cluster or {},
                 "pricing": {"vcpu_hour_usd": 0.03, "gib_hour_usd": 0.004},
             }
         )
@@ -280,6 +311,115 @@ def test_stage_writes_the_run_directory(tmp_path: Path, corpus: tuple[str, str])
     table = cat.open_catalog(model.load_site(site_path).catalog_props).load_table(str(facts["table"]))
     assert [field.name for field in table.schema().fields] == metadata.read(str(facts["corpus_uri"])).field_names()
     assert table.spec().fields[0].name == "partition_key"
+
+
+def test_stage_gives_the_table_and_its_namespace_a_location_under_the_warehouse(
+    tmp_path: Path, corpus: tuple[str, str]
+) -> None:
+    """The location comes from `site.warehouse`, never from the catalog's own property.
+
+    A Glue Iceberg REST catalog reads an account id in `warehouse`, so a table
+    created without a location lands nowhere a bucket can hold — and the
+    failure surfaces from inside the first writer rather than from the create.
+    """
+    corpus_root, _ = corpus
+    warehouse = f"file://{tmp_path}/explicit"
+    site_path = _site_file(tmp_path, corpus_root, warehouse=warehouse)
+    staged = stage.stage(
+        ROOT / "runs" / "smoke-external.yaml", site_path, tmp_path / "runs", FakeAdmin(), stamp="20260908T190000Z"
+    )
+    namespace, name = cat.table_identifier(staged.derived.table)
+    catalog = cat.open_catalog(model.load_site(site_path).catalog_props)
+    assert catalog.load_table(staged.derived.table).location() == uri.join(warehouse, namespace, name)
+    assert catalog.load_namespace_properties(namespace)["location"] == uri.join(warehouse, namespace)
+
+
+def test_stage_refuses_a_cluster_run_with_no_image_tag(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """The tag is refused before the topic exists, not at the render that needs it.
+
+    Staging a managed run on a cluster ends in two documents naming an image,
+    and there is no image to name without the tag that was pushed.
+    """
+    corpus_root, _ = corpus
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="image-tag"):
+        stage.stage(
+            ROOT / "runs" / "smoke-flink.yaml",
+            _site_file(tmp_path, corpus_root, cluster=dict(CLUSTER)),
+            tmp_path / "runs",
+            admin,
+            stamp="20260908T191000Z",
+        )
+    assert admin.created == [] and admin.deleted == []
+
+
+def _rest_cluster_site(tmp_path: Path, corpus_root: str) -> Path:
+    """A site on a cluster with a REST catalog, which is what a Flink run reads through."""
+    path = tmp_path / "site-cluster.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "corpus_root": corpus_root,
+                "runs_root": f"file://{tmp_path}/published",
+                "warehouse": f"file://{tmp_path}/wh",
+                "kafka": {"bootstrap_servers": "localhost:9092"},
+                "catalog": {"props": {"type": "rest", "uri": "http://catalog:8181", "warehouse": "123456789012"}},
+                "kubernetes": dict(CLUSTER),
+                "pricing": {"vcpu_hour_usd": 0.0, "gib_hour_usd": 0.0},
+            }
+        )
+    )
+    return path
+
+
+def _engine_owned_flink_spec(tmp_path: Path) -> Path:
+    """The shipped Flink spec with the table left to the engine.
+
+    Staging it reaches the renderers without a catalog to create a table in,
+    which is what this file can exercise without a REST catalog running.
+    """
+    spec = yaml.safe_load((ROOT / "runs" / "smoke-flink.yaml").read_text())
+    spec["table"] = {**spec["table"], "managed_by": "engine"}
+    path = tmp_path / "flink-cluster.yaml"
+    path.write_text(yaml.safe_dump(spec))
+    return path
+
+
+def test_stage_on_a_cluster_renders_its_documents_and_uploads_the_run_directory(
+    tmp_path: Path, corpus: tuple[str, str]
+) -> None:
+    """Both Kubernetes documents are written, and every file is published.
+
+    The upload is what lets staging run as a Job: the pod that wrote the run
+    directory is gone by the time an operator wants it, so the directory has
+    to outlive the pod somewhere the operator can read.
+    """
+    corpus_root, _ = corpus
+    uploads = f"file://{tmp_path}/uploads"
+    staged = stage.stage(
+        _engine_owned_flink_spec(tmp_path),
+        _rest_cluster_site(tmp_path, corpus_root),
+        tmp_path / "runs",
+        FakeAdmin(),
+        stamp="20260908T192000Z",
+        image_tag="abc1234",
+        upload_prefix=uploads,
+    )
+    written = sorted(path.name for path in staged.run_dir.iterdir())
+    assert written == [
+        "facts.json",
+        "flink-conf.yaml",
+        "flink-job-configmap.yaml",
+        "flink.env",
+        "flinkdeployment.yaml",
+        "job.sql",
+        "spec.yaml",
+        "timeline.log",
+    ]
+    published = uri.join(uploads, staged.derived.run_id, "stage")
+    assert sorted(uri.listdir(published)) == written
+    assert uri.read_text(uri.join(published, "facts.json")) == (staged.run_dir / "facts.json").read_text()
+    assert ":abc1234" in (staged.run_dir / "flinkdeployment.yaml").read_text()
 
 
 def test_replication_factor_follows_the_broker_count(tmp_path: Path, corpus: tuple[str, str]) -> None:

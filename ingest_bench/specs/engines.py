@@ -20,8 +20,10 @@ def knobs_for(engine: str) -> ModuleType:
     """The knobs module of a managed engine.
 
     Every such module exposes ``validate(block, spec, meta) -> None`` and
-    ``render(spec, site, derived, meta) -> dict[str, str]``, the second
-    returning the files to write into the run directory keyed by filename.
+    ``render(spec, site, derived, meta, *, image_tag) -> dict[str, str]``, the
+    second returning the files to write into the run directory keyed by
+    filename. ``image_tag`` is the tag of the images a run on a cluster starts,
+    and is ``None`` for a site that declares no cluster.
     """
     if engine not in MANAGED:
         raise ValueError(f"{engine!r} is not a managed engine; the registered ones are {sorted(MANAGED)}")

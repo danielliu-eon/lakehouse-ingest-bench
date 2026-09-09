@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from ingest_bench import kafka_admin, uri
+from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus import metadata
 from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
@@ -219,6 +220,18 @@ def facts_lines(facts: dict[str, object]) -> list[str]:
     return lines
 
 
+def publish_run_dir(run_dir: Path, upload_prefix: str, run_id: str) -> None:
+    """Copy the run directory to ``<upload_prefix>/<run_id>/stage/``.
+
+    Staging runs as a Job wherever the broker is only reachable from inside its
+    own network, and that pod's filesystem goes with the pod. Publishing the
+    directory is what leaves it somewhere the operator's machine can fetch it
+    from afterwards.
+    """
+    for path in sorted(run_dir.iterdir()):
+        uri.write_bytes(uri.join(upload_prefix, run_id, "stage", path.name), path.read_bytes())
+
+
 def stage(
     spec_path: Path,
     site_path: Path,
@@ -226,6 +239,8 @@ def stage(
     admin: KafkaAdmin,
     *,
     stamp: str | None = None,
+    image_tag: str | None = None,
+    upload_prefix: str | None = None,
 ) -> Staged:
     """Create the run's topic and table and write its run directory.
 
@@ -249,6 +264,14 @@ def stage(
     if not spec.is_external():
         knobs = knobs_for(spec.engine)
         knobs.validate(spec.engine_block, spec, meta)
+        # Refused here rather than at the render that needs it: by then the
+        # topic exists and the table with it, so a forgotten flag would cost a
+        # rollback instead of an error message.
+        if site.kubernetes is not None and image_tag is None:
+            raise ValueError(
+                "a managed run on a cluster starts an image, so staging needs --image-tag: "
+                "the tag push-images.sh pushed"
+            )
 
     # Resolved here and not at load: the site config, the run's facts and the
     # engine's rendered script all keep the placeholder, and only the calls
@@ -269,7 +292,20 @@ def stage(
     try:
         ddl: str | None = None
         if spec.table.managed_by == model.HARNESS:
-            create_table(catalog_props, derived.table, meta, partition, harness_table_properties(spec))
+            # Both locations come from `site.warehouse` and never from the
+            # catalog's own `warehouse` property: a Glue Iceberg REST catalog
+            # reads an account id there, so a table created without a location
+            # would land nowhere a bucket can hold.
+            namespace, table_name = table_identifier(derived.table)
+            create_table(
+                catalog_props,
+                derived.table,
+                meta,
+                partition,
+                harness_table_properties(spec),
+                location=uri.join(site.warehouse, namespace, table_name),
+                namespace_location=uri.join(site.warehouse, namespace),
+            )
         else:
             ddl = spark_sql_ddl(meta, derived.table, partition, spec.table.properties)
         facts = _facts(spec, site, derived, ddl)
@@ -283,8 +319,11 @@ def stage(
         (run_dir / "facts.json").write_text(json.dumps(facts, indent=2) + "\n")
         (run_dir / "timeline.log").write_text(f"{timeline_line(STAGED)}\n")
         if knobs is not None:
-            for filename, content in cast(dict[str, str], knobs.render(spec, site, derived, meta)).items():
+            rendered = knobs.render(spec, site, derived, meta, image_tag=image_tag)
+            for filename, content in cast(dict[str, str], rendered).items():
                 (run_dir / filename).write_text(content)
+        if upload_prefix is not None:
+            publish_run_dir(run_dir, upload_prefix, derived.run_id)
     except BaseException:
         # An interrupt gets the same treatment as an error: the topic is the
         # one thing a failed staging leaves that blocks the next attempt at the
@@ -308,6 +347,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="YYYYmmddTHHMMSSZ",
         help="the run's time stamp, for re-staging a run under its original identifier",
     )
+    parser.add_argument(
+        "--image-tag",
+        metavar="TAG",
+        help="the tag of the images push-images.sh pushed, which a managed engine's cluster documents start. "
+        "Required when the site declares a cluster",
+    )
+    parser.add_argument(
+        "--upload-prefix",
+        metavar="URI",
+        help="publish the run directory under <URI>/<run id>/stage/, for a staging that ran as a Job and whose "
+        "filesystem went with its pod",
+    )
     return parser
 
 
@@ -319,6 +370,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         Path(str(args.runs_dir)),
         ClusterAdmin(),
         stamp=None if args.stamp is None else str(args.stamp),
+        image_tag=None if args.image_tag is None else str(args.image_tag),
+        upload_prefix=None if args.upload_prefix is None else str(args.upload_prefix),
     )
     for line in facts_lines(staged.facts):
         print(line)

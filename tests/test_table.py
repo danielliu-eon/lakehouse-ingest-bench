@@ -128,5 +128,21 @@ def test_ddl_only_prints_the_ddl_and_reaches_no_catalog(
     assert capsys.readouterr().out == f"{expected}\n"
 
 
+def test_table_metadata_prints_the_metadata_location(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One line, so a teardown can copy the document `aws s3 cp` is pointed at.
+
+    The path is the catalog's answer rather than a guess assembled from the
+    table's location: only the catalog knows which metadata document is the
+    current one.
+    """
+    props = sqlite_props(tmp_path)
+    table = create.create_table(props, "bench.m", corpus, create.parse_partition("unpartitioned"), {})
+    flags = [flag for key, value in props.items() for flag in ("--catalog-prop", f"{key}={value}")]
+    assert cli.metadata_location(["--table", "bench.m", *flags]) == 0
+    assert capsys.readouterr().out == f"{table.metadata_location}\n"
+
+
 def test_type_maps_cover_the_same_published_types() -> None:
     assert set(create._TYPES) == set(ddl._TYPES)

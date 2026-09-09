@@ -168,9 +168,19 @@ class ProducerSpec:
 
 @dataclass(frozen=True)
 class ScoringSpec:
+    """What the scorer measures against, and what the in-flight gate allows.
+
+    The two gate fields are absent unless a run says otherwise, so the gate
+    keeps its own defaults rather than having them restated here — a default
+    written down twice drifts, and the copy nobody rereads is the one that
+    decides whether a run was abandoned.
+    """
+
     freshness_bound_s: float
     warmup_s: int
     geometry_offsets_s: tuple[int, ...]
+    gate_adaptation_s: int | None
+    gate_window_s: int | None
 
 
 @dataclass(frozen=True)
@@ -247,7 +257,11 @@ def _producer_spec(raw: dict[str, object]) -> ProducerSpec:
 
 def _scoring_spec(raw: dict[str, object]) -> ScoringSpec:
     block = _block(raw, "scoring", "spec")
-    _refuse_unknown(block, frozenset({"freshness_bound_s", "warmup_s", "geometry_offsets_s"}), "spec.scoring")
+    _refuse_unknown(
+        block,
+        frozenset({"freshness_bound_s", "warmup_s", "geometry_offsets_s", "gate_adaptation_s", "gate_window_s"}),
+        "spec.scoring",
+    )
     if "geometry_offsets_s" not in block:
         offsets = DEFAULT_GEOMETRY_OFFSETS_S
     else:
@@ -264,6 +278,12 @@ def _scoring_spec(raw: dict[str, object]) -> ScoringSpec:
         else _as_float(block["freshness_bound_s"], "spec.scoring.freshness_bound_s"),
         warmup_s=120 if "warmup_s" not in block else _as_int(block["warmup_s"], "spec.scoring.warmup_s"),
         geometry_offsets_s=offsets,
+        gate_adaptation_s=None
+        if "gate_adaptation_s" not in block
+        else _as_int(block["gate_adaptation_s"], "spec.scoring.gate_adaptation_s"),
+        gate_window_s=None
+        if "gate_window_s" not in block
+        else _as_int(block["gate_window_s"], "spec.scoring.gate_window_s"),
     )
 
 
