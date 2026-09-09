@@ -1574,6 +1574,42 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
         assert "could not reach the catalog" in run.result.stderr
 
 
+# `gate` as the driver calls it, answering the verdict a case asks for. The
+# artifacts it would read are the scorer's, and the stub reads none of them.
+GATE_STUB = """
+printf '%s\\n' "$*" >>"$STUB_GATE_LOG"
+exit "${STUB_GATE_STATUS:-0}"
+"""
+
+
+@needs_shell_tools
+def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> None:
+    """The exit code is the gate's own, whatever the teardown it asked for did.
+
+    A teardown replacing it would report a status this script never defines,
+    and a caller that reads 0 PASS, 3 UNDERSIZED and 5 VOID would have to
+    guess which of them a run had reached. The teardown here fails because
+    there is no run directory for it to read, which is also the shape of the
+    real failure: a run torn down twice.
+    """
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+
+    run = _run_driver(
+        GATE,
+        [RUN_ID, "--teardown"],
+        tmp_path,
+        {"STUB_GATE_LOG": str(gate_calls), "STUB_GATE_STATUS": "3"},
+        programs={"gate": GATE_STUB},
+    )
+
+    assert run.result.returncode == 3, run.result.stdout + run.result.stderr
+    assert "so its fleet may still be running" in run.result.stderr, run.result.stderr
+    # The two artifacts the gate reads, and no others: fetching the whole set
+    # every minute would pay for a run's record to answer one question.
+    assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == ["summary.json", "keepup_samples.jsonl"]
+
+
 @needs_shell_tools
 def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -> None:
     """Every object a teardown deletes is named by the lowercased run id.

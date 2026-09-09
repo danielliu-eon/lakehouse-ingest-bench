@@ -108,6 +108,14 @@ if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)); then
 	# to this checkout's commit — which need not be the commit that was pushed.
 	TEARDOWN_ARGS=("$RUN_ID" --site "$SITE_FILE")
 	[[ -z $IMAGE_TAG ]] || TEARDOWN_ARGS+=(--image-tag "$IMAGE_TAG")
-	"$REPO_ROOT/scripts/teardown.sh" "${TEARDOWN_ARGS[@]}"
+	# The verdict is what this script exits with, so a teardown that failed is
+	# reported rather than left to replace it: the exit codes here are the
+	# gate's own, and a caller reading one this script never defines would have
+	# to guess whether the run passed. The fleet outliving its verdict is the
+	# operator's to act on, which is what the line below is for.
+	TEARDOWN_STATUS=0
+	"$REPO_ROOT/scripts/teardown.sh" "${TEARDOWN_ARGS[@]}" || TEARDOWN_STATUS=$?
+	((TEARDOWN_STATUS == 0)) ||
+		log "tearing $RUN_ID down exited $TEARDOWN_STATUS, so its fleet may still be running: scripts/teardown.sh $RUN_ID"
 fi
 exit "$VERDICT_STATUS"
