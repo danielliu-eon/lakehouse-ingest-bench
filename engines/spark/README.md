@@ -45,6 +45,28 @@ named after the run and then the Structured Streaming tab for an active query. A
 run whose `extra_spark_conf` sets `spark.sql.streaming.ui.enabled=false` has
 nothing left to read and is never seen as ready.
 
+## On Kubernetes
+
+A run is one `SparkApplication` for the Kubeflow spark-operator in `cluster`
+mode plus the ConfigMap its pods mount at `/opt/bench/run`. The driver runs as
+`site.kubernetes.spark_service_account`, the account the cloud's identity is
+bound to — so the chart's own spark account and RBAC are off and the namespace
+manifest grants ours the rules a driver needs to create its executors. Both
+halves ask for as much CPU as they cap at, so their pods are Guaranteed: cores
+the node can reclaim would make a measured rate the node's answer. Both carry
+`AWS_REGION` and `AWS_DEFAULT_REGION`, because an executor signs its own broker
+token and writes the table's files itself.
+
+`verify-spark` reads the driver's UI through a tunnel to `<application>-ui-svc`
+on 4040 and the pods through `kubectl`: one application named after the run,
+every setting the fleet is sized by as the driver reports it, and a driver plus
+`executors` executors `Running` and Guaranteed. **Not the trigger interval.**
+It is a `writeStream` argument, Spark 3.5 publishes no REST resource for a
+streaming query, and the topic is empty until `launch.sh` — so no batch has run
+to read a cadence off. What is checked is that nothing pretends otherwise: a
+property under `spark.sql.streaming.trigger` is a run moving its own cadence
+somewhere nothing reads it.
+
 ## Knobs
 
 | Knob | Default | Effect |

@@ -181,6 +181,20 @@ def test_the_kubernetes_block_loads_a_cluster(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("path", sorted((ROOT / "runs").glob("*.yaml")), ids=lambda path: path.name)
+def test_every_shipped_run_spec_loads(path: Path) -> None:
+    """A spec that does not load is one an operator finds out about at stage time.
+
+    Each of these is copied and edited rather than written from nothing, so the
+    shipped ones are the shape every run of that engine starts from.
+    """
+    spec = model.load_run_spec(path)
+    assert spec.name == path.stem
+    assert spec.engine in {*engines.MANAGED, "external"}
+    if spec.engine in engines.MANAGED:
+        assert spec.engine_block, f"{path.name} names {spec.engine} and gives it no knobs"
+
+
 def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(tmp_path: Path) -> None:
     """Defaulted, unlike the two beside it, so an older site config still loads.
 

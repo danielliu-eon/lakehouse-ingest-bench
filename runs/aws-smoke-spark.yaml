@@ -1,0 +1,24 @@
+name: aws-smoke-spark
+engine: spark
+corpus: smoke
+table:
+  partition: identity(partition_key)
+kafka:
+  partitions: 4
+  key: user_id
+producer:
+  shards: 1
+scoring:
+  freshness_bound_s: 60
+  warmup_s: 60
+spark:
+  # The same four executor cores as the local smoke, on real nodes rather than
+  # threads inside one JVM — so unlike the local run this one actually spends
+  # `executor_mem_mb`, and it is doubled because a 2 GiB executor decodes and
+  # buffers Parquet in whatever the JVM's own overhead leaves it.
+  executors: 2
+  executor_cores: 2
+  executor_mem_mb: 4096
+  driver_mem_mb: 2048
+  trigger_interval: "10 seconds"
+  distribution_mode: hash

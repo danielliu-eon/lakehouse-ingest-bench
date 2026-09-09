@@ -172,7 +172,7 @@ engine branches outside it.
 |---|---|
 | `README.md` | what the engine runs, knobs it honours, known traps |
 | `Dockerfile` | stock upstream image plus connector jars; pinned versions; built by CI to GHCR and buildable locally |
-| `deploy.yaml.tmpl` | the Kubernetes resource rendered from a run spec |
+| the cluster documents | the custom resource a run is, and the ConfigMap its pods mount, both rendered from a run spec by `knobs.py` |
 | `compose.yaml` | the engine's services for the local stack |
 | job source | the job the engine runs (SQL or Python) |
 | `knobs.py` | run-spec keys the engine accepts, validation, rendering into the template and the DDL |
@@ -196,3 +196,10 @@ knobs becomes a usable spec. The module owes two functions:
 `validate(block, spec, meta)`, which refuses a block that cannot describe a
 runnable engine, and `render(spec, site, derived, meta)`, which returns the files
 to write into the run directory keyed by filename.
+
+For a run on a cluster it owes one more thing: `KUBERNETES`, an
+`EngineKubernetes` naming the kind of object a run is, where its state sits in
+the status, what running is called there, the Service that carries its HTTP API
+and the labels its pods carry. The cluster drivers read those through
+`engine-k8s` and hold no engine's names of their own, so a third engine adds no
+line to `scripts/`.

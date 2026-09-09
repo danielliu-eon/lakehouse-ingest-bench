@@ -78,9 +78,10 @@ drivers run in.
 
 **The cluster is yours.** Neither deploy script creates, deletes or reconfigures
 it, and it needs at least one **amd64** node: PyFlink publishes no aarch64 wheel
-in any release, so the engine image is amd64-only, the preflight refuses a
+in any release, so the Flink image is amd64-only, the preflight refuses a
 cluster without such a node, and `push-images.sh` builds `linux/amd64` unless
-told otherwise. If you have no cluster,
+told otherwise. The Spark image is multi-arch, so a Spark-only campaign is not
+bound by that. If you have no cluster,
 `deploy/aws/eksctl-cluster.example.yaml` makes a minimal one — see the last
 section of that README.
 
@@ -90,7 +91,7 @@ section of that README.
 export AWS_REGION=... CLUSTER_NAME=...
 deploy/aws/setup.sh                        # bucket, ECR, MSK, IAM, namespace
 cp site.aws.example.yaml site.yaml         # setup.sh prints every value to fill in
-scripts/push-images.sh                     # both images, tagged with this commit
+scripts/push-images.sh                     # the harness and both engine images, tagged with this commit
 scripts/gen-corpus.sh events-100mbs-skew --shards 8
 ```
 
@@ -100,6 +101,11 @@ scripts/gen-corpus.sh events-100mbs-skew --shards 8
 > and stand it up again with `setup.sh`; a corpus in the bucket outlives both.
 
 ### Once per run
+
+The sequence is the same for either managed engine — the drivers read the kind
+of object a run is, where its state sits and which Service carries its API out
+of the engine's own module, and run `verify-<engine>` against the copied spec
+before the run is offered a corpus.
 
 ```bash
 RUN_ID=$(scripts/stage.sh runs/my-run.yaml | awk -F': ' '/^run_id: /{print $2}')
@@ -112,7 +118,7 @@ scripts/purge.sh "$RUN_ID" --artifacts     # once you are done with the table
 
 | Driver | What it does |
 |---|---|
-| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for a managed engine applies the two documents it rendered, waits for the job to reach `RUNNING` and records the image it is running. Prints `run_id: <id>` |
+| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state, holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
 | `launch.sh <run_id>` | applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
 | `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing |
 | `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, copies the table's last metadata document beside the run's artifacts, and collects the run |
@@ -168,8 +174,8 @@ so a default install reaches the catalog and then fails on that import.
 
 ### What the site declares
 
-**Identity.** Nothing is passed to a pod. `setup.sh` binds one IAM role to both
-ServiceAccounts through EKS Pod Identity, and every cloud SDK in every pod picks
+**Identity.** Nothing is passed to a pod. `setup.sh` binds one IAM role to all
+three ServiceAccounts through EKS Pod Identity, and every cloud SDK in every pod picks
 its credentials up from the agent. The one value that must be stated is the
 region: `site.kubernetes.aws_region` reaches every pod as `AWS_REGION`, which is
 what an SDK reads when nothing else names one — both halves of an MSK IAM
@@ -177,11 +183,12 @@ connection need it, the token signer and S3 under the table's FileIO. A cluster
 off AWS leaves the key out, and no pod is given the variable.
 
 **Placement.** `site.kubernetes.node_selector` and
-`site.kubernetes.tolerations` reach every Job and the engine's pods, and they
+`site.kubernetes.tolerations` reach every Job and every engine pod, and they
 are the only place a node pool, label or taint of yours is named — nothing in
-this repository knows about your cluster's shape. The engine's pods pin
+this repository knows about your cluster's shape. A Flink run's pods pin
 `kubernetes.io/arch: amd64` over whatever the site selects, for the reason
-above.
+above; a Spark run's take the selector as it stands, and both halves of its
+fleet ask for as much CPU as they cap at so their pods are Guaranteed.
 
 **Where files go.** `stage.sh` fetches the run directory into `./runs/<run_id>/`
 beside your `site.yaml`, and `RUNS_DIR` moves that. The pods write to
@@ -286,11 +293,12 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `spec.yaml` | stage | the run spec, copied verbatim |
 | `facts.json` | stage | what an engine needs to join the run — see `docs/adding-an-engine.md` |
 | `timeline.log` | stage | one line per phase transition |
-| `job.sql` | stage | the engine's script, for a managed engine |
-| `flink-conf.yaml` | stage | the settings the script is submitted with |
-| `flink.env` | stage | the cluster's shape, which the stack sizes containers from |
-| `flinkdeployment.yaml` | stage | the engine as the Flink operator takes it, for a run on a cluster |
-| `flink-job-configmap.yaml` | stage | `job.sql` and `flink-conf.yaml`, as the ConfigMap the engine's pods mount |
+| `job.sql` | stage | a Flink run's script |
+| `flink-conf.yaml` | stage | the settings that script is submitted with |
+| `flink.env` | stage | the cluster's shape, which the local stack sizes containers from |
+| `spark-defaults.conf` | stage | a Spark run's settings, and `job.json`, `reader-schema.avsc`, `job.env` beside it |
+| `flinkdeployment.yaml` / `sparkapplication.yaml` | stage | the engine as its operator takes it, for a run on a cluster |
+| `flink-job-configmap.yaml` / `spark-job-configmap.yaml` | stage | those rendered files, as the ConfigMap the engine's pods mount |
 | `engine-image.json` | stage | the image the engine ran and the digest the node pulled |
 | `publish_log-0.jsonl` | producer | one record per batch: rows, bytes, when it was due, when it was acked |
 | `scores/summary.json` | scorer | the verdict, rewritten on every poll |
