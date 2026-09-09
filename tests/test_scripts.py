@@ -24,6 +24,8 @@ import os
 import re
 import shutil
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from string import Template
 from typing import cast
@@ -40,11 +42,24 @@ AWS_DEPLOY = REPO_ROOT / "deploy" / "aws"
 SMOKE = SCRIPTS / "smoke.sh"
 GEN_CORPUS = SCRIPTS / "gen-corpus.sh"
 PUSH_IMAGES = SCRIPTS / "push-images.sh"
+STAGE = SCRIPTS / "stage.sh"
+LAUNCH = SCRIPTS / "launch.sh"
+GATE = SCRIPTS / "gate.sh"
+TEARDOWN = SCRIPTS / "teardown.sh"
+FINISH = SCRIPTS / "finish.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
 
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+
+# The drivers read the site with `yq` and a run's facts with `jq`, and neither
+# is a Python dependency — so a machine without them can still run the rest of
+# this file rather than failing on a missing tool the harness never needs.
+needs_shell_tools = pytest.mark.skipif(
+    any(shutil.which(tool) is None for tool in ("bash", "jq", "yq", "git")),
+    reason="the cluster drivers read the site and a run's facts with jq, yq and git",
+)
 
 # What `setup.sh` exports before it renders the IAM documents with envsubst. The
 # values are shaped like the real ones: a document that only renders with a
@@ -194,7 +209,7 @@ def test_an_unknown_argument_is_refused() -> None:
 
 
 @needs_bash
-@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES])
+@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH])
 def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
     """`--help` and an unknown argument, with no site config and no cluster.
 
@@ -575,3 +590,258 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
     for flag in ("--speed $SPEED", "--seconds $REPLAY_SECONDS", "--behind-max-ms $BEHIND_MAX_MS"):
         assert flag in text, f"smoke.sh reads a producer key but never passes {flag.split()[0]}"
     assert "--speed 1" not in text, "smoke.sh still hardcodes a replay speed"
+
+
+# ---------------------------------------------------------------------------
+# The cluster drivers, against a stub kubectl and aws
+# ---------------------------------------------------------------------------
+
+# Every invocation is recorded and then answered, so the drivers' own parsing —
+# the run id off a Job's log, the epoch arithmetic, the command lines the Jobs
+# carry — is exercised with no cluster and no account. Anything not matched here
+# answers nothing and succeeds, which is what `kubectl apply` and `delete` do.
+KUBECTL_STUB = """
+printf '%s\\n' "$*" >>"$STUB_LOG"
+case "$*" in
+*"apply -f -")
+	count=$(find "$STUB_APPLIED_DIR" -type f | wc -l | tr -d ' ')
+	cat >"$STUB_APPLIED_DIR/$count.yaml"
+	;;
+*"create configmap"*) printf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: stub\\n' ;;
+*"get job/"*) printf 'Complete\\n' ;;
+*"logs job/scorer-"*) printf 'POLL t=0.1 prefix=0/0\\n' ;;
+*"logs job/"*) cat "$STUB_JOB_LOG" ;;
+*"get flinkdeployment/"*) printf 'RUNNING\\n' ;;
+esac
+"""
+
+# `s3 sync` stands in for the run directory the stage Job published; every other
+# subcommand succeeds silently.
+AWS_STUB = """
+printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
+if [[ ${1:-} == s3 && ${2:-} == sync ]]; then
+	mkdir -p "$4"
+	cp -R "$STUB_STAGE_DIR/." "$4"
+fi
+"""
+
+RUN_ID = "smoke-flink-20260908T120000Z"
+BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
+
+# What the stage Job printed, in the shape `stage` prints it: the run id first,
+# because that is the line the driver reads.
+STAGE_JOB_LOG = f"""run_id: {RUN_ID}
+bootstrap: {BOOTSTRAP}
+topic: {RUN_ID}
+table: ingest_bench.t_smoke_flink_20260908T120000Z
+run_dir: /work/runs/{RUN_ID}
+"""
+
+FACTS = {
+    "run_id": RUN_ID,
+    "bootstrap": BOOTSTRAP,
+    "topic": RUN_ID,
+    "corpus_uri": "s3://a-bucket/corpus/smoke-1a2b3c4d",
+    "table": "ingest_bench.t_smoke_flink_20260908T120000Z",
+    "key_column": "user_id",
+    "epoch": None,
+}
+
+
+def _filled_site() -> str:
+    """The shipped AWS example with its placeholders filled, as an operator's own."""
+    text = SITE_AWS_EXAMPLE.read_text()
+    for placeholder, value in SITE_AWS_FILLINGS.items():
+        text = text.replace(placeholder, value)
+    return text
+
+
+def _stub_bin(directory: Path, programs: dict[str, str]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, body in programs.items():
+        stub = directory / name
+        stub.write_text(f"#!/usr/bin/env bash\nset -euo pipefail\n{body}")
+        stub.chmod(0o755)
+    return directory
+
+
+@dataclass(frozen=True)
+class DriverRun:
+    """One driver run against the stubs, and everything it left behind."""
+
+    result: subprocess.CompletedProcess[str]
+    calls: str
+    aws_calls: str
+    applied: list[dict[str, object]]
+
+
+def _run_driver(script: Path, arguments: list[str], tmp_path: Path, environment: dict[str, str]) -> DriverRun:
+    """Run one driver in its own working directory with `kubectl` and `aws` stubbed.
+
+    The working directory is the operator's: `./site.yaml` and `./runs` are
+    resolved against it, so nothing here writes into the checkout.
+    """
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    (work / "site.yaml").write_text(_filled_site())
+    applied_dir = tmp_path / "applied"
+    applied_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "kubectl-calls.log"
+    calls.touch()
+    aws_calls = tmp_path / "aws-calls.log"
+    aws_calls.touch()
+    job_log = tmp_path / "job.log"
+    job_log.write_text(STAGE_JOB_LOG)
+    stubs = _stub_bin(tmp_path / "bin", {"kubectl": KUBECTL_STUB, "aws": AWS_STUB})
+
+    result = subprocess.run(
+        [str(script), *arguments],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "STUB_LOG": str(calls),
+            "STUB_AWS_LOG": str(aws_calls),
+            "STUB_APPLIED_DIR": str(applied_dir),
+            "STUB_JOB_LOG": str(job_log),
+            **environment,
+        },
+    )
+    documents = [
+        _mapping(yaml.safe_load(path.read_text()))
+        for path in sorted(applied_dir.glob("*.yaml"), key=lambda path: int(path.stem))
+    ]
+    return DriverRun(result=result, calls=calls.read_text(), aws_calls=aws_calls.read_text(), applied=documents)
+
+
+def _job_command(document: dict[str, object]) -> str:
+    """The single argument a Job's container carries, which is its whole command line."""
+    containers = _sequence(_pod_spec(document)["containers"])
+    return str(_sequence(_mapping(containers[0])["args"])[0])
+
+
+def _pod_spec(document: dict[str, object]) -> dict[str, object]:
+    return _mapping(_mapping(_mapping(document["spec"])["template"])["spec"])
+
+
+@needs_shell_tools
+def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_path: Path) -> None:
+    """The run id comes from the Job, and the engine's documents come from the bucket.
+
+    Only staging knows the run id — the stamp in it is the moment staging ran —
+    so a driver that derived it a second time would name a different run every
+    time the two calls straddled a second.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+
+    spec = REPO_ROOT / "runs" / "smoke-flink.yaml"
+    run = _run_driver(
+        STAGE,
+        [str(spec), "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_STAGE_DIR": str(staged)},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert run.result.stdout.splitlines()[-1] == f"run_id: {RUN_ID}"
+
+    fetched = tmp_path / "work" / "runs" / RUN_ID
+    assert json.loads((fetched / "facts.json").read_text())["topic"] == RUN_ID
+    assert run.aws_calls.strip() == f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/"
+
+    # Every call names the cluster and the namespace the site declares: a
+    # `kubectl` that fell back to the caller's current context would apply a
+    # run to whichever cluster was last selected.
+    for line in run.calls.splitlines():
+        assert line.startswith("--context a-cluster --namespace ingest-bench "), line
+
+    # The spec and the site reach the Job as ConfigMaps under the names its
+    # mounts expect, and both are deleted once the run directory is fetched.
+    assert f"--from-file smoke-flink.yaml={spec}" in run.calls
+    assert "--from-file site.yaml=./site.yaml" in run.calls
+    for deleted in ("delete job stage-smoke-flink", "configmap stage-smoke-flink-spec", "stage-smoke-flink-site"):
+        assert deleted in run.calls, deleted
+
+    # The engine is started from the documents the run directory carries, the
+    # ConfigMap first because the deployment mounts it.
+    engine_applies = [line for line in run.calls.splitlines() if " apply -f ./runs/" in line]
+    assert [line.rsplit("/", 1)[-1] for line in engine_applies] == [
+        "flink-job-configmap.yaml",
+        "flinkdeployment.yaml",
+    ]
+    assert f"get flinkdeployment/{RUN_ID}" in run.calls
+
+    jobs = [document for document in run.applied if document["kind"] == "Job"]
+    assert len(jobs) == 1, "staging applies one Job"
+    command = _job_command(jobs[0])
+    assert "stage --spec /runs/smoke-flink.yaml --site /site/site.yaml --runs-dir /work/runs" in command
+    assert "--image-tag abc1234" in command
+    assert "--upload-prefix s3://a-bucket/runs" in command
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("lead", [None, 42])
+def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, lead: int | None) -> None:
+    """The epoch is in the future by the lead, and the run directory says which.
+
+    A first batch already due when the producer opened its first connection is
+    acked late, and a late ack is read as the offer rather than the engine
+    setting the rate — which voids the run. The lead is what buys a cold node
+    and an image pull.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    before = int(time.time())
+    run = _run_driver(
+        LAUNCH,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {} if lead is None else {"EPOCH_LEAD_S": str(lead)},
+    )
+    after = int(time.time())
+    assert run.result.returncode == 0, run.result.stderr
+
+    expected_lead = 180 if lead is None else lead
+    epoch = int(json.loads((run_dir / "facts.json").read_text())["epoch"])
+    assert before + expected_lead <= epoch <= after + expected_lead
+    assert (run_dir / "timeline.log").read_text().splitlines()[-1].endswith(f" launched epoch={epoch}")
+
+    # The scorer is applied first: a producer publishing before the table was
+    # read would have rows committed by the first sample, and the keep-up curve
+    # would start part way up.
+    assert [str(_mapping(document["metadata"])["name"]) for document in run.applied] == [
+        f"scorer-{RUN_ID}",
+        f"producer-{RUN_ID}",
+    ]
+    scorer, producer = (_job_command(document) for document in run.applied)
+
+    assert f"--epoch {epoch}" in scorer and f"--epoch {epoch}" in producer
+    assert f"--publish-logs s3://a-bucket/runs/{RUN_ID}/producer" in scorer
+    assert f"--out /work/scores --upload-prefix s3://a-bucket/runs/{RUN_ID}/scores" in scorer
+    assert "--idle-stop-s 600 --publish-shards 1" in scorer
+    # Every catalog property the site declares, because the scorer reads the
+    # table itself and no site config reaches a pod.
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in scorer
+    assert "--catalog-prop warehouse=123456789012" in scorer
+    # The spec's scoring keys, so the run scored is the run the spec asks for.
+    assert "--warmup-s 60" in scorer and "--freshness-bound-s 60" in scorer
+
+    assert f"--topic {RUN_ID}" in producer
+    assert "--shard $JOB_COMPLETION_INDEX --shards 1" in producer
+    assert "--publish-log /work/publish_log-$JOB_COMPLETION_INDEX.jsonl" in producer
+    assert f"--upload-prefix s3://a-bucket/runs/{RUN_ID}" in producer
+    assert "--key-column user_id" in producer
+    # The MSK IAM properties, the harness's own signing region among them.
+    assert "--kafka-prop security.protocol=SASL_SSL" in producer
+    assert "--kafka-prop aws.region=eu-west-1" in producer
+
+    assert _mapping(run.applied[1]["spec"])["completions"] == 1

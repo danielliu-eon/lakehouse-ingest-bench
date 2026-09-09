@@ -231,14 +231,5 @@ docker logs "scorer-$RUN_ID" 2>&1 | tail -n 20 >&2
 docker rm "scorer-$RUN_ID" >/dev/null
 log "the scorer exited $SCORER_STATUS (0 drained, 2 stopped idle)"
 
-SUMMARY="$RUN_DIR/scores/summary.json"
-[[ -f $SUMMARY ]] || die "the scorer published no $SUMMARY"
-jq '{
-  run_valid, state, reason, producer_bound,
-  prefix, last_batch, committed_rows, offered_rows,
-  freshness: .freshness.window,
-  exactness: {exact: .exactness.exact, loss_rows: .exactness.loss_rows, duplicate_rows: .exactness.duplicate_rows},
-  keepup
-}' "$SUMMARY"
-[[ "$(jq -r .run_valid "$SUMMARY")" == true ]] || die "run_valid is false; the block above says why, in full in $SUMMARY"
+print_verdict "$RUN_DIR/scores/summary.json"
 log "run_valid: true — $RUN_ID, artifacts in $RUN_DIR"

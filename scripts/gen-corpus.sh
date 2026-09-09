@@ -90,22 +90,9 @@ require_host_tools kubectl yq git
 # corpus has one to resolve.
 ((SHARDS == 1)) || require_host_tools aws
 
-[[ -f $SITE_FILE ]] || die "no site config at $SITE_FILE; copy site.aws.example.yaml and fill it in"
-SITE_NAMESPACE="$(site_required '.kubernetes.namespace')"
-KUBE_CONTEXT="$(site_required '.kubernetes.context')"
-SERVICE_ACCOUNT="$(site_required '.kubernetes.harness_service_account')"
-REGISTRY="$(site_required '.kubernetes.registry')"
+k8s_read_site
 CORPUS_ROOT="$(site_required '.corpus_root')"
-NODE_SELECTOR="$(site_json '.kubernetes.node_selector' '{}')"
-TOLERATIONS="$(site_json '.kubernetes.tolerations' '[]')"
-JOB_ENV="$(site_env_json)"
-
-if [[ -n $IMAGE_TAG ]]; then
-	TAG="$IMAGE_TAG"
-else
-	TAG="$(git -C "$REPO_ROOT" rev-parse --short HEAD)" ||
-		die "could not read this checkout's commit to tag the image with; pass --image-tag"
-fi
+TAG="$(k8s_image_tag "$IMAGE_TAG")"
 IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 
 # The harness command that wrote a corpus reports the URI it wrote, so nothing

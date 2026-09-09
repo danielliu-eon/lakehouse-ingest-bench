@@ -37,6 +37,8 @@ SAMPLE = {
     "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}',
     "TOLERATIONS": '[{"key": "a-taint", "operator": "Exists", "effect": "NoSchedule"}]',
     "COUNT": "4",
+    "SPEC_CONFIGMAP": "stage-a-run-spec",
+    "SITE_CONFIGMAP": "stage-a-run-site",
 }
 
 
@@ -55,9 +57,11 @@ _ONE_OFF = frozenset(
     {"NAME", "NAMESPACE", "SERVICE_ACCOUNT", "IMAGE", "COMMAND", "ENV", "NODE_SELECTOR", "TOLERATIONS"}
 )
 _INDEXED = _ONE_OFF | {"COUNT"}
+_MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
 
 EXPECTATIONS = {
     "harness-job.yaml.tmpl": Expectation(_ONE_OFF, "500m", "1Gi", indexed=False, work_volume=False),
+    "stage-job.yaml.tmpl": Expectation(_MOUNTED, "500m", "1Gi", indexed=False, work_volume=True),
     "corpus-gen-job.yaml.tmpl": Expectation(_INDEXED, "1", "2Gi", indexed=True, work_volume=False),
     "producer-job.yaml.tmpl": Expectation(_INDEXED, "1", "2Gi", indexed=True, work_volume=True),
     "scorer-job.yaml.tmpl": Expectation(_ONE_OFF, "1", "2Gi", indexed=False, work_volume=True),
@@ -193,6 +197,30 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
         assert volume["name"] == mount["name"] and "emptyDir" in volume
     else:
         assert "volumeMounts" not in container and "volumes" not in pod
+
+
+def test_the_stage_job_mounts_the_spec_and_the_site_read_only() -> None:
+    """Staging reads two files, and both reach it as ConfigMaps the driver made.
+
+    The mount paths are half of the command line `stage.sh` renders — `--spec
+    /runs/<name>` and `--site /site/site.yaml` — so a path changed in one place
+    and not the other is a Job that cannot find its own spec. Read-only because
+    nothing in the pod may edit the record of what was asked for.
+    """
+    template = TEMPLATES / "stage-job.yaml.tmpl"
+    values = {key: SAMPLE[key] for key in EXPECTATIONS["stage-job.yaml.tmpl"].markers}
+    document = _mapping(yaml.safe_load(render_template(template, values)))
+
+    mounts = {
+        str(_mapping(entry)["name"]): _mapping(entry) for entry in _sequence(_container(document)["volumeMounts"])
+    }
+    assert mounts["spec"]["mountPath"] == "/runs" and mounts["spec"]["readOnly"] is True
+    assert mounts["site"]["mountPath"] == "/site" and mounts["site"]["readOnly"] is True
+
+    volumes = {str(_mapping(entry)["name"]): _mapping(entry) for entry in _sequence(_pod_spec(document)["volumes"])}
+    assert set(volumes) == set(mounts)
+    assert _mapping(volumes["spec"]["configMap"])["name"] == SAMPLE["SPEC_CONFIGMAP"]
+    assert _mapping(volumes["site"]["configMap"])["name"] == SAMPLE["SITE_CONFIGMAP"]
 
 
 def test_a_site_naming_no_region_renders_an_empty_env() -> None:

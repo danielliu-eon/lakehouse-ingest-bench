@@ -1,0 +1,59 @@
+# Staging as a Job. It is the one harness command that creates a topic, so it
+# runs where the broker is: a managed broker is reachable from inside its own
+# network and not from an operator's machine.
+#
+# It also differs from every other harness command in reading two files — the
+# run spec and the site config — which reach it as ConfigMaps the driver creates
+# for this Job and deletes afterwards. A template of its own rather than an
+# optional mount on `harness-job.yaml.tmpl`: the other commands there carry no
+# files, and a mount they all had to name would be a ConfigMap each of them
+# would have to invent.
+#
+# The run directory is written to an `emptyDir` and published to the runs
+# prefix, because this pod's filesystem goes with the pod.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  backoffLimit: 0
+  completions: 1
+  template:
+    metadata:
+      labels:
+        lakehouse-ingest-bench: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: __SERVICE_ACCOUNT__
+      nodeSelector: __NODE_SELECTOR__
+      tolerations: __TOLERATIONS__
+      containers:
+        - name: harness
+          image: __IMAGE__
+          args: ["__COMMAND__"]
+          env: __ENV__
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: spec
+              mountPath: /runs
+              readOnly: true
+            - name: site
+              mountPath: /site
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: spec
+          configMap:
+            name: __SPEC_CONFIGMAP__
+        - name: site
+          configMap:
+            name: __SITE_CONFIGMAP__

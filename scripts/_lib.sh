@@ -50,6 +50,24 @@ harness() {
 	compose run --rm -T harness "$1"
 }
 
+# The verdict block, and a refusal unless the run is publishable. Shared by the
+# local smoke and the cloud drivers so that both read the same fields in the
+# same order — a second copy of this filter would drift, and the copy that lost
+# would be the one nobody reread.
+print_verdict() {
+	local summary=$1
+	[[ -f $summary ]] || die "the scorer published no $summary"
+	jq '{
+  run_valid, state, reason, producer_bound,
+  prefix, last_batch, committed_rows, offered_rows,
+  freshness: .freshness.window,
+  exactness: {exact: .exactness.exact, loss_rows: .exactness.loss_rows, duplicate_rows: .exactness.duplicate_rows},
+  keepup
+}' "$summary"
+	[[ "$(jq -r .run_valid "$summary")" == true ]] ||
+		die "run_valid is false; the block above says why, in full in $summary"
+}
+
 # Refuse up front rather than half way through a run. A missing `yq` surfaces
 # otherwise as a scorer given an empty `--warmup-s`, minutes after the corpus
 # was generated.
