@@ -35,6 +35,7 @@ score = "ingest_bench.scorer.cli:score"
 gate = "ingest_bench.scorer.cli:gate"
 file-sizes = "ingest_bench.scorer.cli:file_sizes"
 stage = "ingest_bench.stage:main"
+collect = "ingest_bench.collect.cli:main"
 drop-topic = "ingest_bench.kafka_admin:main"
 render-k8s = "ingest_bench.k8s.render:main"
 
