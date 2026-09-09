@@ -20,6 +20,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The guard has to name the terms it bans, so it is the one file it cannot
@@ -111,6 +113,9 @@ RULES = (
     ),
     Rule(
         name="cloud account id",
+        # Alphanumeric boundaries rather than `\b`, which treats `_` as a word
+        # character and so would miss `acct_987654321098`. Both reject the
+        # 12-digit runs inside a hex digest, whose neighbours are letters.
         pattern=re.compile(r"(?<![0-9A-Za-z])\d{12}(?![0-9A-Za-z])"),
         remedy=f"use {PLACEHOLDER_ACCOUNT_ID}, the id AWS reserves for documentation",
         allowed=frozenset({PLACEHOLDER_ACCOUNT_ID}),
@@ -138,6 +143,32 @@ RULES = (
         allowed_shape=PLACEHOLDER_ROOT,
     ),
 )
+
+
+@dataclass(frozen=True)
+class Leak:
+    """One unpermitted match: which rule caught it, the text, and where."""
+
+    rule: Rule
+    found: str
+    line: int
+
+
+def leaks_in(text: str) -> list[Leak]:
+    """Every rule's unpermitted matches in one document, in rule order.
+
+    Separate from the tree walk so the matcher can be run against synthetic
+    documents. A green sweep over a clean tree is equally consistent with six
+    working rules and with six that have quietly stopped matching anything, so
+    the rules need a subject of their own.
+    """
+    leaks: list[Leak] = []
+    for rule in RULES:
+        for match in rule.pattern.finditer(text):
+            found = match.group(rule.group)
+            if not rule.permits(found):
+                leaks.append(Leak(rule, found, text.count("\n", 0, match.start()) + 1))
+    return leaks
 
 
 def tracked_files() -> tuple[Path, ...]:
@@ -212,9 +243,10 @@ def test_nothing_in_the_tree_names_where_it_came_from() -> None:
 
     A file that is not UTF-8 is skipped: none of the six shapes is a thing a
     reader can find in a binary asset, and crashing the guard on the first
-    screenshot committed to `docs/` would take the other 179 files down with it.
+    screenshot committed to `docs/` would take the rest of the tree's coverage
+    down with it.
     """
-    leaks: list[str] = []
+    reported: list[str] = []
     for path in tracked_files():
         name = path.relative_to(REPO_ROOT).as_posix()
         if name == SELF:
@@ -223,11 +255,134 @@ def test_nothing_in_the_tree_names_where_it_came_from() -> None:
             text = path.read_text()
         except UnicodeDecodeError:
             continue
-        for rule in RULES:
-            for match in rule.pattern.finditer(text):
-                found = match.group(rule.group)
-                if rule.permits(found):
-                    continue
-                line = text.count("\n", 0, match.start()) + 1
-                leaks.append(f"{name}:{line}: {rule.name} {found!r} — {rule.remedy}")
-    assert not leaks, "the tree names where it came from:\n" + "\n".join(leaks)
+        for leak in leaks_in(text):
+            reported.append(f"{name}:{leak.line}: {leak.rule.name} {leak.found!r} — {leak.rule.remedy}")
+    assert not reported, "the tree names where it came from:\n" + "\n".join(reported)
+
+
+@dataclass(frozen=True)
+class Sample:
+    """A document the matcher should read a known set of leaks out of.
+
+    Each carries its own lookalike where one exists, because the failure that
+    matters is not a rule that misses a leak but a rule so loose that it is
+    turned off after its first false positive.
+    """
+
+    name: str
+    text: str
+    expected: tuple[tuple[str, str], ...]
+
+
+# These are literal strings of exactly what the guard bans, and they are inert
+# only because `SELF` keeps the tree sweep out of this file — that exclusion is
+# load-bearing for this test, not a convenience.
+LEAK_SAMPLES = (
+    Sample(
+        name="vocabulary as whole words",
+        text="Run the adevents corpus on the Eon platform during the rise campaign with maelstrom.",
+        expected=(
+            ("internal vocabulary", "adevents"),
+            ("internal vocabulary", "Eon"),
+            ("internal vocabulary", "rise"),
+            ("internal vocabulary", "maelstrom"),
+        ),
+    ),
+    Sample(
+        name="vocabulary inside longer words",
+        text="A peony blooms once an aeon; Napoleon watched the sunrise, and prices have arisen since.",
+        expected=(),
+    ),
+    Sample(
+        name="the domain",
+        text="Further reading lives at https://docs.eon.io/lakehouse.",
+        expected=(("internal vocabulary", "eon"),),
+    ),
+    Sample(
+        name="the product, hyphen underscore and space",
+        text="Compared against native-stream, native_stream and the native stream writer.",
+        expected=(
+            ("internal product name", "native-stream"),
+            ("internal product name", "native_stream"),
+            ("internal product name", "native stream"),
+        ),
+    ),
+    Sample(
+        name="the word native on its own",
+        text="The image is multi-arch and runs natively; the operator's native mode sizes the fleet.",
+        expected=(),
+    ),
+    Sample(
+        name="account id in an ARN",
+        text="arn:aws:kafka:eu-west-1:987654321098:cluster/a-cluster/aaaa-bbbb-1",
+        expected=(("cloud account id", "987654321098"),),
+    ),
+    Sample(
+        name="account id in a registry host",
+        text="987654321098.dkr.ecr.eu-west-1.amazonaws.com/lakehouse-ingest-bench/harness:abc1234",
+        expected=(("cloud account id", "987654321098"),),
+    ),
+    Sample(
+        name="account id as a bucket suffix",
+        text="The corpus is at s3://lake-987654321098/corpus.",
+        expected=(
+            ("cloud account id", "987654321098"),
+            ("object-store bucket", "lake-987654321098"),
+        ),
+    ),
+    Sample(
+        name="account id behind an underscore",
+        text="Credentials are cached at /var/run/acct_987654321098.json.",
+        expected=(("cloud account id", "987654321098"),),
+    ),
+    Sample(
+        name="millisecond epochs and a digest",
+        text="at_ms 1757440012345, epoch_ms 1757440000000, sha256:ab987654321098cd, and 123456789012.",
+        expected=(),
+    ),
+    Sample(
+        name="a project id",
+        text="Point the drivers at project my-data-lake-483921 in us-central1.",
+        expected=(("GCP project id", "my-data-lake-483921"),),
+    ),
+    Sample(
+        name="run ids and dates that end in digits",
+        text="run_id aws-smoke-spark-20260909T193155Z, corpus smoke-1a2b3c4d, recorded 2026-09-09.",
+        expected=(),
+    ),
+    Sample(
+        name="an address",
+        text="Ask someone@example.com for the credentials.",
+        expected=(("email address", "someone@example.com"),),
+    ),
+    Sample(
+        name="the one address a trailer may quote",
+        text="Co-Authored-By: Claude <noreply@anthropic.com>",
+        expected=(),
+    ),
+    Sample(
+        name="real-looking bucket roots",
+        text="Stage into s3://acme-prod-lake/corpus and read back from gs://analytics-raw-eu/runs.",
+        expected=(
+            ("object-store bucket", "acme-prod-lake"),
+            ("object-store bucket", "analytics-raw-eu"),
+        ),
+    ),
+    Sample(
+        name="bucket placeholders and fixtures",
+        text="s3://YOUR_BUCKET/corpus, s3://$BUCKET/runs, gs://<corpus_root>/x, s3://b/runs, s3://warehouse/",
+        expected=(),
+    ),
+)
+
+
+@pytest.mark.parametrize("sample", LEAK_SAMPLES, ids=[sample.name for sample in LEAK_SAMPLES])
+def test_the_matcher_reads_a_leak_and_leaves_its_lookalike(sample: Sample) -> None:
+    found = sorted((leak.rule.name, leak.found) for leak in leaks_in(sample.text))
+    assert found == sorted(sample.expected)
+
+
+def test_every_rule_is_exercised_by_a_sample() -> None:
+    """A rule with no sample is a rule nothing above would notice breaking."""
+    covered = {rule_name for sample in LEAK_SAMPLES for rule_name, _ in sample.expected}
+    assert covered == {rule.name for rule in RULES}
