@@ -1057,6 +1057,17 @@ while [[ $# -gt 0 ]]; do
 	*) shift ;;
 	esac
 done
+# `STUB_VERIFY_STATUSES` answers the nth call with its nth word and every call
+# after that with its last, so "4 4 0" is a fleet that finishes being placed.
+# The calls are counted in a file of their own because the log above holds a
+# line per pod list as well as one per call.
+if [[ -n ${STUB_VERIFY_STATUSES:-} ]]; then
+	printf 'x' >>"$STUB_VERIFY_LOG.calls"
+	read -r -a statuses <<<"$STUB_VERIFY_STATUSES"
+	index=$(($(wc -c <"$STUB_VERIFY_LOG.calls") - 1))
+	((index < ${#statuses[@]})) || index=$((${#statuses[@]} - 1))
+	exit "${statuses[index]}"
+fi
 exit "${STUB_VERIFY_STATUS:-0}"
 """
 
@@ -1363,6 +1374,62 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
     assert f"run_id: {RUN_ID}" not in run.result.stdout
     expected_tries = 1 if status == 3 else 3
     assert len(verify_calls.read_text().splitlines()) == expected_tries
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    ("statuses", "succeeds", "tries"),
+    [
+        # A fleet still being placed: the check says so, is waited for, and
+        # passes once the last pod has an image to start from.
+        ("4 4 0", True, 3),
+        # One that never finishes being placed gets the engine's own running
+        # wait rather than the endpoint's tries, so the refusal names the pods.
+        ("4", False, 1),
+    ],
+)
+def test_stage_waits_out_a_fleet_that_is_still_being_placed(
+    tmp_path: Path, statuses: str, succeeds: bool, tries: int
+) -> None:
+    """Placement is a wait; an endpoint that did not answer is a retry.
+
+    An object reaches its running state before its last pod has been
+    scheduled, so a check reporting a half-placed fleet is answered by waiting
+    — against the engine's own running wait, which is what a cold node and an
+    image pull are already budgeted against — and not by the three tries an
+    unreadable endpoint gets.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+    verify_calls = tmp_path / "verify-calls.log"
+    verify_calls.touch()
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
+            "STUB_VERIFY_LOG": str(verify_calls),
+            "STUB_VERIFY_STATUSES": statuses,
+            # A placement wait is counted in poll intervals, so a zero poll
+            # would never reach the expiry the second case asks for.
+            "ENGINE_POLL_S": "1",
+            "ENGINE_RUNNING_WAIT_S": "60" if succeeds else "0",
+        },
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
+    )
+
+    assert (run.result.returncode == 0) is succeeds, run.result.stderr
+    assert len(verify_calls.read_text().splitlines()) == tries, verify_calls.read_text()
+    if succeeds:
+        assert run.result.stdout.splitlines()[-1] == f"run_id: {RUN_ID}"
+    else:
+        assert "was not fully placed within 0s" in run.result.stderr, run.result.stderr
 
 
 @needs_shell_tools
