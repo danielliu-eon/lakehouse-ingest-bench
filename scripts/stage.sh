@@ -97,9 +97,20 @@ SITE_CONFIGMAP="$STAGE_JOB-site"
 # Stage
 # ---------------------------------------------------------------------------
 
+# The two ConfigMaps belong to this Job alone, and one of them is the
+# operator's own site config — so every exit takes them with it rather than
+# only the one that reaches the deletion below. A failure inside the trap is
+# tolerated: it must not become this script's exit status, which is the
+# refusal that caused the exit.
+delete_stage_configmaps() {
+	k8s_delete configmap "$SPEC_CONFIGMAP" || true
+	k8s_delete configmap "$SITE_CONFIGMAP" || true
+}
+
 log "staging $SPEC as job/$STAGE_JOB with $IMAGE"
 # A Job's spec is immutable, so the previous Job of this name goes first.
 k8s_delete job "$STAGE_JOB"
+trap delete_stage_configmaps EXIT
 k8s_configmap_from_file "$SPEC_CONFIGMAP" "$(basename -- "$SPEC")=$SPEC"
 k8s_configmap_from_file "$SITE_CONFIGMAP" "site.yaml=$SITE_FILE"
 
@@ -137,8 +148,8 @@ aws s3 sync "$RUNS_ROOT/$RUN_ID/stage/" "$RUN_DIR/" >&2 ||
 [[ -f $RUN_DIR/facts.json ]] || die "$RUNS_ROOT/$RUN_ID/stage/ holds no facts.json"
 
 k8s_delete job "$STAGE_JOB"
-k8s_delete configmap "$SPEC_CONFIGMAP"
-k8s_delete configmap "$SITE_CONFIGMAP"
+delete_stage_configmaps
+trap - EXIT
 
 # ---------------------------------------------------------------------------
 # The engine
@@ -209,13 +220,18 @@ else
 	[[ -f $VERIFY_SPEC ]] ||
 		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"
 	# A reading and not an artifact, so it goes to a temporary file the trap
-	# below removes along with the tunnel.
-	VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
-		die "could not make a temporary file to read the run's pods into"
+	# below removes along with the tunnel. Made only for an engine whose check
+	# reads the fleet's shape: one that names no selector never has a file to
+	# be handed.
+	VERIFY_PODS=""
+	if [[ -n $ENGINE_PODS_SELECTOR ]]; then
+		VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
+			die "could not make a temporary file to read the run's pods into"
+	fi
 
 	# Trapped before the tunnel is opened, so no path out of the readings below
 	# — `die` included — leaves one behind.
-	trap 'k8s_port_forward_stop; rm -f "$VERIFY_PODS"' EXIT
+	trap 'k8s_port_forward_stop; [[ -z $VERIFY_PODS ]] || rm -f "$VERIFY_PODS"' EXIT
 	k8s_port_forward "svc/$RUN_OBJECT$ENGINE_REST_SERVICE_SUFFIX" "$VERIFY_PORT:$ENGINE_REST_PORT"
 
 	log "checking $ENGINE_KIND/$RUN_OBJECT against $VERIFY_SPEC"

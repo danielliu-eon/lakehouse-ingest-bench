@@ -1366,6 +1366,35 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
 
 
 @needs_shell_tools
+def test_a_failed_stage_takes_its_configmaps_with_it(tmp_path: Path) -> None:
+    """The two ConfigMaps a stage Job mounts belong to that Job alone.
+
+    They carry the operator's own site config, so an exit that never reached
+    the deletion of them — a Job that failed, a run directory that could not
+    be fetched — would leave it in the namespace for as long as the cluster
+    lives.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+
+    # A stage Job whose log carries no run id: the driver refuses once the
+    # ConfigMaps exist and before it reaches the lines that delete them.
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_STAGE_DIR": str(staged)},
+        job_log="the job printed nothing this driver reads\n",
+    )
+
+    assert run.result.returncode != 0
+    assert "printed no run_id line" in run.result.stderr, run.result.stderr
+    for deleted in ("delete configmap stage-smoke-flink-spec", "delete configmap stage-smoke-flink-site"):
+        assert deleted in run.calls, run.calls
+
+
+@needs_shell_tools
 @pytest.mark.parametrize("lead", [None, 42])
 def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, lead: int | None) -> None:
     """The epoch is in the future by the lead, and the run directory says which.
