@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -347,57 +348,132 @@ def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str 
         assert f"chose {chosen}" in out.stdout, out.stdout + out.stderr
 
 
+# What MSK reports for a cluster, as `--output text` tab-separates the three
+# fields `grow_broker_volume` reads in one call.
+_CLUSTER_VERSION = "K3AEGXETSR30VB"
+
+
+@dataclass(frozen=True)
+class Growth:
+    """One run of `grow_broker_volume`, and every `aws` call it made."""
+
+    result: subprocess.CompletedProcess[str]
+    calls: str
+
+
+def _volume_growth(*, described: str, refusal: str = "", asked: int = 1000) -> Growth:
+    """`setup.sh`'s own growth lines, against fixed answers from MSK.
+
+    The path sits behind a live account, so the function is lifted out and run
+    on its own. Worth running rather than reading: every branch in it exists to
+    keep a second `setup.sh` run from failing on the growth the first one asked
+    for, which is what the file's own header promises.
+
+    The stub records its calls to a file rather than to a stream: the update is
+    made inside a `"$(... 2>&1)"` capture, so anything it wrote to either
+    stream would end up in the variable the script reads its error out of.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        calls = Path(directory) / "aws-calls.log"
+        calls.touch()
+        stub = f"""
+            printf 'aws %s\n' "$*" >>'{calls}'
+            case "$*" in
+            *update-broker-storage*)
+                if [[ -n '{refusal}' ]]; then
+                    printf '%s\n' '{refusal}' >&2
+                    return 254
+                fi
+                ;;
+            *describe-cluster*) printf '%s\n' '{described}' ;;
+            esac
+        """
+        harness = f"""
+            set -euo pipefail
+            log() {{ printf 'log %s\n' "$*"; }}
+            die() {{ printf 'die %s\n' "$*"; exit 3; }}
+            aws() {{{stub}}}
+            MSK_NAME=a-cluster
+            MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
+            MSK_VOLUME_GIB={asked}
+{_shell_function(AWS_SETUP, "grow_broker_volume")}
+            grow_broker_volume
+        """
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+        return Growth(result=result, calls=calls.read_text())
+
+
 @needs_bash
 @pytest.mark.parametrize(
-    ("current", "asked", "grown"),
+    ("state", "current", "grown"),
     [
-        # Smaller: an hour's offer needs the room, and a volume that fills stops
-        # the offer rather than the engine.
-        (100, 1000, True),
+        # Smaller and ready: an hour's offer needs the room, and a volume that
+        # fills stops the offer rather than the engine.
+        ("ACTIVE", 100, True),
         # Equal, and larger: a broker volume cannot shrink, so the only two
         # answers are grow it and leave it alone.
-        (1000, 1000, False),
-        (2000, 1000, False),
+        ("ACTIVE", 1000, False),
+        ("ACTIVE", 2000, False),
+        # Smaller and not ready. A cluster applying an earlier update keeps
+        # reporting the old size, so the size alone would ask for the same
+        # growth a second time and MSK would refuse it — exiting the script on
+        # the re-run its own header calls idempotent.
+        ("UPDATING", 100, False),
+        ("MAINTENANCE", 100, False),
     ],
 )
-def test_an_existing_broker_volume_is_grown_and_never_shrunk(current: int, asked: int, grown: bool) -> None:
-    """Run `setup.sh`'s own growth lines against a fixed answer from MSK.
-
-    The path sits behind a live account, so the block is lifted out and run on
-    its own. Worth running rather than reading, because an unguarded comparison
-    would either re-issue the update on every setup — each of which takes the
-    cluster out of ACTIVE for minutes — or ask MSK to shrink a volume, which it
-    refuses with the whole script's exit status.
-    """
-    # The trace on stderr, because this stub's stdout is what the script reads
-    # the volume size out of.
-    stub = f"""
-        printf 'aws %s\n' "$*" >&2
-        case "$*" in
-        *VolumeSize*) printf '{current}\n' ;;
-        *CurrentVersion*) printf 'K3AEGXETSR30VB\n' ;;
-        esac
-    """
-    harness = f"""
-        set -euo pipefail
-        log() {{ printf 'log %s\n' "$*"; }}
-        die() {{ printf 'die %s\n' "$*"; exit 3; }}
-        aws() {{{stub}}}
-        MSK_NAME=a-cluster
-        MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
-        MSK_VOLUME_GIB={asked}
-{_shell_function(AWS_SETUP, "grow_broker_volume")}
-        grow_broker_volume
-    """
-    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
-    assert out.returncode == 0, out.stdout + out.stderr
-    issued = "update-broker-storage" in out.stderr
-    assert issued is grown, out.stderr
+def test_an_existing_broker_volume_is_grown_once_and_never_shrunk(state: str, current: int, grown: bool) -> None:
+    grown_run = _volume_growth(described=f"{state}\t{_CLUSTER_VERSION}\t{current}")
+    assert grown_run.result.returncode == 0, grown_run.result.stdout + grown_run.result.stderr
+    issued = "update-broker-storage" in grown_run.calls
+    assert issued is grown, grown_run.calls + grown_run.result.stdout
     if grown:
-        assert f"VolumeSizeGB={asked}" in out.stderr, out.stderr
+        assert "VolumeSizeGB=1000" in grown_run.calls, grown_run.calls
         # The version MSK reported, not a guess: an update carrying the wrong
         # one is refused, and the refusal is minutes into a setup.
-        assert "--current-version K3AEGXETSR30VB" in out.stderr, out.stderr
+        assert f"--current-version {_CLUSTER_VERSION}" in grown_run.calls, grown_run.calls
+    else:
+        assert "log msk broker volumes are" in grown_run.result.stdout, grown_run.result.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        # The two answers that mean "not now": a cluster that left ACTIVE
+        # between the read and the call, and the cooldown MSK holds between
+        # storage updates.
+        "An error occurred (BadRequestException): The cluster must be in ACTIVE state",
+        "An error occurred (BadRequestException): A previous storage update was performed in the last 6 hours",
+    ],
+)
+def test_a_growth_msk_will_not_take_yet_leaves_the_setup_converging(refusal: str) -> None:
+    """A re-run has to finish, because everything after this needs the cluster.
+
+    Neither refusal changes what the volume already is, and the growth an
+    earlier run asked for is either applying or already applied — so failing
+    here would abandon a setup over a call with nothing left to do.
+    """
+    refused = _volume_growth(described=f"ACTIVE\t{_CLUSTER_VERSION}\t100", refusal=refusal).result
+    assert refused.returncode == 0, refused.stdout + refused.stderr
+    assert "log a-cluster will not take the growth to 1000 GiB yet" in refused.stdout, refused.stdout
+
+
+@needs_bash
+def test_a_growth_msk_refuses_for_any_other_reason_stops_the_setup() -> None:
+    """A refusal nobody recognises is not one to shrug at.
+
+    A volume above MSK's ceiling, a malformed request, a denied action: each is
+    a setup that did not do what it said, and reporting it as converged would
+    leave the growth a later run depends on silently undone.
+    """
+    refused = _volume_growth(
+        described=f"ACTIVE\t{_CLUSTER_VERSION}\t100",
+        refusal="An error occurred (AccessDeniedException): not authorized to perform kafka:UpdateBrokerStorage",
+    ).result
+    assert refused.returncode == 3, refused.stdout + refused.stderr
+    assert "die could not grow a-cluster's broker volumes to 1000 GiB" in refused.stdout, refused.stdout
+    assert "AccessDeniedException" in refused.stdout, refused.stdout
 
 
 @needs_bash
@@ -408,44 +484,41 @@ def test_a_broker_volume_size_msk_would_not_report_is_refused() -> None:
     arithmetic comparison would read as zero and then try to grow a cluster
     whose shape nobody knows.
     """
-    harness = f"""
-        set -euo pipefail
-        log() {{ printf 'log %s\n' "$*"; }}
-        die() {{ printf 'die %s\n' "$*"; exit 3; }}
-        aws() {{ printf 'None\n'; }}
-        MSK_NAME=a-cluster
-        MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
-        MSK_VOLUME_GIB=1000
-{_shell_function(AWS_SETUP, "grow_broker_volume")}
-        grow_broker_volume
-    """
-    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
-    assert out.returncode == 3, out.stdout + out.stderr
-    assert "die a-cluster reports no broker volume size" in out.stdout, out.stdout
+    unread = _volume_growth(described=f"ACTIVE\t{_CLUSTER_VERSION}\tNone").result
+    assert unread.returncode == 3, unread.stdout + unread.stderr
+    assert "die a-cluster reports no broker volume size" in unread.stdout, unread.stdout
 
 
-def test_the_spark_operator_comes_from_the_kubeflow_chart_at_the_pinned_version() -> None:
-    """The chart repository, the pin, and the one values key that makes it watch us.
+def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pinned_version() -> None:
+    """The chart, the pin, and the three values the install cannot be right without.
 
-    `spark.jobNamespaces` is what tells the controller which namespaces to
-    reconcile SparkApplications in; without the harness namespace in it, a
-    staged run's object is created and never looked at, and staging waits out
-    its whole timeout on a state nobody was going to report.
+    `spark.jobNamespaces` tells the controller which namespaces to reconcile
+    SparkApplications in; without the harness namespace in it, a staged run's
+    object is created and never looked at, and staging waits out its whole
+    timeout on a state nobody was going to report. The webhook is what grafts
+    `spec.volumes` and the two `volumeMounts` onto the pods, so an install
+    without it starts a driver that dies opening the run's job document. And
+    the chart's own spark identity is off because a run's driver runs as the
+    account Pod Identity is bound to.
 
-    Its own spark ServiceAccount and RBAC are off, because a run's driver runs
-    as the account Pod Identity is bound to and the namespace manifest grants
-    that one the rules.
+    Counted rather than matched as substrings: this block was once pasted twice
+    into the script, which every `in` assertion passed while the second copy
+    printed its log lines into the middle of the values an operator copies —
+    and two copies of an install are two things to keep in step.
     """
     setup = AWS_SETUP.read_text()
-    assert "SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator" in setup
+    assert setup.count("get crd sparkapplications.sparkoperator.k8s.io") == 1
+    assert setup.count(f'helm --kube-context "$KUBE_CONTEXT" install "{"$SPARK_OPERATOR_RELEASE"}"') == 1
+    assert setup.count("SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator") == 1
     assert 'SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-' in setup, "the pin should be overridable"
-    assert '--version "$SPARK_OPERATOR_VERSION"' in setup
-    assert '--set "spark.jobNamespaces={$NAMESPACE}"' in setup
-    for off in ("spark.serviceAccount.create=false", "spark.rbac.create=false"):
-        assert f"--set {off}" in setup, off
-    # Installed only when the CRD is absent, like the Flink operator's, so a
-    # cluster that already carries one is left as it is.
-    assert "get crd sparkapplications.sparkoperator.k8s.io" in setup
+    for value in (
+        '--version "$SPARK_OPERATOR_VERSION"',
+        '--set "spark.jobNamespaces={$NAMESPACE}"',
+        "--set spark.serviceAccount.create=false",
+        "--set spark.rbac.create=false",
+        "--set webhook.enable=true",
+    ):
+        assert setup.count(value) == 1, value
 
 
 def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:

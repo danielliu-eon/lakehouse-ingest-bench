@@ -296,9 +296,14 @@ done
 # rather than the engine — which is the run's own rate, measured against a
 # broker that ran out of room.
 grow_broker_volume() {
-	local current version
-	current="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
-		--query 'ClusterInfo.BrokerNodeGroupInfo.StorageInfo.EbsStorageInfo.VolumeSize' --output text)"
+	local reported state version current update_error
+	# One read for all three: the size says whether to grow, the state says
+	# whether now is the time, and the version is what an update has to carry.
+	reported="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
+		--query 'ClusterInfo.[State,CurrentVersion,BrokerNodeGroupInfo.StorageInfo.EbsStorageInfo.VolumeSize]' \
+		--output text)" ||
+		die "could not read $MSK_NAME's broker storage; try: aws kafka describe-cluster --cluster-arn $MSK_ARN"
+	IFS=$'\t' read -r state version current <<<"$reported"
 	# `--output text` prints `None` for a field the API left out, which an
 	# arithmetic comparison would read as zero and then grow a cluster whose
 	# shape nobody knows.
@@ -309,16 +314,35 @@ grow_broker_volume() {
 		log "msk broker volumes are ${current} GiB, at or above the ${MSK_VOLUME_GIB} GiB asked for"
 		return 0
 	fi
-	# The version MSK reports rather than a guess: an update carrying the wrong
-	# one is refused, and the refusal is minutes into a setup.
-	version="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
-		--query ClusterInfo.CurrentVersion --output text)"
+	# A cluster still applying an earlier update keeps reporting the old size
+	# while it does, so the size alone would ask for the same growth a second
+	# time and MSK would refuse it. The state is what tells those two apart.
+	if [[ $state != ACTIVE ]]; then
+		log "msk broker volumes are ${current} GiB and $MSK_NAME is $state, so the growth to ${MSK_VOLUME_GIB} GiB is left to the update already running"
+		return 0
+	fi
 	log "growing the msk broker volumes from ${current} to ${MSK_VOLUME_GIB} GiB"
-	# The cluster leaves ACTIVE while it applies this, and everything below that
-	# needs the cluster waits on ACTIVE anyway — so this only has to be
-	# requested, and the wait at the end of the script covers it.
-	aws kafka update-broker-storage --cluster-arn "$MSK_ARN" --current-version "$version" \
-		--target-broker-ebs-volume-info "KafkaBrokerNodeId=All,VolumeSizeGB=$MSK_VOLUME_GIB" >/dev/null
+	# The version MSK reports rather than a guess: an update carrying the wrong
+	# one is refused. The cluster leaves ACTIVE while it applies this, and
+	# everything below that needs the cluster waits on ACTIVE anyway — so this
+	# only has to be requested, and the wait at the end of the script covers it.
+	if update_error="$(aws kafka update-broker-storage --cluster-arn "$MSK_ARN" --current-version "$version" \
+		--target-broker-ebs-volume-info "KafkaBrokerNodeId=All,VolumeSizeGB=$MSK_VOLUME_GIB" 2>&1)"; then
+		return 0
+	fi
+	case "$update_error" in
+	# MSK holds a cooldown between storage updates, and refuses one on a
+	# cluster that left ACTIVE between the read above and this call. Both mean
+	# "not now" rather than "not ever", and neither changes what the volume
+	# already is — so a re-run of this script converges instead of failing on
+	# the growth a previous run asked for, which is what the header promises.
+	*ACTIVE* | *UPDATING* | *ooldown* | *"6 hour"* | *"6-hour"*)
+		log "$MSK_NAME will not take the growth to ${MSK_VOLUME_GIB} GiB yet: $update_error"
+		;;
+	*)
+		die "could not grow $MSK_NAME's broker volumes to ${MSK_VOLUME_GIB} GiB: $update_error"
+		;;
+	esac
 }
 
 # `list-clusters --cluster-name-filter` matches on a prefix, so the exact name
@@ -457,6 +481,12 @@ else
 	# (namespace, service account) and that name is the one bound to the role
 	# above. The chart would bind its Role to an account of its own naming
 	# instead, so the namespace manifest grants ours the same rules.
+	#
+	# The webhook is stated rather than left to the chart's default, because it
+	# is what grafts `spec.volumes` and the two `volumeMounts` onto the pods —
+	# a SparkApplication carries them and the CRD alone does not apply them. An
+	# install without it starts a driver with no /opt/bench/run, which dies
+	# opening the run's job document.
 	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
 		"$SPARK_OPERATOR_RELEASE/spark-operator" \
 		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
@@ -464,6 +494,7 @@ else
 		--set "spark.jobNamespaces={$NAMESPACE}" \
 		--set spark.serviceAccount.create=false \
 		--set spark.rbac.create=false \
+		--set webhook.enable=true \
 		--wait
 fi
 # Recorded in the log because a run's engine behaviour belongs to the operator's
@@ -532,36 +563,6 @@ cat <<SITE
   kubernetes.registry:            $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
   kubernetes.aws_region:          $AWS_REGION
 SITE
-# After the namespace and not in the preflight beside the Flink operator's: the
-# chart grants its controller a Role in each namespace named by
-# `spark.jobNamespaces`, which is what makes the harness namespace eligible at
-# all, and a Role cannot be created in a namespace that does not exist yet.
-if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
-	log "the sparkapplications CRD is present"
-else
-	log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
-	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
-	# The chart's own spark identity and RBAC are off: a run's driver runs as
-	# $SPARK_SERVICE_ACCOUNT, because a Pod Identity association is made per
-	# (namespace, service account) and that name is the one bound to the role
-	# above. The chart would bind its Role to an account of its own naming
-	# instead, so the namespace manifest grants ours the same rules.
-	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
-		"$SPARK_OPERATOR_RELEASE/spark-operator" \
-		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
-		--version "$SPARK_OPERATOR_VERSION" \
-		--set "spark.jobNamespaces={$NAMESPACE}" \
-		--set spark.serviceAccount.create=false \
-		--set spark.rbac.create=false \
-		--wait
-fi
-# Recorded in the log because a run's engine behaviour belongs to the operator's
-# version, and a cluster that had the CRD already may be running any of them.
-if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
-	--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
-	die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
-fi
-log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"' <<<"$SPARK_OPERATOR_RELEASES")"
 
 if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	cat <<SITE
