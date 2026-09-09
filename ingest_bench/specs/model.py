@@ -34,6 +34,14 @@ VALUE_ENCODING_AVRO = "avro"
 VALUE_ENCODING_CONFLUENT = "confluent"
 VALUE_ENCODINGS = frozenset({VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT})
 
+# The codec every batch is compressed with on the wire, from librdkafka's own
+# `compression.type` vocabulary so the spec's word reaches the client unchanged.
+# It belongs to the workload rather than to the producer: it decides how many
+# bytes of the offer cross the link, and a consumer that cannot decode it reads
+# no records at all — so a run states its codec and two runs compare at one.
+COMPRESSION_DEFAULT = "zstd"
+COMPRESSIONS = frozenset({"gzip", "lz4", "none", "snappy", COMPRESSION_DEFAULT})
+
 # The offsets, in seconds from the run's start, at which the scorer measures
 # the table's file geometry. Every run reports the same ladder unless it says
 # otherwise, so two runs' geometry columns line up.
@@ -185,6 +193,7 @@ class ProducerSpec:
     seconds: int | None
     shards: int
     behind_max_ms: int
+    compression: str
 
 
 @dataclass(frozen=True)
@@ -273,7 +282,14 @@ def _kafka_spec(raw: dict[str, object]) -> KafkaSpec:
 
 def _producer_spec(raw: dict[str, object]) -> ProducerSpec:
     block = _block(raw, "producer", "spec")
-    _refuse_unknown(block, frozenset({"speed", "seconds", "shards", "behind_max_ms"}), "spec.producer")
+    _refuse_unknown(block, frozenset({"speed", "seconds", "shards", "behind_max_ms", "compression"}), "spec.producer")
+    compression = (
+        COMPRESSION_DEFAULT
+        if "compression" not in block
+        else _as_str(block["compression"], "spec.producer.compression")
+    )
+    if compression not in COMPRESSIONS:
+        raise ValueError(f"spec.producer.compression must be one of {sorted(COMPRESSIONS)}, got {compression!r}")
     return ProducerSpec(
         speed=1.0 if "speed" not in block else _as_float(block["speed"], "spec.producer.speed"),
         seconds=None if "seconds" not in block else _as_int(block["seconds"], "spec.producer.seconds"),
@@ -281,6 +297,7 @@ def _producer_spec(raw: dict[str, object]) -> ProducerSpec:
         behind_max_ms=5000
         if "behind_max_ms" not in block
         else _as_int(block["behind_max_ms"], "spec.producer.behind_max_ms"),
+        compression=compression,
     )
 
 

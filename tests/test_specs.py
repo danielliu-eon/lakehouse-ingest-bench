@@ -57,6 +57,27 @@ def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know
             model.load_run_spec(path)
 
 
+def test_the_producer_compression_defaults_to_zstd_and_refuses_a_codec_it_does_not_know(tmp_path: Path) -> None:
+    """The wire codec is the run's own, and only ever one a client can be handed."""
+    assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").producer.compression == "zstd"
+
+    base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    path = tmp_path / "s.yaml"
+    for codec in sorted(model.COMPRESSIONS):
+        base["producer"] = {"compression": codec}
+        path.write_text(yaml.safe_dump(base))
+        assert model.load_run_spec(path).producer.compression == codec
+
+    base["producer"] = {"compression": "brotli"}
+    path.write_text(yaml.safe_dump(base))
+    with pytest.raises(ValueError, match=r"\['gzip', 'lz4', 'none', 'snappy', 'zstd'\], got 'brotli'"):
+        model.load_run_spec(path)
+    base["producer"] = {"compression": 7}
+    path.write_text(yaml.safe_dump(base))
+    with pytest.raises(ValueError, match="must be a string"):
+        model.load_run_spec(path)
+
+
 def test_the_site_reads_a_schema_registry_and_keeps_its_reference(tmp_path: Path) -> None:
     """The registry is optional, and its credential stays the reference the file wrote.
 
@@ -413,6 +434,29 @@ def test_stage_registers_nothing_for_a_raw_avro_run(
     facts = json.loads((staged.run_dir / "facts.json").read_text())
     assert facts["value_encoding"] == "avro"
     assert facts["schema_registry_url"] is None and facts["schema_subject"] is None and facts["schema_id"] is None
+
+
+def test_the_facts_state_the_codec_a_consumer_has_to_decode(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """Every run says which codec its values are compressed with, default or not.
+
+    An engine the harness never runs is configured from the facts alone, and a
+    consumer that cannot decode the codec reads no records at all — so the
+    codec is a fact about the run rather than a detail of the producer.
+    """
+    corpus_root, _ = corpus
+    site = _site_file(tmp_path, corpus_root)
+
+    staged = stage.stage(
+        ROOT / "runs" / "smoke-external.yaml", site, tmp_path / "runs", FakeAdmin(), stamp="20260909T102000Z"
+    )
+    assert json.loads((staged.run_dir / "facts.json").read_text())["compression"] == "zstd"
+
+    raw = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    raw["producer"] = {"compression": "lz4"}
+    spec_path = tmp_path / "lz4.yaml"
+    spec_path.write_text(yaml.safe_dump(raw))
+    lz4 = stage.stage(spec_path, site, tmp_path / "runs", FakeAdmin(), stamp="20260909T102100Z")
+    assert json.loads((lz4.run_dir / "facts.json").read_text())["compression"] == "lz4"
 
 
 def test_stage_refuses_a_confluent_run_on_a_site_with_no_registry(tmp_path: Path, corpus: tuple[str, str]) -> None:

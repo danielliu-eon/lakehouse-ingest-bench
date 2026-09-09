@@ -113,6 +113,7 @@ fi
 SPEED="$(yq '.producer.speed' "$SPEC")"
 REPLAY_SECONDS="$(yq '.producer.seconds' "$SPEC")"
 BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC")"
+COMPRESSION="$(yq '.producer.compression' "$SPEC")"
 
 EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 
@@ -194,6 +195,7 @@ PRODUCE="$PRODUCE$(site_flags '.kafka.security' --kafka-prop)"
 [[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
 [[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
 [[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"
+[[ $COMPRESSION == null ]] || PRODUCE="$PRODUCE --compression $COMPRESSION"
 
 log "offering the corpus from $SHARDS shard(s) as job/$PRODUCER_JOB"
 k8s_delete job "$PRODUCER_JOB"

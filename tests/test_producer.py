@@ -112,6 +112,7 @@ def test_run_writes_publish_log_and_fails_on_delivery_error(tmp_path: Path, corp
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={},
     )
     fp = FakeProducer(clock)
@@ -159,6 +160,7 @@ def test_key_column_must_have_a_sidecar(tmp_path: Path, corpus_uri: str) -> None
         publish_log_path=tmp_path / "p.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={},
     )
     with pytest.raises(ValueError, match="kafka_key_columns"):
@@ -187,6 +189,7 @@ def test_the_confluent_header_precedes_every_value_and_is_counted(tmp_path: Path
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={},
     )
     prefixed = FakeProducer(clock)
@@ -281,6 +284,7 @@ def test_done_trailer_marks_the_shard_finished(tmp_path: Path, corpus_uri: str) 
         publish_log_path=finished,
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={},
     )
     assert produce.run(args, lambda cfg: FakeProducer(clock), clock, log) == 0
@@ -332,6 +336,7 @@ def test_upload_prefix_publishes_the_log(tmp_path: Path, corpus_uri: str) -> Non
         publish_log_path=tmp_path / "local" / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=str(uploads),
+        compression="zstd",
         kafka_props={},
     )
     assert produce.run(args, lambda cfg: FakeProducer(clock), clock, io.StringIO()) == 0
@@ -357,6 +362,7 @@ def test_kafka_props_apply_over_the_producer_defaults(tmp_path: Path, corpus_uri
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={"security.protocol": "SASL_SSL", "linger.ms": "20"},
     )
     configs: list[dict[str, object]] = []
@@ -369,6 +375,82 @@ def test_kafka_props_apply_over_the_producer_defaults(tmp_path: Path, corpus_uri
     # The site's properties win, and the defaults it says nothing about stand.
     assert configs[0]["security.protocol"] == "SASL_SSL" and configs[0]["linger.ms"] == "20"
     assert configs[0]["bootstrap.servers"] == "fake:9092" and configs[0]["enable.idempotence"] is True
+
+
+def test_the_offer_is_compressed_with_the_codec_the_run_asked_for(tmp_path: Path, corpus_uri: str) -> None:
+    """The run's codec is what librdkafka is configured with, whatever it is.
+
+    A consumer that cannot decode the codec reads nothing, so the offer is
+    framed with the one the run states rather than with a constant the spec
+    cannot reach.
+    """
+    assert produce.default_producer_config("fake:9092", "lz4")["compression.type"] == "lz4"
+    assert produce.default_producer_config("fake:9092", "none")["compression.type"] == "none"
+
+    clock = FakeClock(1_700_000_000_000)
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9092",
+        topic="t",
+        epoch_ms=clock.now_ms(),
+        speed=1000.0,
+        shard=0,
+        shards=1,
+        seconds=None,
+        key_column=None,
+        value_prefix=b"",
+        publish_log_path=tmp_path / "publish_log-0.jsonl",
+        behind_max_ms=5000,
+        upload_prefix=None,
+        compression="snappy",
+        kafka_props={},
+    )
+    configs: list[dict[str, object]] = []
+
+    def factory(config: dict[str, object]) -> produce.FrameProducer:
+        configs.append(config)
+        return FakeProducer(clock)
+
+    assert produce.run(args, factory, clock, io.StringIO()) == 0
+    assert configs[0]["compression.type"] == "snappy"
+
+
+def test_the_cli_takes_the_codec_and_refuses_one_no_client_has(
+    tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--compression` carries the spec's codec, and `zstd` is the unstated one."""
+    seen: list[produce.ProduceArgs] = []
+
+    def capture(
+        args: produce.ProduceArgs,
+        factory: Callable[[dict[str, object]], produce.FrameProducer],
+        clock: object,
+        log: object,
+    ) -> int:
+        seen.append(args)
+        return 0
+
+    monkeypatch.setattr(producer_cli, "run", capture)
+    base = [
+        "--corpus",
+        corpus_uri,
+        "--bootstrap",
+        "fake:9092",
+        "--topic",
+        "t",
+        "--epoch",
+        "1700000000",
+        "--publish-log",
+        str(tmp_path / "publish_log-0.jsonl"),
+    ]
+    assert producer_cli.main(base) == 0
+    assert seen[-1].compression == "zstd"
+
+    assert producer_cli.main([*base, "--compression", "gzip"]) == 0
+    assert seen[-1].compression == "gzip"
+
+    with pytest.raises(SystemExit):
+        producer_cli.main([*base, "--compression", "brotli"])
 
 
 def test_the_cli_resolves_a_kafka_prop_reference(
@@ -456,6 +538,7 @@ def test_the_region_pseudo_key_never_reaches_the_producer(
         publish_log_path=tmp_path / "publish_log-0.jsonl",
         behind_max_ms=5000,
         upload_prefix=None,
+        compression="zstd",
         kafka_props={"security.protocol": "SASL_SSL", "sasl.mechanism": "OAUTHBEARER", "aws.region": "eu-west-1"},
     )
     configs: list[dict[str, object]] = []

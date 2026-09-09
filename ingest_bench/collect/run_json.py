@@ -382,6 +382,10 @@ def build_run_json(
             "corpus_hash": None if summary is None else summary["corpus_hash"],
             "table": facts["table"],
             "topic": facts["topic"],
+            # Resolved from the spec rather than left to the copied document,
+            # where a run that named no codec names none: comparing two results
+            # means knowing which codec each offer crossed the link with.
+            "compression": spec.producer.compression,
         },
         "artifacts": artifacts,
         "data": {"summary": summary, "freshness": freshness, "exactness": exactness},

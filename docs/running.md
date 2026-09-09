@@ -236,6 +236,13 @@ broker dying mid-run does not end it; a smaller cluster gets one replica per
 broker, because a factor above the broker count is refused outright. The local
 stack, one broker, therefore gets 1.
 
+Every batch is compressed on the wire with `producer.compression`, one of
+`zstd` (the default), `lz4`, `snappy`, `gzip` or `none`; any other value is
+refused when the spec loads. It is a property of the offer, not of the
+producer: it decides how many bytes cross the link, and a consumer that cannot
+decode the codec reads no records at all. The run's `facts.json` carries it,
+and so does `run.json`, so two results are only comparable at the same codec.
+
 ## Credentials
 
 The harness implements no authentication, bar the one exception named below.

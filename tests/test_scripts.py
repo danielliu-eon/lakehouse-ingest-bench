@@ -946,9 +946,14 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
     a broker and a corpus, which is the compose smoke and not a unit test.
     """
     text = SMOKE.read_text()
-    for key in ("speed", "seconds", "behind_max_ms"):
+    for key in ("speed", "seconds", "behind_max_ms", "compression"):
         assert f"yq '.producer.{key}'" in text, f"smoke.sh never reads producer.{key}"
-    for flag in ("--speed $SPEED", "--seconds $REPLAY_SECONDS", "--behind-max-ms $BEHIND_MAX_MS"):
+    for flag in (
+        "--speed $SPEED",
+        "--seconds $REPLAY_SECONDS",
+        "--behind-max-ms $BEHIND_MAX_MS",
+        "--compression $COMPRESSION",
+    ):
         assert flag in text, f"smoke.sh reads a producer key but never passes {flag.split()[0]}"
     assert "--speed 1" not in text, "smoke.sh still hardcodes a replay speed"
 
@@ -966,6 +971,21 @@ def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None
     for fact in ("value_encoding", "schema_id"):
         assert f"jq -r '.{fact} // empty'" in text, f"{script.name} never reads {fact} out of facts.json"
     assert "--value-encoding $VALUE_ENCODING" in text and "--schema-id $SCHEMA_ID" in text
+
+
+@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
+def test_both_drivers_offer_the_codec_the_spec_asks_for(script: Path) -> None:
+    """The codec comes off the spec, and is left off where the spec says nothing.
+
+    A driver that restated the producer's default would be a second copy of it
+    to keep in step; a driver that hardcoded one would offer records the spec
+    does not describe.
+    """
+    text = script.read_text()
+    assert "yq '.producer.compression'" in text, f"{script.name} never reads producer.compression"
+    assert "--compression $COMPRESSION" in text, f"{script.name} reads the codec but never passes --compression"
+    for codec in ("zstd", "lz4", "snappy", "gzip"):
+        assert f"--compression {codec}" not in text, f"{script.name} hardcodes a codec"
 
 
 def test_the_smoke_stages_the_spec_it_was_given() -> None:
@@ -1406,6 +1426,24 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--kafka-prop aws.region=eu-west-1" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
+
+
+@needs_shell_tools
+def test_launch_offers_the_codec_the_spec_names(tmp_path: Path) -> None:
+    """The producer Job carries `--compression`, so the wire is the spec's."""
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    spec = yaml.safe_load((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    spec["producer"] = {**spec["producer"], "compression": "lz4"}
+    (run_dir / "spec.yaml").write_text(yaml.safe_dump(spec))
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {})
+
+    assert run.result.returncode == 0, run.result.stderr
+    producer = _job_command(run.applied[1])
+    assert "--compression lz4" in producer
 
 
 @needs_shell_tools

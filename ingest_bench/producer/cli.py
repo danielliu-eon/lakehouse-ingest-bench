@@ -20,7 +20,13 @@ from ingest_bench.clock import SystemClock
 from ingest_bench.producer.produce import FrameProducer, ProduceArgs, run
 from ingest_bench.schema_registry import confluent_header
 from ingest_bench.specs.env import resolve_env_placeholders
-from ingest_bench.specs.model import VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT, VALUE_ENCODINGS
+from ingest_bench.specs.model import (
+    COMPRESSION_DEFAULT,
+    COMPRESSIONS,
+    VALUE_ENCODING_AVRO,
+    VALUE_ENCODING_CONFLUENT,
+    VALUE_ENCODINGS,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--publish-log", required=True, metavar="PATH", help="where to write this shard's publish log")
     parser.add_argument(
         "--behind-max-ms", type=int, default=5000, help="report once the producer falls this far behind"
+    )
+    parser.add_argument(
+        "--compression",
+        choices=sorted(COMPRESSIONS),
+        default=COMPRESSION_DEFAULT,
+        help="the codec every batch is compressed with, as librdkafka's compression.type. The run's facts.json "
+        "says which the run offers, and a consumer that cannot decode it reads no records",
     )
     parser.add_argument(
         "--upload-prefix", metavar="URI", help="copy the publish log under this prefix as it is written"
@@ -110,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         publish_log_path=Path(str(parsed.publish_log)),
         behind_max_ms=int(parsed.behind_max_ms),
         upload_prefix=None if parsed.upload_prefix is None else str(parsed.upload_prefix),
+        compression=str(parsed.compression),
         kafka_props=resolve_env_placeholders(
             parse_key_values([str(prop) for prop in parsed.kafka_prop], "--kafka-prop")
         ),

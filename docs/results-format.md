@@ -63,6 +63,7 @@ result was measured against, and the prices.
 | `catalog_props` | `facts.catalog_props`, redacted |
 | `epoch_ms` | the run's time origin; `null` for a run that was staged but never launched |
 | `corpus_hash` | from `summary.json` |
+| `compression` | `spec.producer.compression` — the codec the offer crossed the link with, resolved rather than left to the copied spec's defaults |
 
 The fleet is what the run *asked for* — container requests, not the nodes they
 landed on — so it is the same number however the cluster packed it.

@@ -204,6 +204,10 @@ def _facts(
     are null where it is the raw one, rather than being left out: a reader that
     had to tell an absent key from a null one would read a harness too old to
     know the difference as a run that offered raw Avro.
+
+    ``compression`` is stated for the same reason. It is the codec a consumer
+    has to decode before it sees a value at all, so it is a fact about the run
+    and not a detail of the producer that offered it.
     """
     return {
         "run_id": derived.run_id,
@@ -215,6 +219,7 @@ def _facts(
         "schema_registry_url": None if registration is None else registration.url,
         "schema_subject": None if registration is None else registration.subject,
         "schema_id": None if registration is None else registration.schema_id,
+        "compression": spec.producer.compression,
         "catalog_props": redact(site.catalog_props),
         "table": derived.table,
         "partition": spec.table.partition,

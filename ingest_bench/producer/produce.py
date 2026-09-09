@@ -89,6 +89,9 @@ class ProduceArgs:
     publish_log_path: Path
     behind_max_ms: int
     upload_prefix: str | None
+    # The codec the batches are compressed with, which the run's spec chose and
+    # its `facts.json` published: a consumer is configured against it.
+    compression: str
     # librdkafka client properties from the site, with any environment
     # indirection already resolved. Applied over the defaults below and then
     # built through `kafka_auth`, so a site that needs authentication — MSK's
@@ -96,13 +99,16 @@ class ProduceArgs:
     kafka_props: dict[str, str]
 
 
-def default_producer_config(bootstrap: str) -> dict[str, object]:
+def default_producer_config(bootstrap: str, compression: str) -> dict[str, object]:
     """Durable, ordered, idempotent delivery, batched hard enough to saturate a link.
 
     `acks=all` with idempotence is what makes an acknowledgement mean the row is
     in the topic once, which is the claim every offered figure rests on. The
     queue is sized to hold about a second of the largest offered rate so a brief
     broker stall shows up as producer lag rather than as a full queue.
+
+    The codec is the caller's because it is the run's: `compression` is one of
+    librdkafka's `compression.type` values and is passed through as it stands.
     """
     return {
         "bootstrap.servers": bootstrap,
@@ -110,7 +116,7 @@ def default_producer_config(bootstrap: str) -> dict[str, object]:
         "enable.idempotence": True,
         "linger.ms": 5,
         "batch.size": 1048576,
-        "compression.type": "zstd",
+        "compression.type": compression,
         "queue.buffering.max.messages": 1000000,
         "queue.buffering.max.kbytes": 1048576,
         "message.timeout.ms": 120000,
@@ -203,7 +209,7 @@ def run(
         )
     selected = pacing.select_batches(metadata.read_manifest(args.corpus_uri), args.shard, args.shards, args.seconds)
     producer = producer_factory(
-        kafka_auth.librdkafka_config({**default_producer_config(args.bootstrap), **args.kafka_props})
+        kafka_auth.librdkafka_config({**default_producer_config(args.bootstrap, args.compression), **args.kafka_props})
     )
     records: list[publish_log.PublishRecord] = []
     offered = 0

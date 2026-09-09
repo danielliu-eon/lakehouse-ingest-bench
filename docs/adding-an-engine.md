@@ -62,12 +62,17 @@ Staging writes `runs/<run_id>/facts.json`. It is the whole interface:
 | `schema_registry_url` | the registry the schema was registered with, or `null` |
 | `schema_subject` | the subject it was registered under, or `null` |
 | `schema_id` | the id every record's header names, or `null` |
+| `compression` | the codec every batch is compressed with on the wire: `zstd`, `lz4`, `snappy`, `gzip` or `none` |
 | `catalog_props` | Iceberg catalog properties, credentials redacted |
 | `table` | the `namespace.table` to append to |
 | `partition` | how the table is partitioned |
 | `ddl` | the exact statement your table must match, or `null` when the harness already created it |
 | `key_column` | the corpus column sent as the message key, or `null` for unkeyed records |
 | `epoch` | `null` until the run is launched; the time origin is chosen when the producer starts |
+
+Configure your consumer's decompression from `compression` before anything
+else: a client that cannot decode the codec reads no records at all, which
+looks like an engine that never started rather than like a wire it cannot read.
 
 The credentials are redacted because `facts.json` is meant to be publishable.
 Your own catalog credentials come from wherever you keep them — `site.yaml`

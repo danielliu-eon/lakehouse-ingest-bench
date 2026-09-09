@@ -473,6 +473,27 @@ def test_run_json_redacts_the_catalog_properties(tmp_path: Path) -> None:
     assert run["spec"] == yaml.safe_load(FLINK_SPEC)
 
 
+def test_run_json_states_the_wire_codec_the_offer_used(tmp_path: Path) -> None:
+    """The codec is resolved in the result, not left in the copied spec's defaults.
+
+    The spec is embedded verbatim, so a run that said nothing about the codec
+    says nothing about it there — and a reader comparing two results has to
+    know which codec each offer crossed the link with.
+    """
+    site_path = _site(tmp_path)
+    default = _build(_run_dir(tmp_path / "default"), site_path)
+    run = default["run"]
+    assert isinstance(run, dict)
+    assert run["compression"] == "zstd"
+
+    raw = yaml.safe_load(FLINK_SPEC)
+    raw["producer"] = {**raw["producer"], "compression": "lz4"}
+    lz4 = _build(_run_dir(tmp_path / "lz4", spec=yaml.safe_dump(raw)), site_path)
+    lz4_run = lz4["run"]
+    assert isinstance(lz4_run, dict)
+    assert lz4_run["compression"] == "lz4"
+
+
 def test_run_json_derives_the_figures_a_result_is_read_by(tmp_path: Path) -> None:
     document = _build(_run_dir(tmp_path), _site(tmp_path))
     derived = document["derived"]

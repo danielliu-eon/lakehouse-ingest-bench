@@ -248,6 +248,7 @@ SHARDS="$(yq '.producer.shards' "$SPEC_FILE")"
 SPEED="$(yq '.producer.speed' "$SPEC_FILE")"
 REPLAY_SECONDS="$(yq '.producer.seconds' "$SPEC_FILE")"
 BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC_FILE")"
+COMPRESSION="$(yq '.producer.compression' "$SPEC_FILE")"
 
 EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 SCORE="score --corpus $CORPUS_URI --table $TABLE --catalog-prop-file /catalog.props"
@@ -274,6 +275,7 @@ PRODUCE="$PRODUCE --publish-log /runs/$RUN_ID/publish_log-0.jsonl --upload-prefi
 [[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
 [[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
 [[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"
+[[ $COMPRESSION == null ]] || PRODUCE="$PRODUCE --compression $COMPRESSION"
 log "offering the corpus"
 harness "$PRODUCE"
 
