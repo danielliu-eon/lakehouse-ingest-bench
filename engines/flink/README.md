@@ -17,8 +17,11 @@ or serializer is written here — so a Flink result is Flink's.
 
 The image is amd64 because **PyFlink publishes no Linux aarch64 wheel in any
 release**; on arm64 the stack runs emulated, which checks a run end to end but
-does not measure one. `job.sql` holds the catalog's credentials verbatim: it
-is a config file, not the publishable record — `facts.json` is that.
+does not measure one. `job.sql` carries whatever `site.catalog.props` and
+`site.kafka.security` hold, so a credential written there literally is in the
+file: it is a config file, not the publishable record — `facts.json` is that.
+Write the credential as `${env:NAME}` and the file names it instead, leaving the
+submitter to read it out of the container's environment.
 
 On **Apple Silicon** that emulation is why the smoke takes appreciably longer
 than its native equivalent, and why `runs/smoke-flink.yaml` asks for two

@@ -145,6 +145,10 @@ def resolve_corpus_dir(corpus_root: str, name: str) -> str:
     return matches[0]
 
 
+def _names_a_secret(key: str) -> bool:
+    return any(hint in key.lower() for hint in _SECRET_HINTS)
+
+
 def redact(props: dict[str, str]) -> dict[str, str]:
     """``props`` with every credential-shaped literal value replaced.
 
@@ -156,10 +160,6 @@ def redact(props: dict[str, str]) -> dict[str, str]:
     return {
         key: REDACTED if _names_a_secret(key) and not has_placeholder(value) else value for key, value in props.items()
     }
-
-
-def _names_a_secret(key: str) -> bool:
-    return any(hint in key.lower() for hint in _SECRET_HINTS)
 
 
 def replication_factor(brokers: int) -> int:
