@@ -291,6 +291,13 @@ def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
         # not what an unset knob should pick even though it sorts higher.
         ("3.6.0\t3.10.0\t3.6.0.tiered\t2.8.1", "3.10.0"),
         ("3.6.0", "3.6.0"),
+        # MSK also publishes a minor line's latest patch as a trailing `x`;
+        # it must win over a numeric minor that is actually older.
+        ("3.6.0\t3.7.x", "3.7.x"),
+        # An `x` patch sorts after every numeric patch of the same minor.
+        ("3.7.x\t3.7.5", "3.7.x"),
+        # A numeric minor still beats an `x` patch of an older minor.
+        ("3.9.x\t3.10.0", "3.10.0"),
         # No plain 3.x at all: the script must reach its own refusal.
         ("2.8.1\t4.0.0", None),
         ("", None),

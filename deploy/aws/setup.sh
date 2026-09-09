@@ -270,12 +270,23 @@ if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
 			--query "KafkaVersions[?Status=='ACTIVE'].Version" --output text 2>&1)"; then
 			die "aws kafka list-kafka-versions failed: $KAFKA_VERSIONS — set MSK_KAFKA_VERSION to choose one yourself"
 		fi
-		# The newest plain 3.x: a `.tiered` variant sorts higher and is a
-		# different storage mode, which is not what an unset knob should pick.
+		# The newest plain 3.x, where MSK spells a line's latest patch either as
+		# a number or as a trailing `x` (3.7.x); a `.tiered` variant is a
+		# different storage mode and is not what an unset knob should pick. `x`
+		# must sort after every numeric patch of the same minor, which a plain
+		# numeric field sort cannot express, so the patch is mapped to a
+		# sentinel column for ordering and the real version recovered from the
+		# tab afterward.
 		# `|| true` because no match is a refusal with a fix on the next line, and
 		# under `pipefail` grep's exit 1 would otherwise abort before it is read.
 		MSK_KAFKA_VERSION="$(tr '\t' '\n' <<<"$KAFKA_VERSIONS" |
-			grep -E '^3(\.[0-9]+)+$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 || true)"
+			grep -E '^3\.[0-9]+\.([0-9]+|x)$' |
+			while IFS=. read -r major minor patch; do
+				sort_patch=$patch
+				[[ $patch == x ]] && sort_patch=999999
+				printf '%s %s %s\t%s.%s.%s\n' "$major" "$minor" "$sort_patch" "$major" "$minor" "$patch"
+			done |
+			sort -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2 || true)"
 		[[ -n $MSK_KAFKA_VERSION ]] ||
 			die "no ACTIVE 3.x Kafka version among ${KAFKA_VERSIONS//$'\t'/ }; set MSK_KAFKA_VERSION yourself"
 		log "kafka version $MSK_KAFKA_VERSION (newest ACTIVE 3.x)"
