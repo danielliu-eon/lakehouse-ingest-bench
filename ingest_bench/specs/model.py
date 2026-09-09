@@ -26,6 +26,13 @@ EXTERNAL = "external"
 HARNESS = "harness"
 ENGINE_OWNED = "engine"
 
+# The wire format a record's value carries. `avro` is the default because it is
+# what the corpus publishes and what nothing has to be told; `confluent` is the
+# same Avro binary behind the five-byte header of the Confluent wire format.
+VALUE_ENCODING_AVRO = "avro"
+VALUE_ENCODING_CONFLUENT = "confluent"
+VALUE_ENCODINGS = frozenset({VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT})
+
 # The offsets, in seconds from the run's start, at which the scorer measures
 # the table's file geometry. Every run reports the same ladder unless it says
 # otherwise, so two runs' geometry columns line up.
@@ -147,15 +154,21 @@ class TableSpec:
 
 @dataclass(frozen=True)
 class KafkaSpec:
-    """The topic's shape, and which column becomes the message key.
+    """The topic's shape, which column becomes the message key, and the wire format.
 
     The key decides how records distribute across partitions, so it is part of
     the workload rather than of the engine: two engines are comparable only
     when they consumed the same skew.
+
+    ``value_encoding`` is part of the workload for the same reason. It says
+    what a value's bytes are: ``avro`` is the corpus's Avro binary as it
+    stands, and ``confluent`` is the same bytes behind a five-byte header
+    naming a registered schema — which is the only shape some engines read.
     """
 
     partitions: int
     key: str
+    value_encoding: str
 
 
 @dataclass(frozen=True)
@@ -235,10 +248,18 @@ def _table_spec(raw: dict[str, object], partition_default: str) -> TableSpec:
 
 def _kafka_spec(raw: dict[str, object]) -> KafkaSpec:
     block = _as_mapping(_required(raw, "kafka", "spec"), "spec.kafka")
-    _refuse_unknown(block, frozenset({"partitions", "key"}), "spec.kafka")
+    _refuse_unknown(block, frozenset({"partitions", "key", "value_encoding"}), "spec.kafka")
+    encoding = (
+        VALUE_ENCODING_AVRO
+        if "value_encoding" not in block
+        else _as_str(block["value_encoding"], "spec.kafka.value_encoding")
+    )
+    if encoding not in VALUE_ENCODINGS:
+        raise ValueError(f"spec.kafka.value_encoding must be one of {sorted(VALUE_ENCODINGS)}, got {encoding!r}")
     return KafkaSpec(
         partitions=_as_int(_required(block, "partitions", "spec.kafka"), "spec.kafka.partitions"),
         key=_as_str(_required(block, "key", "spec.kafka"), "spec.kafka.key"),
+        value_encoding=encoding,
     )
 
 
@@ -401,6 +422,21 @@ class KubernetesConfig:
 
 
 @dataclass(frozen=True)
+class SchemaRegistryConfig:
+    """The Confluent-API schema registry a `confluent` run registers with.
+
+    Bring your own: the harness makes one POST against whatever this names, so
+    a hosted registry, a self-managed one and the local stack's are the same
+    thing to it. ``basic_auth_user_info`` is the ``user:password`` a hosted one
+    authenticates with, and it stays as the site wrote it — a ``${env:NAME}``
+    reference is resolved at the call that needs it, never at load.
+    """
+
+    url: str
+    basic_auth_user_info: str | None
+
+
+@dataclass(frozen=True)
 class SiteConfig:
     """Where a run's storage, broker and catalog are, and what compute costs.
 
@@ -414,6 +450,7 @@ class SiteConfig:
     warehouse: str
     kafka_bootstrap: str
     kafka_security: dict[str, str]
+    schema_registry: SchemaRegistryConfig | None
     catalog_props: dict[str, str]
     kubernetes: KubernetesConfig | None
     pricing_vcpu_hour_usd: float
@@ -482,6 +519,28 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
     )
 
 
+def _schema_registry_config(kafka: dict[str, object]) -> SchemaRegistryConfig | None:
+    """The registry block, or ``None`` where the site declares none.
+
+    Absent is the answer for a site whose runs are all raw Avro. A `confluent`
+    run against such a site is refused at staging by name, which is a better
+    error than a registration against an empty URL.
+    """
+    where = "site.kafka.schema_registry"
+    block = _block(kafka, "schema_registry", "site.kafka")
+    if not block:
+        return None
+    _refuse_unknown(block, frozenset({"url", "basic_auth_user_info"}), where)
+    user_info: str | None = None
+    if "basic_auth_user_info" in block:
+        user_info = _as_str(block["basic_auth_user_info"], f"{where}.basic_auth_user_info")
+        if not user_info:
+            raise ValueError(f"{where}.basic_auth_user_info is empty; leave the key out where the registry is open")
+    return SchemaRegistryConfig(
+        url=_as_str(_required(block, "url", where), f"{where}.url"), basic_auth_user_info=user_info
+    )
+
+
 def load_site(path: Path) -> SiteConfig:
     """The site config at ``path``, or a refusal to read it."""
     raw = _load_yaml(path, "site config")
@@ -489,7 +548,7 @@ def load_site(path: Path) -> SiteConfig:
     _refuse_unknown(raw, _SITE_KEYS, "site")
 
     kafka = _as_mapping(_required(raw, "kafka", "site"), "site.kafka")
-    _refuse_unknown(kafka, frozenset({"bootstrap_servers", "security"}), "site.kafka")
+    _refuse_unknown(kafka, frozenset({"bootstrap_servers", "security", "schema_registry"}), "site.kafka")
     catalog = _as_mapping(_required(raw, "catalog", "site"), "site.catalog")
     _refuse_unknown(catalog, frozenset({"props"}), "site.catalog")
     pricing = _as_mapping(_required(raw, "pricing", "site"), "site.pricing")
@@ -501,6 +560,7 @@ def load_site(path: Path) -> SiteConfig:
         warehouse=_as_str(_required(raw, "warehouse", "site"), "site.warehouse"),
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
         kafka_security={} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security"),
+        schema_registry=_schema_registry_config(kafka),
         catalog_props=_as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props"),
         kubernetes=_kubernetes_config(raw),
         pricing_vcpu_hour_usd=_as_float(

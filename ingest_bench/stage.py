@@ -25,6 +25,7 @@ from ingest_bench import kafka_admin, uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.collect.redact import redact_props
 from ingest_bench.corpus import metadata
+from ingest_bench.schema_registry import register_schema, subject_for
 from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
 from ingest_bench.specs.derive import Derived
@@ -45,6 +46,10 @@ MAX_REPLICATION_FACTOR = 3
 KEY_NONE = "none"
 
 STAGED = "staged"
+
+# The site key a `confluent` run needs, named in the refusal so an operator
+# reads which block to add rather than which call failed.
+_REGISTRY_AUTH_KEY = "site.kafka.schema_registry.basic_auth_user_info"
 
 # The timeline is the run's audit trail, appended to at every phase transition,
 # so its timestamps are seconds-resolution UTC and sort lexicographically.
@@ -103,6 +108,20 @@ class ClusterAdmin:
 
     def delete(self, bootstrap: str, name: str, client: dict[str, str]) -> None:
         kafka_admin.delete_topic(bootstrap, name, client)
+
+
+@dataclass(frozen=True)
+class SchemaRegistration:
+    """The schema a `confluent` run's records point at, once it has an id.
+
+    The id is what the producer's header carries and what every reader resolves
+    the writer schema by, so it is a fact about the run rather than about the
+    registry: one id for the whole run, chosen before the first record.
+    """
+
+    url: str
+    subject: str
+    schema_id: int
 
 
 @dataclass(frozen=True)
@@ -166,13 +185,23 @@ def harness_table_properties(spec: model.RunSpec) -> dict[str, str]:
     return {**spec.table.properties, "format-version": "2"}
 
 
-def _facts(spec: model.RunSpec, site: model.SiteConfig, derived: Derived, ddl: str | None) -> dict[str, object]:
+def _facts(
+    spec: model.RunSpec,
+    site: model.SiteConfig,
+    derived: Derived,
+    ddl: str | None,
+    registration: SchemaRegistration | None,
+) -> dict[str, object]:
     """Everything an engine needs to join the run, in the order it is printed.
 
     ``run_id`` comes first because the scripts read it off the first line.
     ``epoch`` is null until the run is launched: the time origin is chosen when
     the producer starts, not when the topic is created, so a staged run that
     waits an hour for an operator is not scored from the moment it was staged.
+
+    The three registry facts are null for a raw-Avro run, and stated anyway:
+    a reader that has to check whether a key exists before it can tell which
+    encoding a run offered would read a missing key as a missing answer.
     """
     return {
         "run_id": derived.run_id,
@@ -180,6 +209,10 @@ def _facts(spec: model.RunSpec, site: model.SiteConfig, derived: Derived, ddl: s
         "topic": derived.topic,
         "corpus_uri": derived.corpus_uri,
         "schema_avsc_uri": uri.join(derived.corpus_uri, "schema.avsc"),
+        "value_encoding": spec.kafka.value_encoding,
+        "schema_registry_url": None if registration is None else registration.url,
+        "schema_subject": None if registration is None else registration.subject,
+        "schema_id": None if registration is None else registration.schema_id,
         "catalog_props": redact(site.catalog_props),
         "table": derived.table,
         "partition": spec.table.partition,
@@ -187,6 +220,29 @@ def _facts(spec: model.RunSpec, site: model.SiteConfig, derived: Derived, ddl: s
         "key_column": None if spec.kafka.key == KEY_NONE else spec.kafka.key,
         "epoch": None,
     }
+
+
+def _registry_for(spec: model.RunSpec, site: model.SiteConfig) -> model.SchemaRegistryConfig | None:
+    """The registry this run registers with, or ``None`` for a raw-Avro run.
+
+    A `confluent` run against a site that declares no registry is refused here,
+    with the other refusals that cost nothing: the alternative is a topic and a
+    table that exist for a run no engine can be pointed at.
+    """
+    if spec.kafka.value_encoding != model.VALUE_ENCODING_CONFLUENT:
+        return None
+    if site.schema_registry is None:
+        raise ValueError(
+            f"spec.kafka.value_encoding is {model.VALUE_ENCODING_CONFLUENT!r}, which registers the corpus's "
+            "schema, and the site declares no kafka.schema_registry.url to register it with"
+        )
+    return site.schema_registry
+
+
+def _registry_auth(registry: model.SchemaRegistryConfig) -> str | None:
+    if registry.basic_auth_user_info is None:
+        return None
+    return resolve_env_placeholders({_REGISTRY_AUTH_KEY: registry.basic_auth_user_info})[_REGISTRY_AUTH_KEY]
 
 
 def timeline_line(event: str) -> str:
@@ -247,6 +303,7 @@ def stage(
             f"it publishes {list(meta.key_columns)} and accepts {KEY_NONE!r}"
         )
     partition = parse_partition(spec.table.partition)
+    registry = _registry_for(spec, site)
     knobs = None
     if not spec.is_external():
         knobs = knobs_for(spec.engine)
@@ -266,6 +323,7 @@ def stage(
     # touched, so an unset variable is a refusal rather than a half-staged run.
     kafka_client = resolve_env_placeholders(site.kafka_security)
     catalog_props = resolve_env_placeholders(site.catalog_props)
+    registry_auth = None if registry is None else _registry_auth(registry)
     if admin.exists(site.kafka_bootstrap, derived.topic, kafka_client):
         raise ValueError(f"topic {derived.topic!r} already exists on {site.kafka_bootstrap}; it holds another run")
     admin.create(
@@ -295,7 +353,18 @@ def stage(
             )
         else:
             ddl = spark_sql_ddl(meta, derived.table, partition, spec.table.properties)
-        facts = _facts(spec, site, derived, ddl)
+        registration = None
+        if registry is not None:
+            # The corpus's own file rather than the schema `corpus.json`
+            # embeds: it is the document `schema_avsc_uri` points every reader
+            # at, so what is registered is byte for byte what a reader that
+            # skipped the registry would use instead.
+            subject = subject_for(derived.topic)
+            schema_id = register_schema(
+                registry.url, registry_auth, subject, uri.read_text(uri.join(derived.corpus_uri, "schema.avsc"))
+            )
+            registration = SchemaRegistration(url=registry.url, subject=subject, schema_id=schema_id)
+        facts = _facts(spec, site, derived, ddl, registration)
         run_dir = runs_dir / derived.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         # The spec is copied verbatim rather than re-serialised: it is the

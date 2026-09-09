@@ -34,7 +34,7 @@ def _site() -> model.SiteConfig:
         "s3.path-style-access": "true",
         "s3.region": "us-east-1",
     }
-    return model.SiteConfig("s3://corpus", "s3://runs", "s3://warehouse", "kafka:9092", {}, props, None, 0.0, 0.0)
+    return model.SiteConfig("s3://corpus", "s3://runs", "s3://warehouse", "kafka:9092", {}, None, props, None, 0.0, 0.0)
 
 
 def test_validate(meta: metadata.CorpusMetadata) -> None:
@@ -244,6 +244,7 @@ def _aws_site() -> model.SiteConfig:
         "s3://bench-bucket/warehouse",
         "b-1.example:9098",
         dict(_MSK_SECURITY),
+        None,
         props,
         _cluster(),
         0.0,

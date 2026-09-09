@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -39,6 +39,63 @@ def test_spec_refusals(tmp_path: Path) -> None:
         p.write_text(yaml.safe_dump(d))
         with pytest.raises(ValueError, match=message):
             model.load_run_spec(p)
+
+
+def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know(tmp_path: Path) -> None:
+    """The wire format is the corpus's own unless a run asks for the other one."""
+    assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").kafka.value_encoding == "avro"
+    confluent = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    assert confluent.kafka.value_encoding == "confluent"
+
+    base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    path = tmp_path / "s.yaml"
+    for encoding, message in (("protobuf", "value_encoding"), (7, "must be a string")):
+        base["kafka"] = {**base["kafka"], "value_encoding": encoding}
+        path.write_text(yaml.safe_dump(base))
+        with pytest.raises(ValueError, match=message):
+            model.load_run_spec(path)
+
+
+def test_the_site_reads_a_schema_registry_and_keeps_its_reference(tmp_path: Path) -> None:
+    """The registry is optional, and its credential stays the reference the file wrote.
+
+    Resolving at load would put the value in the loaded config, which is what
+    every rendered file and every published artifact is written from.
+    """
+    path = tmp_path / "site.yaml"
+
+    def write(kafka: str) -> None:
+        path.write_text(
+            "corpus_root: /tmp/c\nruns_root: /tmp/r\nwarehouse: /tmp/w\n"
+            f"kafka: {kafka}\n"
+            "catalog: {props: {type: sql}}\nkubernetes: {}\n"
+            "pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}\n"
+        )
+
+    write("{bootstrap_servers: 'localhost:9092'}")
+    assert model.load_site(path).schema_registry is None
+
+    write(
+        "{bootstrap_servers: 'localhost:9092', schema_registry: "
+        "{url: 'http://registry:8080/apis/ccompat/v7', basic_auth_user_info: '${env:IB_REGISTRY_AUTH}'}}"
+    )
+    assert model.load_site(path).schema_registry == model.SchemaRegistryConfig(
+        url="http://registry:8080/apis/ccompat/v7", basic_auth_user_info="${env:IB_REGISTRY_AUTH}"
+    )
+
+    write("{bootstrap_servers: 'localhost:9092', schema_registry: {url: 'http://registry:8080'}}")
+    registry = model.load_site(path).schema_registry
+    assert registry is not None and registry.basic_auth_user_info is None
+
+    for kafka, message in (
+        ("{bootstrap_servers: 'x:9092', schema_registry: {basic_auth_user_info: 'a:b'}}", "must set url"),
+        ("{bootstrap_servers: 'x:9092', schema_registry: {url: 'u', token: 't'}}", "unknown keys"),
+        ("{bootstrap_servers: 'x:9092', schema_registry: {url: 'u', basic_auth_user_info: ''}}", "is empty"),
+        ("{bootstrap_servers: 'x:9092', registry: {url: 'u'}}", "site.kafka has unknown keys"),
+    ):
+        write(kafka)
+        with pytest.raises(ValueError, match=message):
+            model.load_site(path)
 
 
 def test_the_gate_keys_are_optional_and_typed(tmp_path: Path) -> None:
@@ -154,7 +211,9 @@ def test_the_kubernetes_block_refuses_what_it_does_not_recognise(tmp_path: Path)
 
 def test_derive_ids() -> None:
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
-    site = model.SiteConfig("s3://b/corpus", "s3://b/runs", "s3://b/wh", "k:9092", {}, {"uri": "u"}, None, 0.0, 0.0)
+    site = model.SiteConfig(
+        "s3://b/corpus", "s3://b/runs", "s3://b/wh", "k:9092", {}, None, {"uri": "u"}, None, 0.0, 0.0
+    )
     d = derive.derive(spec, site, stamp="20260908T120000Z", corpus_dir="smoke-1a2b3c4d")
     assert d.run_id == "smoke-flink-20260908T120000Z" and d.topic == d.run_id
     assert d.table == "ingest_bench.t_smoke_flink_20260908T120000Z"
@@ -220,8 +279,12 @@ def _site_file(
     token: str = "shh",
     cluster: dict[str, object] | None = None,
     warehouse: str | None = None,
+    registry: dict[str, str] | None = None,
 ) -> Path:
     path = tmp_path / "site.yaml"
+    kafka: dict[str, object] = {"bootstrap_servers": "localhost:9092", "security": security or {}}
+    if registry is not None:
+        kafka["schema_registry"] = registry
     path.write_text(
         yaml.safe_dump(
             {
@@ -230,7 +293,7 @@ def _site_file(
                 # The storage warehouse, which is not the catalog's `warehouse`
                 # property: a Glue catalog reads an account id there.
                 "warehouse": warehouse or f"file://{tmp_path}/wh",
-                "kafka": {"bootstrap_servers": "localhost:9092", "security": security or {}},
+                "kafka": kafka,
                 "catalog": {
                     "props": {
                         "type": "sql",
@@ -245,6 +308,141 @@ def _site_file(
         )
     )
     return path
+
+
+REGISTRY = {"url": "http://registry:8080/apis/ccompat/v7"}
+
+
+@dataclass
+class FakeRegistration:
+    """What `stage` asked the registry for, instead of asking one."""
+
+    calls: list[tuple[str, str | None, str, str]] = field(default_factory=list)
+    schema_id: int = 7
+    refuse: bool = False
+
+    def register(self, url: str, basic_auth_user_info: str | None, subject: str, schema_text: str) -> int:
+        self.calls.append((url, basic_auth_user_info, subject, schema_text))
+        if self.refuse:
+            raise ValueError("the registry refused the schema")
+        return self.schema_id
+
+
+def _confluent_spec(tmp_path: Path) -> Path:
+    """The shipped external spec, offered in the Confluent wire format."""
+    raw = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    raw["kafka"] = {**raw["kafka"], "value_encoding": "confluent"}
+    path = tmp_path / "confluent.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
+
+
+def test_stage_registers_the_corpus_schema_for_a_confluent_run(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One registration per run, of the document `schema_avsc_uri` names.
+
+    The id it returns is the run's: the producer puts it in every header and a
+    reader resolves the writer schema by it, so `facts.json` has to carry it
+    for any engine that never sees the corpus.
+    """
+    corpus_root, corpus_dir = corpus
+    registry = FakeRegistration()
+    monkeypatch.setattr(stage, "register_schema", registry.register)
+    admin = FakeAdmin()
+    staged = stage.stage(
+        _confluent_spec(tmp_path),
+        _site_file(tmp_path, corpus_root, registry=REGISTRY),
+        tmp_path / "runs",
+        admin,
+        stamp="20260909T100000Z",
+    )
+    schema_text = uri.read_text(uri.join(corpus_root, corpus_dir, "schema.avsc"))
+    assert registry.calls == [(REGISTRY["url"], None, f"{staged.derived.topic}-value", schema_text)]
+    facts = json.loads((staged.run_dir / "facts.json").read_text())
+    assert facts["value_encoding"] == "confluent" and facts["schema_id"] == 7
+    assert facts["schema_registry_url"] == REGISTRY["url"]
+    assert facts["schema_subject"] == f"{staged.derived.topic}-value"
+    assert admin.deleted == []
+
+
+def test_stage_registers_nothing_for_a_raw_avro_run(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default encoding needs no registry, and says so in the facts."""
+    corpus_root, _ = corpus
+    registry = FakeRegistration()
+    monkeypatch.setattr(stage, "register_schema", registry.register)
+    staged = stage.stage(
+        ROOT / "runs" / "smoke-external.yaml",
+        _site_file(tmp_path, corpus_root, registry=REGISTRY),
+        tmp_path / "runs",
+        FakeAdmin(),
+        stamp="20260909T101000Z",
+    )
+    assert registry.calls == []
+    facts = json.loads((staged.run_dir / "facts.json").read_text())
+    assert facts["value_encoding"] == "avro"
+    assert facts["schema_registry_url"] is None and facts["schema_subject"] is None and facts["schema_id"] is None
+
+
+def test_stage_refuses_a_confluent_run_on_a_site_with_no_registry(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """Refused before the topic exists: the run has nowhere to register."""
+    corpus_root, _ = corpus
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="kafka.schema_registry"):
+        stage.stage(
+            _confluent_spec(tmp_path),
+            _site_file(tmp_path, corpus_root),
+            tmp_path / "runs",
+            admin,
+            stamp="20260909T102000Z",
+        )
+    assert admin.created == [] and admin.deleted == []
+
+
+def test_stage_drops_the_topic_when_the_registration_fails(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry that refuses leaves no topic behind, like every other failure."""
+    corpus_root, _ = corpus
+    monkeypatch.setattr(stage, "register_schema", FakeRegistration(refuse=True).register)
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="the registry refused"):
+        stage.stage(
+            _confluent_spec(tmp_path),
+            _site_file(tmp_path, corpus_root, registry=REGISTRY),
+            tmp_path / "runs",
+            admin,
+            stamp="20260909T103000Z",
+        )
+    assert admin.deleted == ["smoke-external-20260909T103000Z"]
+
+
+def test_the_registrys_credential_is_a_reference_until_the_call(
+    tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolved at the registration and nowhere else, like every other secret."""
+    corpus_root, _ = corpus
+    monkeypatch.setenv("IB_TEST_REGISTRY_AUTH", "key:s3cret")
+    registry = FakeRegistration()
+    monkeypatch.setattr(stage, "register_schema", registry.register)
+    site_path = _site_file(
+        tmp_path,
+        corpus_root,
+        registry={**REGISTRY, "basic_auth_user_info": "${env:IB_TEST_REGISTRY_AUTH}"},
+    )
+    staged = stage.stage(_confluent_spec(tmp_path), site_path, tmp_path / "runs", FakeAdmin(), stamp="20260909T104000Z")
+    assert registry.calls[0][1] == "key:s3cret"
+    loaded = model.load_site(site_path).schema_registry
+    assert loaded is not None and loaded.basic_auth_user_info == "${env:IB_TEST_REGISTRY_AUTH}"
+    assert "s3cret" not in (staged.run_dir / "facts.json").read_text()
+
+    monkeypatch.delenv("IB_TEST_REGISTRY_AUTH")
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="IB_TEST_REGISTRY_AUTH"):
+        stage.stage(_confluent_spec(tmp_path), site_path, tmp_path / "runs", admin, stamp="20260909T105000Z")
+    assert admin.created == [] and admin.deleted == []
 
 
 def test_resolve_corpus_dir(tmp_path: Path) -> None:
