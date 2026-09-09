@@ -308,4 +308,5 @@ same artifacts while a run is still going, which a sweep uses to abandon an
 undersized fleet early.
 
 One recorded run of the smoke, with the two artifacts behind its verdict, is in
-[`examples/smoke-flink/`](examples/smoke-flink/).
+[`examples/smoke-flink/`](examples/smoke-flink/). A first run of the same
+smoke on AWS is in [`examples/aws-smoke-flink/`](examples/aws-smoke-flink/).
