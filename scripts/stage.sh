@@ -74,7 +74,7 @@ done
 	exit 2
 }
 
-require_host_tools kubectl aws yq jq git
+require_host_tools kubectl aws yq jq git curl
 [[ -f $SPEC ]] || die "no run spec at $SPEC"
 
 k8s_read_site
@@ -179,6 +179,56 @@ else
 		sleep "$ENGINE_POLL_S"
 		waited=$((waited + ENGINE_POLL_S))
 	done
+
+	# RUNNING says the operator started something, not that what it started is
+	# the run this spec asked for: Flink drops a configuration key it does not
+	# know, a connector ignores a hint it does not implement, and a vertex is
+	# sized by whatever configuration reached it — none of which fails a
+	# submission. So the settings a result would be attributed to are read back
+	# off the jobmanager before the run is ever offered a corpus.
+	#
+	# A high local port for the tunnel, so it cannot collide with a jobmanager
+	# an operator is already running on this machine.
+	VERIFY_PORT=18081
+	# What `verify-flink` exits with having found drift, as against having been
+	# unable to read the endpoint — which is worth another look, since a tunnel
+	# and a jobmanager can both be a moment behind the state that reported the
+	# job running.
+	VERIFY_DRIFT_STATUS=3
+	VERIFY_TRIES=3
+	# Absolute, because `harness_local`'s checkout fallback runs from the
+	# repository root and not from the operator's working directory.
+	VERIFY_SPEC="$(cd -- "$RUN_DIR" && pwd)/spec.yaml" || die "could not resolve $RUN_DIR to check the engine against"
+	[[ -f $VERIFY_SPEC ]] ||
+		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"
+
+	# Trapped before the tunnel is opened, so no path out of the readings below
+	# — `die` included — leaves one behind. The operator names a deployment's
+	# REST Service `<deployment>-rest`.
+	trap k8s_port_forward_stop EXIT
+	k8s_port_forward "svc/$RUN_OBJECT-rest" "$VERIFY_PORT:8081"
+
+	log "checking flinkdeployment/$RUN_OBJECT against $VERIFY_SPEC"
+	verify_tries=0
+	while :; do
+		# On stderr: this script's stdout is the run id, and the drift lines are
+		# for the operator reading the refusal below.
+		verify_status=0
+		harness_local verify-flink --spec "$VERIFY_SPEC" --run-id "$RUN_ID" \
+			--rest "http://localhost:$VERIFY_PORT" >&2 || verify_status=$?
+		if ((verify_status == 0)); then
+			break
+		fi
+		if ((verify_status == VERIFY_DRIFT_STATUS)); then
+			die "flinkdeployment/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the job can be read before it is torn down"
+		fi
+		verify_tries=$((verify_tries + 1))
+		if ((verify_tries >= VERIFY_TRIES)); then
+			die "could not read flinkdeployment/$RUN_OBJECT's REST endpoint in $VERIFY_TRIES tries (last exit $verify_status), so nothing this run measures could be attributed to the spec it was staged from"
+		fi
+		sleep "$ENGINE_POLL_S"
+	done
+	k8s_port_forward_stop
 fi
 
 printf 'run_id: %s\n' "$RUN_ID"

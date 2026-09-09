@@ -170,6 +170,14 @@ if [[ $ENGINE == flink ]]; then
 	log "submitting the job"
 	compose run --rm -T flink-job
 	wait_for_flink_job_running "$RUN_ID"
+	# A job that is RUNNING is not yet a job running what the spec asked for:
+	# Flink drops a setting it does not know and sizes a vertex from whatever
+	# configuration reached it, neither of which fails a submission. The
+	# jobmanager is addressed by its service name because this runs inside the
+	# stack's own network, where `localhost` is the harness container.
+	log "checking the job against the spec it was staged from"
+	harness "verify-flink --spec /runs/$RUN_ID/spec.yaml --run-id $RUN_ID --rest http://flink-jobmanager:8081" ||
+		die "the flink job is not running what $(basename "$SPEC_FILE") asked for; the lines above name every setting it dropped"
 elif [[ $ENGINE == spark ]]; then
 	# The submission line's shape, as the engine's renderer wrote it. Exported
 	# so compose interpolates the driver's cores and its heap. There is no

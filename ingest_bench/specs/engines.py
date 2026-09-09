@@ -17,6 +17,7 @@ MANAGED: dict[str, str] = {"flink": "engines.flink.knobs", "spark": "engines.spa
 
 KNOBS_MODULE = "knobs"
 FLEET_MODULE = "fleet"
+VERIFY_MODULE = "verify"
 
 
 def _engine_module(engine: str, submodule: str) -> ModuleType:
@@ -58,3 +59,13 @@ def fleet_for(engine: str) -> ModuleType:
     the run asked for, in the vCPU and GiB a published result is costed in.
     """
     return _engine_module(engine, FLEET_MODULE)
+
+
+def verify_for(engine: str) -> ModuleType:
+    """The verify module of a managed engine.
+
+    Every such module exposes ``verify(spec, run_id, fetch) -> list[str]``:
+    one line per setting the running engine does not honour, and an empty list
+    for a run it does.
+    """
+    return _engine_module(engine, VERIFY_MODULE)

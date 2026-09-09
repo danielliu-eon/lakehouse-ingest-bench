@@ -33,6 +33,11 @@ IMAGE_REPOSITORY_PREFIX=lakehouse-ingest-bench
 # request; the wait itself is hours long for a corpus.
 K8S_JOB_POLL_S="${K8S_JOB_POLL_S:-10}"
 
+# How long a port-forward may take to carry a request. Seconds of work — the
+# pod it forwards to is already running by the time one is opened — so a
+# tunnel still silent after this is one that is not going to answer.
+K8S_PORT_FORWARD_WAIT_S="${K8S_PORT_FORWARD_WAIT_S:-30}"
+
 # ---------------------------------------------------------------------------
 # Reading the site
 # ---------------------------------------------------------------------------
@@ -303,6 +308,52 @@ k8s_deployment_tail() {
 k8s_flinkdeployment_state() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "flinkdeployment/$1" \
 		-o 'jsonpath={.status.jobStatus.state}' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# A tunnel to one service
+# ---------------------------------------------------------------------------
+
+# The pid of the tunnel `k8s_port_forward` opened, in a global rather than
+# returned: the caller stops it from an `EXIT` trap, and a pid printed by a
+# function that runs in a command substitution would not reach one.
+K8S_PORT_FORWARD_PID=""
+
+# k8s_port_forward <resource> <local:remote>
+#
+# For the harness commands that speak a cluster-internal HTTP API from an
+# operator's machine. The wait is a request through the tunnel and not the
+# process being up: `kubectl port-forward` opens its listener before the
+# connection behind it works, so a command started on the listener alone is
+# answered with a reset.
+k8s_port_forward() {
+	local resource=$1 ports=$2 local_port=${2%%:*} waited=0
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" port-forward "$resource" "$ports" >&2 &
+	K8S_PORT_FORWARD_PID=$!
+	while ((waited < K8S_PORT_FORWARD_WAIT_S)); do
+		if curl -sf --max-time 5 -o /dev/null "http://localhost:$local_port/"; then
+			log "port-forward to $resource answers on localhost:$local_port"
+			return 0
+		fi
+		# A tunnel whose own process is gone will never answer, and the
+		# refusal that says so is more use than the timeout that follows it.
+		if ! kill -0 "$K8S_PORT_FORWARD_PID" 2>/dev/null; then
+			die "kubectl port-forward $resource $ports exited; the lines above are its own output"
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+	die "port-forward to $resource did not answer on localhost:$local_port within ${K8S_PORT_FORWARD_WAIT_S}s"
+}
+
+# Safe to call having opened no tunnel, so a caller can trap it before it opens
+# one — which is the only ordering where a failure to open leaves nothing
+# behind.
+k8s_port_forward_stop() {
+	[[ -n $K8S_PORT_FORWARD_PID ]] || return 0
+	kill "$K8S_PORT_FORWARD_PID" 2>/dev/null || true
+	wait "$K8S_PORT_FORWARD_PID" 2>/dev/null || true
+	K8S_PORT_FORWARD_PID=""
 }
 
 # ---------------------------------------------------------------------------

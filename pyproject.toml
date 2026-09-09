@@ -39,6 +39,7 @@ collect = "ingest_bench.collect.cli:main"
 results-table = "ingest_bench.collect.cli:results_table_main"
 drop-topic = "ingest_bench.kafka_admin:main"
 render-k8s = "ingest_bench.k8s.render:main"
+verify-flink = "engines.flink.verify:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-PyYAML"]

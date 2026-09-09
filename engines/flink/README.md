@@ -120,6 +120,24 @@ commits whatever the writers do. `GET /jobs/<id>/checkpoints/config` reports
 A fleet whose slots equal `source_parallelism` emits no hint at all, because
 the two numbers coincide and there is nothing to say.
 
+## What staging verifies
+
+`verify.py` reads those same documents back off the jobmanager and refuses the
+run on anything it does not recognise as the spec's — `stage.sh` through a
+port-forward to `svc/<run>-rest`, `smoke.sh` over the stack's own network.
+What it holds the job to:
+
+- the job named by the run id is RUNNING, on its live attempt rather than on
+  one an earlier restart archived under the same name;
+- `interval` and `min_pause` equal the knobs in milliseconds, or an
+  `extra_flink_conf` override of either — that is what the job was submitted
+  with — and `mode` is `exactly_once`, which no override may relax;
+- the source vertex sits at `source_parallelism`, every `IcebergStreamWriter`
+  at `taskmanagers * slots`, and the committer at 1;
+- the cluster has registered `taskmanagers` taskmanagers.
+
+A drifted deployment is left running, so its job can be read before it goes.
+
 ## Sizing
 
 Two figures worth carrying into a real spec, both measured on the local stack

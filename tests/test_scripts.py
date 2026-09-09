@@ -686,6 +686,19 @@ if [[ ${1:-} == s3 && ${2:-} == sync ]]; then
 fi
 """
 
+# The stub `kubectl port-forward` returns at once rather than holding a tunnel
+# open, so what stands in for a jobmanager answering through one is `curl`.
+CURL_STUB = """
+printf '%s\\n' "$*" >>"$STUB_CURL_LOG"
+"""
+
+# The engine check, whose answer the driver branches on: 0 verified, 3 drift,
+# anything else an endpoint it could not read.
+VERIFY_FLINK_STUB = """
+printf '%s\\n' "$*" >>"$STUB_VERIFY_LOG"
+exit "${STUB_VERIFY_STATUS:-0}"
+"""
+
 RUN_ID = "smoke-flink-20260908T120000Z"
 # What the same run's Kubernetes objects are named, since an RFC 1123 name is
 # lowercase and the stamp in a run id is not.
@@ -813,12 +826,19 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
     for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
         (staged / name).write_text(f"# {name}\n")
 
+    verify_calls = tmp_path / "verify-calls.log"
+    verify_calls.touch()
     spec = REPO_ROOT / "runs" / "smoke-flink.yaml"
     run = _run_driver(
         STAGE,
         [str(spec), "--image-tag", "abc1234"],
         tmp_path,
-        {"STUB_STAGE_DIR": str(staged)},
+        {
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
+            "STUB_VERIFY_LOG": str(verify_calls),
+        },
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
     assert run.result.stdout.splitlines()[-1] == f"run_id: {RUN_ID}"
@@ -849,12 +869,64 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
     ]
     assert f"get flinkdeployment/{RUN_OBJECT}" in run.calls
 
+    # Once it is RUNNING, the job is read back through a tunnel to the REST
+    # Service the operator names after the deployment, and checked against the
+    # copied spec — by an absolute path, because the harness may be run from
+    # the checkout, which resolves a relative one against its own root.
+    assert f"port-forward svc/{RUN_OBJECT}-rest 18081:8081" in run.calls
+    checked = verify_calls.read_text().strip()
+    assert Path(checked.split()[1]) == (tmp_path / "work" / "runs" / RUN_ID / "spec.yaml").resolve()
+    assert checked.endswith(f"--run-id {RUN_ID} --rest http://localhost:18081")
+
     jobs = [document for document in run.applied if document["kind"] == "Job"]
     assert len(jobs) == 1, "staging applies one Job"
     command = _job_command(jobs[0])
     assert "stage --spec /runs/smoke-flink.yaml --site /site/site.yaml --runs-dir /work/runs" in command
     assert "--image-tag abc1234" in command
     assert "--upload-prefix s3://a-bucket/runs" in command
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(("status", "refusal"), [(3, "name every setting it dropped"), (2, "in 3 tries")])
+def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
+    tmp_path: Path, status: int, refusal: str
+) -> None:
+    """Drift and an unreadable endpoint are refused, and for different reasons.
+
+    A result is only ever attributed to the spec it was staged from, so a job
+    whose effective settings are not that spec's — and a job whose settings
+    could not be read at all — are both runs not worth offering a corpus to.
+    Drift is final; an endpoint that did not answer is tried again first.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+    verify_calls = tmp_path / "verify-calls.log"
+    verify_calls.touch()
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
+            "STUB_VERIFY_LOG": str(verify_calls),
+            "STUB_VERIFY_STATUS": str(status),
+            # The retries are the only wait left in this path, and three of
+            # them at the driver's default would hold the test for half a
+            # minute to prove the same thing.
+            "ENGINE_POLL_S": "0",
+        },
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+    )
+    assert run.result.returncode != 0
+    assert refusal in run.result.stderr, run.result.stderr
+    assert f"run_id: {RUN_ID}" not in run.result.stdout
+    expected_tries = 1 if status == 3 else 3
+    assert len(verify_calls.read_text().splitlines()) == expected_tries
 
 
 @needs_shell_tools
