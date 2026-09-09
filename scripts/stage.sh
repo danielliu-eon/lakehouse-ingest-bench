@@ -229,6 +229,16 @@ else
 		sleep "$ENGINE_POLL_S"
 	done
 	k8s_port_forward_stop
+
+	# Recorded here because this is the last moment the fleet is certain to
+	# exist: a teardown reads the same thing, but only as a fallback, and by
+	# then the pods it would read are the ones it has just deleted.
+	#
+	# `app` and `component` are the operator's own labels on the pods it creates
+	# — the FlinkDeployment this run applied declares none of its own — and the
+	# jobmanager is the one pod of the two whose image is the engine's for every
+	# submission mode.
+	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "app=$RUN_OBJECT,component=jobmanager"
 fi
 
 printf 'run_id: %s\n' "$RUN_ID"

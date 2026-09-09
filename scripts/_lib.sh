@@ -61,8 +61,13 @@ harness() {
 # local smoke and the cloud drivers so that both read the same fields in the
 # same order — a second copy of this filter would drift, and the copy that lost
 # would be the one nobody reread.
+#
+# A geometry document is optional, and is one line after the block. No field in
+# it decides validity, which is why it is not in the filter above; it belongs
+# here rather than in a caller because it has to be shown before the refusal
+# below, and an invalid run's geometry is exactly as measured as a valid one's.
 print_verdict() {
-	local summary=$1
+	local summary=$1 geometry=${2:-}
 	[[ -f $summary ]] || die "the scorer published no $summary"
 	jq '{
   run_valid, state, reason, producer_bound,
@@ -71,6 +76,13 @@ print_verdict() {
   exactness: {exact: .exactness.exact, loss_rows: .exactness.loss_rows, duplicate_rows: .exactness.duplicate_rows},
   keepup
 }' "$summary"
+	# `select` rather than a conditional: a table that took no commit reports a
+	# null p50, and the line is then left out instead of printed over nothing.
+	if [[ -n $geometry && -f $geometry ]]; then
+		jq -r '(.final.live // empty) | select(.size_quantiles.p50 != null)
+  | "geometry: p50 \((.size_quantiles.p50 / 1048576 * 10 | round) / 10) MiB, "
+    + "small (<32 MiB) \((.small_file_share_32mib * 1000 | round) / 10)%, \(.files) files"' "$geometry"
+	fi
 	[[ "$(jq -r .run_valid "$summary")" == true ]] ||
 		die "run_valid is false; the block above says why, in full in $summary"
 }

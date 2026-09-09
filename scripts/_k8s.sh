@@ -38,6 +38,20 @@ K8S_JOB_POLL_S="${K8S_JOB_POLL_S:-10}"
 # tunnel still silent after this is one that is not going to answer.
 K8S_PORT_FORWARD_WAIT_S="${K8S_PORT_FORWARD_WAIT_S:-30}"
 
+# Where a run's engine provenance is written, and how long a pod that has not
+# reported its image digest yet is waited for. A digest appears once the kubelet
+# has pulled the image, which is already true of a pod whose job is RUNNING, so
+# the wait is only for the gap between the two reports.
+ENGINE_IMAGE_FILE=engine-image.json
+ENGINE_IMAGE_WAIT_S="${ENGINE_IMAGE_WAIT_S:-60}"
+ENGINE_IMAGE_POLL_S="${ENGINE_IMAGE_POLL_S:-5}"
+
+# The copy of the table's last metadata document, named in one place because
+# three drivers address it: a teardown writes it, `file-sizes` reads the
+# geometry out of it, and a purge reads the table's location out of it. Guessing
+# that location from the table's name is what this file exists to avoid.
+METADATA_FINAL_FILE=table-metadata.final.json
+
 # ---------------------------------------------------------------------------
 # Reading the site
 # ---------------------------------------------------------------------------
@@ -113,6 +127,30 @@ site_flags() {
 	printf '%s' "$flags"
 }
 
+# The catalog properties as `--catalog-prop key=value` argument pairs, in the
+# global array `CATALOG_PROP_FLAGS`, for a harness command run on this machine.
+#
+# Set rather than printed, and an array rather than a string, because a caller
+# splitting one string back apart would split a value on its own spaces too.
+# `site_flags` is the string form and is for a Job's command line, where the
+# image's shell does that splitting on purpose.
+#
+# The read is assigned and its status checked explicitly rather than left to
+# `set -e`: a `site_pairs` that could not read the file must refuse here instead
+# of yielding an empty map, which would open a catalog with none of the site's
+# properties — a signing failure far from the file that caused it.
+read_catalog_prop_flags() {
+	local pairs
+	pairs="$(site_pairs '.catalog.props')" ||
+		die "cannot build the catalog flags a harness command needs; the line above says why"
+	CATALOG_PROP_FLAGS=()
+	local pair
+	while IFS= read -r pair; do
+		[[ -n $pair ]] || continue
+		CATALOG_PROP_FLAGS+=(--catalog-prop "$pair")
+	done <<<"$pairs"
+}
+
 # The env list every Job gets, which is the region or nothing. A cluster off AWS
 # names none, and a region rendered empty reaches an SDK as one it cannot
 # resolve — a signing failure far from the file that caused it.
@@ -178,6 +216,8 @@ k8s_image_tag() {
 # installs no cloud SDK. The installed-harness path takes no extras — an
 # installed harness carries whatever it was installed with, which is why
 # docs/running.md says to install it with that extra.
+#
+# `abs_path` below is what a caller turns its own relative paths into first.
 harness_local() {
 	local extras=()
 	while [[ ${1:-} == --extra ]]; do
@@ -193,6 +233,34 @@ harness_local() {
 	else
 		die "neither $name nor uv is on PATH; install this harness or install uv — see $PREREQ_DOC"
 	fi
+}
+
+# Whether one of this harness's commands is available to `harness_local`, which
+# is not the same question as whether it is on `PATH`: in a checkout it is `uv`
+# that provides the command, and the only statement of which commands there are
+# is this project's own script table.
+#
+# For a driver that offers a step some checkouts cannot take yet. It answers
+# only whether the command exists — a command that exists and fails is a
+# failure to report, and running one to find out would hide that.
+harness_available() {
+	if command -v "$1" >/dev/null 2>&1; then
+		return 0
+	fi
+	if command -v uv >/dev/null 2>&1 && grep -q "^$1 = " "$REPO_ROOT/pyproject.toml"; then
+		return 0
+	fi
+	return 1
+}
+
+# One path, absolute. `harness_local`'s checkout fallback runs from the
+# repository root, so a relative path handed to a harness command there names a
+# file in this repository rather than in the operator's working directory.
+#
+# The directory is expected to exist: every caller has already refused a run
+# directory or a site config it could not find.
+abs_path() {
+	printf '%s/%s' "$(cd -- "$(dirname -- "$1")" && pwd)" "$(basename -- "$1")"
 }
 
 # k8s_render_apply <template relative to the repository root> NAME=VALUE...
@@ -293,6 +361,62 @@ k8s_job_logs() {
 
 k8s_delete() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" delete "$1" "$2" --ignore-not-found >&2
+}
+
+# k8s_object_present <kind> <name> — the object's own name on stdout, empty when
+# the namespace does not hold it.
+#
+# A read the API refused is a refusal rather than an empty answer, because the
+# caller of this is asking whether something is still running before it destroys
+# what that thing is writing: "I could not ask" and "it is not there" have to be
+# different answers. Callers assign first and check the status, since a `die`
+# inside a command substitution ends only that substitution's subshell.
+k8s_object_present() {
+	local name
+	name="$(kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "$1" "$2" \
+		--ignore-not-found -o 'jsonpath={.metadata.name}')" ||
+		die "could not read $1/$2 out of $SITE_NAMESPACE; try: kubectl get $1/$2"
+	printf '%s' "$name"
+}
+
+# k8s_write_engine_image <path> <label selector> [wait seconds]
+#
+# What the engine actually ran, as `{"image": …, "digest": …}`. The digest is
+# the pod's own `imageID`, which names the manifest the node pulled rather than
+# the tag it was pulled under: a floating tag repointed after a run would
+# otherwise leave a result claiming an image that is no longer the one measured.
+#
+# A pod that has not reported an `imageID` yet is waited for and then written
+# with a null digest. Provenance is not worth failing a run over, and `collect`
+# records the absence rather than inventing a digest.
+#
+# `{range}` over the pods rather than `.items[0]`, because an index into an
+# empty list is an error in some `kubectl` versions and empty in others, and no
+# pod matching the selector is the normal answer for an engine already deleted.
+k8s_write_engine_image() {
+	local path=$1 selector=$2 wait_s=${3:-$ENGINE_IMAGE_WAIT_S}
+	local waited=0 answer="" line="" image="" digest=""
+	while :; do
+		answer="$(kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pod -l "$selector" \
+			-o 'jsonpath={range .items[*]}{.spec.containers[0].image}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}' \
+			2>/dev/null)" || answer=""
+		line="${answer%%$'\n'*}"
+		image="${line%% *}"
+		digest="${line##* }"
+		[[ -z $image || -z $digest ]] || break
+		((waited < wait_s)) || break
+		sleep "$ENGINE_IMAGE_POLL_S"
+		waited=$((waited + ENGINE_IMAGE_POLL_S))
+	done
+	if [[ -z $image ]]; then
+		log "no pod matching '$selector' names an image, so $path is not written"
+		return 0
+	fi
+	[[ -n $digest ]] || log "no pod matching '$selector' reported an image digest, so $path records none"
+	jq -n --arg image "$image" --arg digest "$digest" \
+		'{image: $image, digest: (if $digest == "" then null else $digest end)}' >"$path" ||
+		die "could not write $path"
+	log "the engine ran $image (digest ${digest:-none reported})"
 }
 
 k8s_deployment_tail() {

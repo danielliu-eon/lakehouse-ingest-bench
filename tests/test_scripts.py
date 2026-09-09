@@ -48,6 +48,7 @@ LAUNCH = SCRIPTS / "launch.sh"
 GATE = SCRIPTS / "gate.sh"
 TEARDOWN = SCRIPTS / "teardown.sh"
 FINISH = SCRIPTS / "finish.sh"
+PURGE = SCRIPTS / "purge.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
@@ -214,7 +215,7 @@ def test_an_unknown_argument_is_refused() -> None:
 
 
 @needs_bash
-@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH])
+@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH, PURGE])
 def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
     """`--help` and an unknown argument, with no site config and no cluster.
 
@@ -757,6 +758,8 @@ case "$*" in
 	cat >"$STUB_APPLIED_DIR/$count.yaml"
 	;;
 *"create configmap"*) printf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: stub\\n' ;;
+*"jsonpath={.metadata.name}"*) printf '%s' "${STUB_OBJECT_NAME:-}" ;;
+*"get pod -l"*) printf '%s\\n' "${STUB_ENGINE_IMAGE:-}" ;;
 *"get job/"*) printf 'Complete\\n' ;;
 *"logs job/scorer-"*) printf 'POLL t=0.1 prefix=0/0\\n' ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
@@ -764,11 +767,13 @@ case "$*" in
 esac
 """
 
-# `s3 sync` stands in for the run directory the stage Job published; every other
-# subcommand succeeds silently.
+# `s3 sync` stands in for a prefix the pods published, copying one directory
+# when a test names it; every other subcommand succeeds silently. Guarded on
+# that directory rather than on the subcommand alone, because the drivers sync
+# several prefixes and only the staged one has a stand-in.
 AWS_STUB = """
 printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
-if [[ ${1:-} == s3 && ${2:-} == sync ]]; then
+if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
 	mkdir -p "$4"
 	cp -R "$STUB_STAGE_DIR/." "$4"
 fi
@@ -785,6 +790,63 @@ printf '%s\\n' "$*" >>"$STUB_CURL_LOG"
 VERIFY_FLINK_STUB = """
 printf '%s\\n' "$*" >>"$STUB_VERIFY_LOG"
 exit "${STUB_VERIFY_STATUS:-0}"
+"""
+
+DROP_TABLE_STUB = """
+printf '%s\\n' "$*" >>"$STUB_DROP_TABLE_LOG"
+"""
+
+RESULTS_TABLE_STUB = """
+printf '%s\\n' "$*" >>"$STUB_RESULTS_TABLE_LOG"
+"""
+
+# `collect` writes the document its caller reads back: without `--out` the run
+# directory's own, and with one a published result under the engine's directory.
+COLLECT_STUB = """
+printf '%s\\n' "$*" >>"$STUB_COLLECT_LOG"
+run_dir=""
+out=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--run-dir)
+		run_dir="$2"
+		shift 2
+		;;
+	--out)
+		out="$2"
+		shift 2
+		;;
+	*) shift ;;
+	esac
+done
+if [[ -z $out ]]; then
+	printf '{"run": {"engine": "flink"}}\\n' >"$run_dir/run.json"
+else
+	mkdir -p "${out%/}"
+	printf '{}\\n' >"${out%/}/a-published-result.json"
+fi
+"""
+
+# `file-sizes` writes the geometry document the verdict block reads its last
+# line out of, and answers the exit code a test asks it for.
+FILE_SIZES_STUB = """
+printf '%s\\n' "$*" >>"$STUB_FILE_SIZES_LOG"
+out=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--out)
+		out="$2"
+		shift 2
+		;;
+	*) shift ;;
+	esac
+done
+status="${STUB_FILE_SIZES_STATUS:-0}"
+if [[ -n $out && $status == 0 ]]; then
+	mkdir -p "$out"
+	printf '%s\\n' "$STUB_GEOMETRY" >"$out/geometry.json"
+fi
+exit "$status"
 """
 
 RUN_ID = "smoke-flink-20260908T120000Z"
@@ -873,6 +935,10 @@ def _run_driver(
         cwd=work,
         capture_output=True,
         text=True,
+        # No terminal and nothing to read, so a driver that asks before it
+        # deletes gets the same answer here however these tests were started —
+        # from a shell whose stdin is a TTY as much as from CI.
+        stdin=subprocess.DEVNULL,
         env={
             **os.environ,
             "PATH": f"{stubs}:{os.environ['PATH']}",
@@ -1264,3 +1330,444 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
     assert run.result.returncode != 0
     assert f"flinkdeployment/{RUN_OBJECT} went to FAILED" in run.result.stderr
     assert f"logs deploy/{RUN_OBJECT} --tail=40" in run.calls
+
+
+# ---------------------------------------------------------------------------
+# Geometry, collection and reclamation
+# ---------------------------------------------------------------------------
+
+# Where the run's table put its files, as the copied metadata document states
+# it. Read rather than derived: a catalog places a table where it likes under
+# its warehouse, and a prefix guessed from the table's name is a prefix that may
+# belong to something else.
+TABLE_LOCATION = "s3://a-bucket/warehouse/ingest_bench/t_smoke_flink_20260908T120000Z-1a2b"
+
+# A geometry document shaped like `file-sizes` writes one, with only the fields
+# the verdict's last line reads.
+GEOMETRY_DOCUMENT = json.dumps(
+    {
+        "final": {
+            "live": {
+                "files": 137,
+                "rows": 1000,
+                "bytes": 5_000_000_000,
+                "size_quantiles": {"p50": 40_100_000.0},
+                "small_file_share_32mib": 0.2847,
+            }
+        }
+    }
+)
+
+
+def _torn_down_run(tmp_path: Path, *, run_valid: bool = True, metadata: bool = True) -> Path:
+    """A run directory as `teardown.sh` leaves one, in the operator's working directory."""
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    (run_dir / "scores").mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps({**FACTS, "epoch": 1757419200}))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "scores" / "summary.json").write_text(
+        json.dumps(
+            {
+                "run_valid": run_valid,
+                "state": "drained" if run_valid else "idle_stop",
+                "reason": "",
+                "producer_bound": False,
+                "prefix": 10,
+                "last_batch": 10,
+                "committed_rows": 100,
+                "offered_rows": 100,
+                "freshness": {"window": {"p95": 3.0}},
+                "exactness": {"exact": run_valid, "loss_rows": 0, "duplicate_rows": 0},
+                "keepup": {"absorbed_at_offer_end": 0.9},
+            }
+        )
+    )
+    if metadata:
+        (run_dir / "table-metadata.final.json").write_text(json.dumps({"location": TABLE_LOCATION}))
+    return run_dir
+
+
+def _stub_logs(tmp_path: Path, names: dict[str, str]) -> dict[str, str]:
+    """Log paths for the stubs, created empty.
+
+    Created rather than left to the stub, so that "the stub never ran" reads as
+    an empty file rather than as a missing one — the assertion that nothing was
+    deleted is exactly that read.
+    """
+    environment = {}
+    for variable, name in names.items():
+        path = tmp_path / name
+        path.touch()
+        environment[variable] = str(path)
+    return environment
+
+
+def _finish_environment(tmp_path: Path) -> dict[str, str]:
+    return {
+        **_stub_logs(
+            tmp_path,
+            {
+                "STUB_COLLECT_LOG": "collect.log",
+                "STUB_FILE_SIZES_LOG": "file-sizes.log",
+                "STUB_RESULTS_TABLE_LOG": "results-table.log",
+            },
+        ),
+        "STUB_GEOMETRY": GEOMETRY_DOCUMENT,
+    }
+
+
+FINISH_PROGRAMS = {
+    "collect": COLLECT_STUB,
+    "file-sizes": FILE_SIZES_STUB,
+    "results-table": RESULTS_TABLE_STUB,
+}
+
+
+@needs_shell_tools
+def test_finish_measures_the_geometry_from_the_copied_document_and_reports_it(tmp_path: Path) -> None:
+    """The document, the epoch and the spec's ladder, and the p50 on the verdict.
+
+    Geometry is read from the copied document rather than through the catalog,
+    because every figure in it is about files and a finished campaign may have
+    dropped the table from its catalog already. The epoch is the ladder's
+    origin and only the launch knew it, so it comes off the run's own facts.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(FINISH, [RUN_ID], tmp_path, _finish_environment(tmp_path), programs=FINISH_PROGRAMS)
+    assert run.result.returncode == 0, run.result.stderr
+
+    measured = (tmp_path / "file-sizes.log").read_text()
+    assert f"/work/runs/{RUN_ID}/table-metadata.final.json" in measured
+    assert "--epoch 1757419200" in measured
+    assert f"/work/runs/{RUN_ID}/scores" in measured
+    # Absolute, because `harness_local`'s checkout fallback runs from the
+    # repository root: a relative path there names a file in the checkout.
+    assert "--metadata /" in measured and "--out /" in measured
+    # Every property the site declares, so the manifests the figures come from
+    # are read with a region rather than against the global endpoint.
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in measured
+    # The shipped smoke spec sets no ladder, so the flag is left off and
+    # `file-sizes` applies its own default instead of one restated in the shell.
+    assert "--offsets" not in measured
+
+    assert "geometry: p50 38.2 MiB, small (<32 MiB) 28.5%, 137 files" in run.result.stdout
+    # Both sides of the run are fetched: the scorer's artifacts and the publish
+    # logs the offered figures are derived from.
+    assert f"s3 sync s3://a-bucket/runs/{RUN_ID}/scores/ ./runs/{RUN_ID}/scores/" in run.aws_calls
+    assert f"s3 sync s3://a-bucket/runs/{RUN_ID}/producer/ ./runs/{RUN_ID}/producer/" in run.aws_calls
+
+
+@needs_shell_tools
+def test_finish_reports_a_table_that_never_committed_without_failing(tmp_path: Path) -> None:
+    """`file-sizes`' no-geometry code is a fact about the run, not a failed read.
+
+    A run whose engine never committed has no files to measure, and refusing
+    there would cost it the document that says so — which is the one artifact
+    that explains what happened.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID],
+        tmp_path,
+        {**_finish_environment(tmp_path), "STUB_FILE_SIZES_STATUS": "4"},
+        programs=FINISH_PROGRAMS,
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "no geometry: the table never committed" in run.result.stderr
+    assert "geometry: p50" not in run.result.stdout
+    assert (tmp_path / "collect.log").read_text().strip() != "", "the run is still collected"
+
+
+@needs_shell_tools
+def test_finish_refuses_to_publish_an_invalid_run_unless_told_to(tmp_path: Path) -> None:
+    """`run_valid: false` is not a headline result, and `--publish-invalid` is the exception.
+
+    Publishing is refused before anything is written, and the refusal names the
+    flag: a result whose validity state is disclosed is publishable under
+    §11.2, one that quietly stands beside the valid ones is not.
+    """
+    _torn_down_run(tmp_path, run_valid=False)
+    refused = _run_driver(
+        FINISH,
+        [RUN_ID, "--publish", "results"],
+        tmp_path,
+        _finish_environment(tmp_path),
+        programs=FINISH_PROGRAMS,
+    )
+    assert refused.result.returncode != 0
+    assert "run_valid is false" in refused.result.stderr and "--publish-invalid" in refused.result.stderr
+    # One collect, into the run directory: nothing reached the results tree.
+    assert len((tmp_path / "collect.log").read_text().splitlines()) == 1
+    assert not (tmp_path / "work" / "results").exists()
+    assert (tmp_path / "results-table.log").read_text() == ""
+
+
+@needs_shell_tools
+def test_finish_publishes_an_invalid_run_when_told_to_and_still_refuses_it(tmp_path: Path) -> None:
+    """The document is published and the verdict still fails.
+
+    Two different questions: whether a result may be recorded with its state
+    disclosed, and whether this run passed. `--publish-invalid` answers only
+    the first, so the exit code has to stay non-zero — a sweep branching on it
+    must not read a published invalid run as a passing one.
+    """
+    _torn_down_run(tmp_path, run_valid=False)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID, "--publish", "results", "--publish-invalid", "--variant", "hash-fanout"],
+        tmp_path,
+        _finish_environment(tmp_path),
+        programs=FINISH_PROGRAMS,
+    )
+    assert run.result.returncode != 0, "an invalid run is still an invalid run"
+    assert "run_valid is false; the block above says why" in run.result.stderr
+
+    collected = (tmp_path / "collect.log").read_text().splitlines()
+    assert len(collected) == 2, "one document for the run directory and one for the results tree"
+    # The engine's own subdirectory, with the trailing separator that says the
+    # path is a directory `collect` fills with the published name rather than a
+    # file name the shell guessed at.
+    assert "--out /" in collected[1] and "/work/results/flink/" in collected[1]
+    assert "--variant hash-fanout" in collected[0] and "--variant hash-fanout" in collected[1]
+    # The table is generated from the published documents, never hand-edited.
+    rendered = (tmp_path / "results-table.log").read_text()
+    assert "/work/results --out /" in rendered and "/work/results/RESULTS.md" in rendered
+
+
+@needs_shell_tools
+@pytest.mark.skipif(
+    "results-table = " in (REPO_ROOT / "pyproject.toml").read_text(),
+    reason="this checkout declares results-table, so there is no absent-renderer branch to take",
+)
+def test_finish_leaves_the_results_table_alone_when_the_renderer_is_absent(tmp_path: Path) -> None:
+    """A checkout without `results-table` still publishes the document.
+
+    The guard is on the command being available to `harness_local`, not on it
+    being on `PATH`: in a checkout `uv` provides it, and this project's script
+    table is the only statement of which commands exist.
+    """
+    _torn_down_run(tmp_path)
+    published = dict(FINISH_PROGRAMS)
+    del published["results-table"]
+    run = _run_driver(
+        FINISH,
+        [RUN_ID, "--publish", "results"],
+        tmp_path,
+        _finish_environment(tmp_path),
+        programs=published,
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert len((tmp_path / "collect.log").read_text().splitlines()) == 2
+    assert "no results-table command in this checkout" in run.result.stderr
+
+
+@needs_shell_tools
+def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> None:
+    """A torn-down run has a document even if nothing is ever done with it again.
+
+    The pod that wrote the scores is gone by then, so they are fetched before
+    the document is assembled from them; the metadata document is copied both
+    beside the run and into the bucket, because the local copy is what
+    `finish.sh` and `purge.sh` open and the other is what outlives this
+    machine's working directory.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
+
+    location = f"{TABLE_LOCATION}/metadata/00003-abc.metadata.json"
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "0",
+            "STUB_METADATA_OUT": location,
+            "STUB_COLLECT_LOG": str(tmp_path / "collect.log"),
+        },
+        programs={"table-metadata": TABLE_METADATA_STUB, "collect": COLLECT_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+
+    assert f"s3 sync s3://a-bucket/runs/{RUN_ID}/scores/ ./runs/{RUN_ID}/scores/" in run.aws_calls
+    assert f"s3 cp {location} ./runs/{RUN_ID}/table-metadata.final.json" in run.aws_calls
+    assert (
+        f"s3 cp ./runs/{RUN_ID}/table-metadata.final.json "
+        f"s3://a-bucket/runs/{RUN_ID}/table-metadata.final.json" in run.aws_calls
+    )
+
+    # Absolute paths, because `harness_local`'s checkout fallback runs from the
+    # repository root and a relative one there names a file in the checkout.
+    collected = (tmp_path / "collect.log").read_text()
+    assert "--run-dir /" in collected and f"/work/runs/{RUN_ID}" in collected
+    assert "--site /" in collected and "/work/site.yaml" in collected
+
+
+@needs_shell_tools
+def test_the_engine_image_is_recorded_off_the_jobmanager_pod(tmp_path: Path) -> None:
+    """The digest the node pulled, not the tag it was pulled under.
+
+    A floating tag repointed after a run would otherwise leave a result naming
+    an image that is no longer the one measured. `app` and `component` are the
+    operator's own labels on the pods it creates — the FlinkDeployment declares
+    none — and both are lowercase because the run id's stamp is not.
+    """
+    staged = _staged_engine_run(tmp_path)
+    image = "a-registry/lakehouse-ingest-bench/flink:abc1234"
+    digest = f"{image.split(':')[0]}@sha256:{'a' * 64}"
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {**_verify_environment(tmp_path), "STUB_STAGE_DIR": str(staged), "STUB_ENGINE_IMAGE": f"{image} {digest}"},
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+
+    assert f"get pod -l app={RUN_OBJECT},component=jobmanager" in run.calls
+    recorded = json.loads((tmp_path / "work" / "runs" / RUN_ID / "engine-image.json").read_text())
+    assert recorded == {"image": image, "digest": digest}
+
+
+@needs_shell_tools
+def test_a_pod_that_reports_no_digest_still_stages(tmp_path: Path) -> None:
+    """Provenance is not worth failing a run over.
+
+    A null digest is a recorded absence, which `collect` names in `missing`;
+    inventing one from the tag would put a claim in a result that nothing
+    checked.
+    """
+    staged = _staged_engine_run(tmp_path)
+    image = "a-registry/lakehouse-ingest-bench/flink:abc1234"
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            **_verify_environment(tmp_path),
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_ENGINE_IMAGE": f"{image} ",
+            "ENGINE_IMAGE_WAIT_S": "0",
+        },
+        programs={"curl": CURL_STUB, "verify-flink": VERIFY_FLINK_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    recorded = json.loads((tmp_path / "work" / "runs" / RUN_ID / "engine-image.json").read_text())
+    assert recorded == {"image": image, "digest": None}
+
+
+def _staged_engine_run(tmp_path: Path) -> Path:
+    """What the stage Job published, as the AWS stub copies it into the run directory.
+
+    `spec.yaml` among the documents because staging checks the started engine
+    against the spec it was staged from before it goes any further.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+    return staged
+
+
+def _verify_environment(tmp_path: Path) -> dict[str, str]:
+    """The logs the engine check and the tunnel behind it write to."""
+    return _stub_logs(tmp_path, {"STUB_CURL_LOG": "curl-calls.log", "STUB_VERIFY_LOG": "verify-calls.log"})
+
+
+def _purge_environment(tmp_path: Path) -> dict[str, str]:
+    return _stub_logs(tmp_path, {"STUB_DROP_TABLE_LOG": "drop-table.log"})
+
+
+PURGE_PROGRAMS = {"drop-table": DROP_TABLE_STUB}
+
+
+@needs_shell_tools
+def test_purge_names_what_it_would_remove_and_removes_nothing_unasked(tmp_path: Path) -> None:
+    """Every deletion is stated first, and an unanswered prompt is not consent.
+
+    This is the one script that deletes measured data, so "nothing answered"
+    has to end it. Without a terminal there is nothing to answer with, which is
+    also what a purge run from a script looks like — hence `--yes`.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(PURGE, [RUN_ID], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
+    assert run.result.returncode != 0
+    assert "pass --yes to purge unattended" in run.result.stderr
+
+    assert str(FACTS["table"]) in run.result.stdout
+    assert TABLE_LOCATION in run.result.stdout
+    assert f"s3://a-bucket/runs/{RUN_ID}/" not in run.result.stdout, "the artifacts go only with --artifacts"
+
+    assert "s3 rm" not in run.aws_calls
+    assert (tmp_path / "drop-table.log").read_text() == ""
+
+
+@needs_shell_tools
+def test_purge_refuses_while_the_run_is_still_being_scored(tmp_path: Path) -> None:
+    """A scorer reading the table is what makes this a refusal rather than a race.
+
+    Deleting the table underneath it would not stop it — it would make it
+    report loss and corruption against a table it can no longer read, so the
+    run's last artifacts would be a lie about the engine.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", "--artifacts"],
+        tmp_path,
+        {**_purge_environment(tmp_path), "STUB_OBJECT_NAME": f"scorer-{RUN_OBJECT}"},
+        programs=PURGE_PROGRAMS,
+    )
+    assert run.result.returncode != 0
+    assert f"job/scorer-{RUN_OBJECT} is still in ingest-bench" in run.result.stderr
+    assert "s3 rm" not in run.aws_calls
+    assert (tmp_path / "drop-table.log").read_text() == ""
+
+
+@needs_shell_tools
+def test_purge_refuses_a_run_whose_location_it_was_never_told(tmp_path: Path) -> None:
+    """No copied document, no purge: the location is read, never guessed.
+
+    A prefix derived from the table's name is a prefix that may hold something
+    else, and `aws s3 rm --recursive` does not ask twice.
+    """
+    _torn_down_run(tmp_path, metadata=False)
+    run = _run_driver(PURGE, [RUN_ID, "--yes"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
+    assert run.result.returncode != 0
+    assert "run scripts/teardown.sh first" in run.result.stderr
+    assert "s3 rm" not in run.aws_calls
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("artifacts", [False, True])
+def test_purge_removes_the_table_then_its_files_then_the_artifacts(tmp_path: Path, artifacts: bool) -> None:
+    """The catalog entry first, then the prefixes, and the run's own only on request.
+
+    Dropping the table before its files means nothing can load a table whose
+    data is on its way out. The run's artifacts are a separate flag because
+    they are the record of what was measured, and a reclaimed table does not
+    make them worthless.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", *(["--artifacts"] if artifacts else [])],
+        tmp_path,
+        _purge_environment(tmp_path),
+        programs=PURGE_PROGRAMS,
+    )
+    assert run.result.returncode == 0, run.result.stderr
+
+    dropped = (tmp_path / "drop-table.log").read_text()
+    assert f"--table {FACTS['table']}" in dropped
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in dropped
+
+    removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
+    expected = [f"s3 rm --recursive {TABLE_LOCATION}"]
+    if artifacts:
+        expected.append(f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/")
+    assert removals == expected
