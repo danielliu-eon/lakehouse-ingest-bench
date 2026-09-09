@@ -413,10 +413,16 @@ k8s_write_engine_image() {
 		return 0
 	fi
 	[[ -n $digest ]] || log "no pod matching '$selector' reported an image digest, so $path records none"
-	jq -n --arg image "$image" --arg digest "$digest" \
-		'{image: $image, digest: (if $digest == "" then null else $digest end)}' >"$path" ||
-		die "could not write $path"
-	log "the engine ran $image (digest ${digest:-none reported})"
+	# Reported and not fatal, like every other absence here. This runs from
+	# staging, after the engine is RUNNING and before the run id is printed, so
+	# a refusal would cost the caller the id of a run that had already started —
+	# a fleet nothing could then address, over a provenance field.
+	if jq -n --arg image "$image" --arg digest "$digest" \
+		'{image: $image, digest: (if $digest == "" then null else $digest end)}' >"$path"; then
+		log "the engine ran $image (digest ${digest:-none reported})"
+	else
+		log "could not write $path, so this run records no engine image"
+	fi
 }
 
 k8s_deployment_tail() {

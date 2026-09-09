@@ -187,8 +187,14 @@ if [[ -n $PUBLISH_DIR ]]; then
 	# engine, the corpus and the variant: deriving it a second time here is how
 	# the two spellings come apart. The trailing separator is what says the path
 	# is a directory to be filled rather than a file to be written.
-	ENGINE="$(jq -r .run.engine "$RUN_DIR/run.json")" ||
-		die "could not read the engine out of $RUN_DIR/run.json"
+	#
+	# `// empty` and a refusal, not `jq -r` alone: a document without the field
+	# prints the string `null`, and the engine names the directory the result is
+	# filed under — so the absence would publish into `<dir>/null/` rather than
+	# say that the document is not one this can publish.
+	ENGINE="$(jq -r '.run.engine // empty' "$RUN_DIR/run.json")" ||
+		die "could not read $RUN_DIR/run.json; the line above is jq's own error"
+	[[ -n $ENGINE ]] || die "$RUN_DIR/run.json names no engine, so there is no results directory to file it under"
 	# Created before it is resolved, because an absolute path is taken by
 	# walking to the directory: publishing into somewhere that does not exist
 	# yet is a first result, not a mistake.

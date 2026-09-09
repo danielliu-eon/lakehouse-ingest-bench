@@ -820,7 +820,11 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 if [[ -z $out ]]; then
-	printf '{"run": {"engine": "flink"}}\\n' >"$run_dir/run.json"
+	if [[ -n ${STUB_COLLECT_NO_ENGINE:-} ]]; then
+		printf '{"run": {}}\\n' >"$run_dir/run.json"
+	else
+		printf '{"run": {"engine": "flink"}}\\n' >"$run_dir/run.json"
+	fi
 else
 	mkdir -p "${out%/}"
 	printf '{}\\n' >"${out%/}/a-published-result.json"
@@ -1336,11 +1340,13 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
 # Geometry, collection and reclamation
 # ---------------------------------------------------------------------------
 
-# Where the run's table put its files, as the copied metadata document states
-# it. Read rather than derived: a catalog places a table where it likes under
-# its warehouse, and a prefix guessed from the table's name is a prefix that may
-# belong to something else.
-TABLE_LOCATION = "s3://a-bucket/warehouse/ingest_bench/t_smoke_flink_20260908T120000Z-1a2b"
+# The site's warehouse root, as the filled example declares it, and where the
+# run's table put its files under it. A location is read from the copied
+# metadata document rather than derived, because a catalog places a table where
+# it likes under its warehouse; and it is checked against that root, because
+# every prefix at or above the root is other data.
+WAREHOUSE_ROOT = "s3://a-bucket/warehouse"
+TABLE_LOCATION = f"{WAREHOUSE_ROOT}/ingest_bench/t_smoke_flink_20260908T120000Z-1a2b"
 
 # A geometry document shaped like `file-sizes` writes one, with only the fields
 # the verdict's last line reads.
@@ -1359,7 +1365,9 @@ GEOMETRY_DOCUMENT = json.dumps(
 )
 
 
-def _torn_down_run(tmp_path: Path, *, run_valid: bool = True, metadata: bool = True) -> Path:
+def _torn_down_run(
+    tmp_path: Path, *, run_valid: bool = True, metadata: bool = True, location: str = TABLE_LOCATION
+) -> Path:
     """A run directory as `teardown.sh` leaves one, in the operator's working directory."""
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     (run_dir / "scores").mkdir(parents=True)
@@ -1383,7 +1391,7 @@ def _torn_down_run(tmp_path: Path, *, run_valid: bool = True, metadata: bool = T
         )
     )
     if metadata:
-        (run_dir / "table-metadata.final.json").write_text(json.dumps({"location": TABLE_LOCATION}))
+        (run_dir / "table-metadata.final.json").write_text(json.dumps({"location": location}))
     return run_dir
 
 
@@ -1533,6 +1541,28 @@ def test_finish_publishes_an_invalid_run_when_told_to_and_still_refuses_it(tmp_p
     # The table is generated from the published documents, never hand-edited.
     rendered = (tmp_path / "results-table.log").read_text()
     assert "/work/results --out /" in rendered and "/work/results/RESULTS.md" in rendered
+
+
+@needs_shell_tools
+def test_finish_refuses_to_publish_a_document_that_names_no_engine(tmp_path: Path) -> None:
+    """The engine names the directory the result is filed under.
+
+    `jq -r` prints the string `null` for a field a document does not carry, so
+    reading it without a refusal would file the result under `results/null/` —
+    a directory the results table would then render a row out of.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID, "--publish", "results"],
+        tmp_path,
+        {**_finish_environment(tmp_path), "STUB_COLLECT_NO_ENGINE": "1"},
+        programs=FINISH_PROGRAMS,
+    )
+    assert run.result.returncode != 0
+    assert "names no engine" in run.result.stderr
+    assert not (tmp_path / "work" / "results" / "null").exists()
+    assert len((tmp_path / "collect.log").read_text().splitlines()) == 1
 
 
 @needs_shell_tools
@@ -1740,6 +1770,42 @@ def test_purge_refuses_a_run_whose_location_it_was_never_told(tmp_path: Path) ->
     assert run.result.returncode != 0
     assert "run scripts/teardown.sh first" in run.result.stderr
     assert "s3 rm" not in run.aws_calls
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    "location",
+    [
+        # The bucket, which is the corpus and every run's artifacts as well.
+        "s3://a-bucket",
+        "s3://a-bucket/",
+        # The warehouse root, which is every table this site has ever held.
+        WAREHOUSE_ROOT,
+        f"{WAREHOUSE_ROOT}/",
+        # Another site's warehouse, and a sibling prefix whose name starts the
+        # same way — neither is under this site's root.
+        "s3://another-bucket/warehouse/ingest_bench/t_x",
+        "s3://a-bucket/warehouse-of-someone-else/t_x",
+    ],
+)
+def test_purge_refuses_a_location_that_is_not_one_table(tmp_path: Path, location: str) -> None:
+    """`aws s3 rm --recursive` takes a prefix and asks nothing.
+
+    A metadata document naming the bucket or the warehouse root passes every
+    check about the string being present, so the prefix itself has to be
+    checked against the site's warehouse: under it, and naming something below
+    it. Otherwise one malformed document removes the corpus, every other run's
+    artifacts, or every table the site holds.
+    """
+    _torn_down_run(tmp_path, location=location)
+    run = _run_driver(
+        PURGE, [RUN_ID, "--yes", "--artifacts"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS
+    )
+    assert run.result.returncode != 0
+    assert WAREHOUSE_ROOT in run.result.stderr, "the refusal names the root it was checked against"
+    assert "nothing is removed" in run.result.stderr
+    assert "s3 rm" not in run.aws_calls
+    assert (tmp_path / "drop-table.log").read_text() == ""
 
 
 @needs_shell_tools

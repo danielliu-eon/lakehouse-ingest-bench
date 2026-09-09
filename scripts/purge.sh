@@ -95,6 +95,21 @@ TABLE="$(jq -r .table "$FACTS")"
 LOCATION="$(jq -r '.location // empty' "$METADATA_FINAL")"
 [[ -n $LOCATION ]] || die "$METADATA_FINAL carries no location, so it does not say which prefix holds $TABLE's files"
 
+# A table's location has to look like one: under the site's warehouse root, and
+# naming something below it. `aws s3 rm --recursive` takes a prefix and asks
+# nothing, and every prefix at or above this one is other data — the warehouse
+# root is every table the site has ever held, and a bucket root is the corpus
+# and every run's artifacts besides. A document that named either would
+# otherwise pass the non-empty check above and be removed whole.
+WAREHOUSE="$(site_required '.warehouse')"
+WAREHOUSE="${WAREHOUSE%/}"
+[[ $LOCATION == "$WAREHOUSE"/* ]] ||
+	die "$METADATA_FINAL puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"
+# Every trailing separator, so neither the root itself nor the root with a
+# separator or two after it reads as a prefix of its own.
+[[ ${LOCATION#"$WAREHOUSE"/} == *[!/]* ]] ||
+	die "$METADATA_FINAL puts $TABLE at the warehouse root $WAREHOUSE itself, which holds every table this site has; nothing is removed"
+
 # ---------------------------------------------------------------------------
 # Refuse while the run is still being read
 # ---------------------------------------------------------------------------
