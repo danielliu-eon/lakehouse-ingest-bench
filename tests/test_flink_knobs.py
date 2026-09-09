@@ -119,6 +119,19 @@ def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.C
         knobs.validate(spec.engine_block, unreadable, meta)
 
 
+def test_every_encoding_the_spec_offers_states_its_format_and_its_options() -> None:
+    """Two tables over the encodings, and neither may be the shorter one.
+
+    The options belong to a format and not to "everything that is not the
+    other one": `avro.timestamp_mapping.legacy` is an `avro` key, and an
+    `avro-confluent` source given it fails validation on the cluster. So an
+    encoding added to the spec surface has to name its format and its options
+    rather than inheriting whichever branch happened to cover it.
+    """
+    assert set(knobs._SOURCE_FORMATS) == model.VALUE_ENCODINGS
+    assert set(knobs._FORMAT_OPTIONS) == model.VALUE_ENCODINGS
+
+
 def test_a_confluent_run_reads_the_registry_format(meta: metadata.CorpusMetadata) -> None:
     """`avro-confluent` against the site's registry, and the timestamp it plans.
 

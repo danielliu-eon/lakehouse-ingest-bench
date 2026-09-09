@@ -170,6 +170,15 @@ _SOURCE_FORMATS = {
 # `avro-confluent.*` key fails validation.
 _AVRO_OPTIONS: tuple[tuple[str, str], ...] = (("avro.timestamp_mapping.legacy", "false"),)
 
+# What each encoding's format takes beside its own name, keyed the way the
+# formats above are: an encoding states its own options rather than inheriting
+# whichever branch happened to cover it. `avro-confluent`'s remaining options
+# name the registry and are read off the site, so it declares none here.
+_FORMAT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    VALUE_ENCODING_AVRO: _AVRO_OPTIONS,
+    VALUE_ENCODING_CONFLUENT: (),
+}
+
 # `avro-confluent`'s registry options. It resolves each value's writer schema
 # by the id in that value's header, so the registry is not optional for it. The
 # credentials source has to be named beside the user info, or the format reads
@@ -388,6 +397,7 @@ def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> N
     cluster with a topic and a table already created.
     """
     knobs = read(block)
+    # For its refusal alone: the format it returns is rendered at submit time.
     _source_format(spec)
     if knobs.source_parallelism > spec.kafka.partitions:
         raise ValueError(
@@ -474,10 +484,15 @@ def _source_format(spec: RunSpec) -> str:
 
 
 def _format_options(spec: RunSpec, site: SiteConfig) -> list[tuple[str, str]]:
-    """The source's format, and whatever that format needs to decode a value."""
-    options = [("format", _source_format(spec))]
-    if spec.kafka.value_encoding != VALUE_ENCODING_CONFLUENT:
-        return [*options, *_AVRO_OPTIONS]
+    """The source's format, and whatever that format needs to decode a value.
+
+    The format is read first, so an encoding no format reads is refused there
+    rather than by the options lookup beside it.
+    """
+    encoding = spec.kafka.value_encoding
+    options: list[tuple[str, str]] = [("format", _source_format(spec)), *_FORMAT_OPTIONS[encoding]]
+    if encoding != VALUE_ENCODING_CONFLUENT:
+        return options
     registry = site.schema_registry
     if registry is None:
         raise ValueError(
