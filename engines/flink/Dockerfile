@@ -56,6 +56,12 @@ ADD https://repo1.maven.org/maven2/org/xerial/snappy/snappy-java/${SNAPPY_JAVA_V
 # and no secret anywhere.
 ADD https://repo1.maven.org/maven2/software/amazon/msk/aws-msk-iam-auth/${MSK_IAM_AUTH_VERSION}/aws-msk-iam-auth-${MSK_IAM_AUTH_VERSION}-all.jar .
 ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro/${FLINK_VERSION}/flink-sql-avro-${FLINK_VERSION}.jar .
+# The `avro-confluent` format, for a run offered in the Confluent wire format.
+# A separate jar from the one above rather than a replacement for it: each
+# carries one format factory, and which of the two a source resolves is decided
+# by the `format` its DDL names. This one bundles the registry client that
+# fetches a writer schema by the id in a record's header.
+ADD https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/${FLINK_VERSION}/flink-sql-avro-confluent-registry-${FLINK_VERSION}.jar .
 # Iceberg's Flink runtime resolves a table through Hadoop's `Configuration`
 # whichever FileIO then reads it, so Hadoop is needed even for object storage.
 #

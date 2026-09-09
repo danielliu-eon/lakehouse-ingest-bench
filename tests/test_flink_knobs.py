@@ -76,6 +76,53 @@ def test_render_sql_and_conf(meta: metadata.CorpusMetadata) -> None:
     assert set(files) == {"job.sql", "flink-conf.yaml", "flink.env"}
 
 
+REGISTRY = model.SchemaRegistryConfig(url="http://schema-registry:8080/apis/ccompat/v7", basic_auth_user_info=None)
+
+
+def test_a_confluent_run_reads_through_the_registry_format(meta: metadata.CorpusMetadata) -> None:
+    """The registry format, the site's registry, and the corpus schema as the reader's.
+
+    The reader schema is stated rather than derived from the DDL because the
+    registry format declares no timestamp-mapping option: a derived one is built
+    under the legacy mapping, which refuses the `TIMESTAMP(6)` column outright.
+    Stating the corpus's own document also makes reader and writer one schema.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    site = replace(_site(), schema_registry=REGISTRY)
+    d = derive.derive(spec, site, stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
+    sql = knobs.render_sql(spec, site, d, meta)
+    assert "'format' = 'avro-confluent'" in sql
+    assert f"'avro-confluent.url' = '{REGISTRY.url}'" in sql
+    assert f"'avro-confluent.schema' = '{meta.avro_schema_json()}'" in sql
+    # The plain format's options are the other encoding's, and neither is a
+    # key `avro-confluent` declares — an unknown format option fails planning.
+    assert "'format' = 'avro'," not in sql and "timestamp_mapping" not in sql
+    # Everything that is not the format is what a raw-Avro run renders.
+    assert "event_time TIMESTAMP(6) NOT NULL" in sql and "'scan.startup.mode' = 'earliest-offset'" in sql
+    assert "'topic' = 'smoke-flink-confluent-20260909T000000Z'" in sql
+    assert len(job.split_statements(sql)) == 3
+    # No basic auth on an open registry: `USER_INFO` with nothing to send is a
+    # credentials source the client would try to use.
+    assert "basic-auth" not in sql
+
+
+def test_a_registry_that_authenticates_is_named_by_reference(meta: metadata.CorpusMetadata) -> None:
+    """The credential reaches the job as the reference the site wrote, resolved at submission."""
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    site = replace(_site(), schema_registry=replace(REGISTRY, basic_auth_user_info="${env:IB_REGISTRY_AUTH}"))
+    d = derive.derive(spec, site, stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
+    sql = knobs.render_sql(spec, site, d, meta)
+    assert "'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'" in sql
+    assert "'avro-confluent.basic-auth.user-info' = '${env:IB_REGISTRY_AUTH}'" in sql
+
+
+def test_a_confluent_run_needs_a_site_that_names_a_registry(meta: metadata.CorpusMetadata) -> None:
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    d = derive.derive(spec, _site(), stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
+    with pytest.raises(ValueError, match="kafka.schema_registry"):
+        knobs.render_sql(spec, _site(), d, meta)
+
+
 def test_ddl_type_mapping() -> None:
     assert knobs.flink_ddl_type("timestamp") == "TIMESTAMP(6)" and knobs.flink_ddl_type("binary") == "BYTES"
     with pytest.raises(ValueError):
