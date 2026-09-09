@@ -18,25 +18,57 @@ from typing import cast
 import yaml
 
 from engines.flink.script import join_statements
+from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
+from ingest_bench.kafka_auth import REGION_KEY
 from ingest_bench.specs.derive import Derived
-from ingest_bench.specs.model import RunSpec, SiteConfig
+from ingest_bench.specs.model import KubernetesConfig, RunSpec, SiteConfig
 
 # The names inside the submitted script. Nothing outside the script refers to
 # either, so both are fixed rather than derived from the run.
 SOURCE_TABLE = "kafka_source"
 CATALOG_NAME = "ice"
 
-# The files `render` writes into the run directory.
+# The files `render` writes into the run directory. The last two are written
+# only for a run on a cluster, which is the one that has an operator to read
+# them.
 SQL_FILE = "job.sql"
 CONF_FILE = "flink-conf.yaml"
 ENV_FILE = "flink.env"
+FLINKDEPLOYMENT_FILE = "flinkdeployment.yaml"
+CONFIGMAP_FILE = "flink-job-configmap.yaml"
 
 NONE = "none"
 HASH = "hash"
 RANGE = "range"
 DISTRIBUTION_MODES = frozenset({NONE, HASH, RANGE})
+
+# The image the operator starts, under the registry the site names.
+_IMAGE_REPOSITORY = "lakehouse-ingest-bench/flink"
+
+# The Flink the image carries, in the two spellings the documents need: the
+# operator's version label, and the jar whose driver runs a Python job.
+_FLINK_VERSION_LABEL = "v1_20"
+_PYFLINK_JAR = "local:///opt/flink/opt/flink-python-1.20.1.jar"
+_PYTHON_DRIVER = "org.apache.flink.client.python.PythonDriver"
+_JOB_SCRIPT = "/opt/bench/engines/flink/job.py"
+
+# Where the run's rendered files are mounted, and the volume that carries
+# them. Under `/opt/bench` beside the submitter rather than at `/run`, which
+# is the container's own runtime directory.
+_RUN_MOUNT = "/opt/bench/run"
+_JOB_VOLUME = "job"
+
+# The operator's fixed name for the Flink container. A podTemplate container
+# under any other name is added to the pod as a sidecar instead of being
+# merged into the one that runs Flink, so this name is not ours to choose.
+_FLINK_CONTAINER = "flink-main-container"
+
+# PyFlink publishes no Linux aarch64 wheel in any release, so the image is
+# amd64 and a node that cannot run it is not a placement the site may pick.
+# Merged over the site's selector for that reason.
+_ARCH_PIN = {"kubernetes.io/arch": "amd64"}
 
 REST = "rest"
 
@@ -87,14 +119,37 @@ _DDL_TYPES = {
     "binary": "BYTES",
 }
 
+# Amazon MSK's IAM authentication, as the Java client spells it. The harness
+# signals it with librdkafka's `OAUTHBEARER` beside its own `aws.region`
+# pseudo-key, because librdkafka has no MSK mechanism and signs the token
+# itself; the Java client has one, under a name of its own, and the login
+# module below signs per connection from whatever credentials the pod holds.
+# So the signal is translated rather than passed through — and neither form
+# carries a credential, which is why an MSK site needs no secret in a file.
+_SASL_MECHANISM_KEY = "sasl.mechanism"
+_OAUTHBEARER = "OAUTHBEARER"
+_MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
+    ("security.protocol", "SASL_SSL"),
+    (_SASL_MECHANISM_KEY, "AWS_MSK_IAM"),
+    ("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;"),
+    ("sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler"),
+)
+
+# The keys the translation answers for: the four it renders, and the pseudo-key
+# that no Kafka client knows — the region reaches the signer as `AWS_REGION` in
+# the pod's environment instead. Carrying any of them from the site as well
+# would put the same option in the WITH clause twice.
+_MSK_IAM_REPLACED = frozenset({key for key, _ in _MSK_IAM_PROPS} | {REGION_KEY})
+
 # The one S3 property that pyiceberg and Iceberg's Java library spell
 # differently. Every other key in a property block is spelled the same, so
 # only the rename is listed and the rest are carried through untouched.
 _CATALOG_PROP_RENAMES = {"s3.region": "client.region"}
 
 # A REST catalog hands back a table's location but not the implementation that
-# reads it, so the warehouse's scheme selects one. Left unset, Iceberg falls
-# back to a Hadoop filesystem, which the bundled jars do not configure.
+# reads it, so the scheme of the site's warehouse selects one. Left unset,
+# Iceberg falls back to a Hadoop filesystem, which the bundled jars do not
+# configure.
 _FILE_IO_BY_SCHEME = {
     "s3://": "org.apache.iceberg.aws.s3.S3FileIO",
     "gs://": "org.apache.iceberg.gcp.gcs.GCSFileIO",
@@ -323,6 +378,25 @@ def _column_ddl(name: str, meta: CorpusMetadata) -> str:
     return f"  {name} {_DDL_TYPES[published]} NOT NULL"
 
 
+def _is_msk_iam(security: dict[str, str]) -> bool:
+    """Whether the site's Kafka properties are the harness's MSK IAM signal."""
+    return _SASL_MECHANISM_KEY in security and security[_SASL_MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
+
+
+def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
+    """The site's Kafka properties as source options, IAM translated.
+
+    A key outside the signal is carried through whatever the authentication is:
+    a TLS or a client setting is orthogonal to how the connection is
+    authenticated, and dropping it would silently undo something the site asked
+    for.
+    """
+    if not _is_msk_iam(security):
+        return [(f"properties.{key}", value) for key, value in security.items()]
+    carried = [(key, value) for key, value in security.items() if key not in _MSK_IAM_REPLACED]
+    return [(f"properties.{key}", value) for key, value in (*_MSK_IAM_PROPS, *carried)]
+
+
 def _source_ddl(site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
     columns = ",\n".join(_column_ddl(name, meta) for name in meta.field_names())
     options: list[tuple[str, str]] = [
@@ -336,7 +410,7 @@ def _source_ddl(site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str
         # asked to consume, and a latest-offset reader would skip that head
         # and be scored as having lost it.
         ("scan.startup.mode", "earliest-offset"),
-        *((f"properties.{key}", value) for key, value in site.kafka_security.items()),
+        *_kafka_options(site.kafka_security),
         ("format", "avro"),
         # Flink's legacy mapping sends SQL `TIMESTAMP` to Avro `timestamp-*`,
         # which it caps at millisecond precision, so a `TIMESTAMP(6)` column
@@ -373,18 +447,22 @@ def _catalog_ddl(site: SiteConfig) -> str:
             f"a Flink run reads its table through an Iceberg REST catalog, and site.catalog.props names catalog "
             f"type {props[_PYICEBERG_TYPE]!r}"
         )
-    warehouse = _required_prop(props, "warehouse")
     options: list[tuple[str, str]] = [
         ("type", "iceberg"),
         ("catalog-type", REST),
         ("uri", _required_prop(props, "uri")),
-        ("warehouse", warehouse),
+        # The catalog's own addressing, which is not always a location: a Glue
+        # REST endpoint takes the account that owns the catalog here.
+        ("warehouse", _required_prop(props, "warehouse")),
     ]
     # Sorted by the name the site wrote, so two runs of one site render
     # byte-identical catalog clauses and any diff between two scripts is a
     # difference in their knobs.
     options += [(_catalog_key(key), props[key]) for key in sorted(set(props) - _STATED_CATALOG_PROPS)]
-    file_io = _file_io_for(warehouse)
+    # The site's warehouse and not the catalog property of that name, which
+    # carries no scheme wherever the catalog addresses itself by something
+    # other than a location.
+    file_io = _file_io_for(site.warehouse)
     if file_io is not None:
         options.append(("io-impl", file_io))
     return f"CREATE CATALOG {CATALOG_NAME} WITH (\n{_with_clause(options)}\n)"
@@ -451,12 +529,135 @@ def render_conf(spec: RunSpec, derived: Derived) -> dict[str, str]:
     return conf
 
 
-def render(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> dict[str, str]:
-    """The engine's files for the run directory, keyed by filename."""
+def _conf_yaml(spec: RunSpec, derived: Derived) -> str:
+    """The settings as the submitter reads them, from a file or from a mount."""
+    return yaml.safe_dump(render_conf(spec, derived), sort_keys=True, default_flow_style=False)
+
+
+# ---------------------------------------------------------------------------
+# Rendering the Kubernetes documents
+# ---------------------------------------------------------------------------
+
+
+def _cluster(site: SiteConfig) -> KubernetesConfig:
+    if site.kubernetes is None:
+        raise ValueError("a Flink run on Kubernetes is placed by site.kubernetes, and the site declares no cluster")
+    return site.kubernetes
+
+
+def configmap_name(derived: Derived) -> str:
+    """The ConfigMap the run's rendered files are mounted from."""
+    return f"{derived.run_id}-flink-job"
+
+
+def render_flinkdeployment(
+    spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, image_tag: str
+) -> str:
+    """The FlinkDeployment one run is, as the operator takes it.
+
+    ``meta`` is unread — the corpus shapes the SQL and not the cluster — and
+    stays in the signature so both of a run's Kubernetes documents are
+    rendered from the same arguments.
+    """
     knobs = read(spec.engine_block)
-    return {
+    cluster = _cluster(site)
+    conf = {
+        # Under the run's own directory, so an abandoned run's state is found
+        # and removed by the name of the run that wrote it. First, because
+        # `extra_flink_conf` is applied last and a run that says where its
+        # checkpoints go means it.
+        "state.checkpoints.dir": uri.join(site.runs_root, derived.run_id, "checkpoints"),
+        **render_conf(spec, derived),
+    }
+    container: dict[str, object] = {
+        "name": _FLINK_CONTAINER,
+        "volumeMounts": [{"name": _JOB_VOLUME, "mountPath": _RUN_MOUNT, "readOnly": True}],
+    }
+    if cluster.aws_region is not None:
+        # What an AWS SDK reads when nothing else names a region for it, which
+        # is the case for both halves of an MSK IAM connection: the token
+        # signer in the Kafka client, and S3 under the table's FileIO.
+        container["env"] = [{"name": "AWS_REGION", "value": cluster.aws_region}]
+    pod_spec: dict[str, object] = {
+        "nodeSelector": {**cluster.node_selector, **_ARCH_PIN},
+        "tolerations": cluster.tolerations,
+        "volumes": [{"name": _JOB_VOLUME, "configMap": {"name": configmap_name(derived)}}],
+        "containers": [container],
+    }
+    document: dict[str, object] = {
+        "apiVersion": "flink.apache.org/v1beta1",
+        "kind": "FlinkDeployment",
+        # A run id is already a DNS label, so it names the object as it stands.
+        "metadata": {"name": derived.run_id, "namespace": cluster.namespace},
+        "spec": {
+            "image": f"{cluster.registry}/{_IMAGE_REPOSITORY}:{image_tag}",
+            "flinkVersion": _FLINK_VERSION_LABEL,
+            # Standalone and not the operator's native mode: native asks
+            # Kubernetes for the taskmanagers the job's parallelism implies,
+            # which would make `taskmanagers` a number nobody honoured.
+            "mode": "standalone",
+            "serviceAccount": cluster.flink_service_account,
+            "flinkConfiguration": conf,
+            "jobManager": {"resource": {"memory": f"{knobs.jm_mem_mb}m", "cpu": knobs.jm_cpu}},
+            "taskManager": {
+                "resource": {"memory": f"{knobs.tm_mem_mb}m", "cpu": knobs.tm_cpu},
+                "replicas": knobs.taskmanagers,
+            },
+            "job": {
+                # PyFlink's own jar and driver: the job is the script the args
+                # name, so a run builds no jar of its own.
+                "jarURI": _PYFLINK_JAR,
+                "entryClass": _PYTHON_DRIVER,
+                "args": [
+                    "-py",
+                    _JOB_SCRIPT,
+                    "--sql",
+                    f"{_RUN_MOUNT}/{SQL_FILE}",
+                    "--conf",
+                    f"{_RUN_MOUNT}/{CONF_FILE}",
+                ],
+                "parallelism": knobs.parallelism_default(),
+                # A run is scored once and never resumed, so there is no state
+                # to carry across an edit of this object.
+                "upgradeMode": "stateless",
+                "state": "running",
+            },
+            "podTemplate": {"apiVersion": "v1", "kind": "Pod", "spec": pod_spec},
+        },
+    }
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+def render_job_configmap(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
+    """The ConfigMap holding the two files the submitter reads off its mount."""
+    cluster = _cluster(site)
+    document = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": configmap_name(derived), "namespace": cluster.namespace},
+        "data": {SQL_FILE: render_sql(spec, site, derived, meta), CONF_FILE: _conf_yaml(spec, derived)},
+    }
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
+# The run directory
+# ---------------------------------------------------------------------------
+
+
+def render(
+    spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, *, image_tag: str | None = None
+) -> dict[str, str]:
+    """The engine's files for the run directory, keyed by filename.
+
+    A site with a cluster gets the two Kubernetes documents as well, and needs
+    the tag of the image they start. A site without one is the local stack,
+    which builds its own image and submits the job itself.
+    """
+    knobs = read(spec.engine_block)
+    files = {
         SQL_FILE: render_sql(spec, site, derived, meta),
-        CONF_FILE: yaml.safe_dump(render_conf(spec, derived), sort_keys=True, default_flow_style=False),
+        CONF_FILE: _conf_yaml(spec, derived),
         # The cluster's shape is not a job setting: the stack starts the
         # taskmanagers and sizes the containers before a job is submitted, so
         # it reads these as environment instead.
@@ -467,3 +668,10 @@ def render(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetada
             f"JM_MEM_MB={knobs.jm_mem_mb}\n"
         ),
     }
+    if site.kubernetes is None:
+        return files
+    if image_tag is None:
+        raise ValueError("a run on a cluster starts an image, so render needs image_tag: the tag that was pushed")
+    files[FLINKDEPLOYMENT_FILE] = render_flinkdeployment(spec, site, derived, meta, image_tag)
+    files[CONFIGMAP_FILE] = render_job_configmap(spec, site, derived, meta)
+    return files

@@ -50,6 +50,24 @@ decompress it.
 The `flink` profile starts the cluster; `flink-job` submits one run detached,
 mounting `$RUN_DIR` — set it to the staged run directory, or the mount fails.
 
+## On Kubernetes
+
+A site that declares a `kubernetes` block gets two more rendered files, and
+`render` then needs the tag of the image that was pushed:
+
+| File | What it is |
+|---|---|
+| `flinkdeployment.yaml` | one `FlinkDeployment` per run, named by the run id |
+| `flink-job-configmap.yaml` | `job.sql` and `flink-conf.yaml`, mounted at `/opt/bench/run` |
+
+`mode: standalone`, so the operator starts the `taskmanagers` the knobs ask
+for; native mode would size the fleet from the job's parallelism instead and
+leave that knob unhonoured. The pod is pinned to `kubernetes.io/arch: amd64`
+over whatever the site's `node_selector` says, because the image has no
+aarch64 PyFlink to run. `AWS_REGION` is set on the container only where the
+site names an `aws_region`, and it is what the MSK token signer and S3 read
+when nothing else names a region for them.
+
 ## Knobs
 
 | Knob | Default | Effect |
@@ -129,4 +147,12 @@ unchanged bar one, and `type` is translated rather than passed on:
 | `type` (`rest`, or absent) | `'type' = 'iceberg'`, `'catalog-type' = 'rest'` |
 | `s3.region` | `client.region` |
 | `s3.{endpoint,access-key-id,secret-access-key,path-style-access}` | unchanged |
-| warehouse on `s3://` / `gs://` | adds the matching `'io-impl'` |
+| `site.warehouse` on `s3://` / `gs://` | adds the matching `'io-impl'`. The catalog's own `warehouse` is not always a location — a Glue REST endpoint takes the account id there — so the scheme is read off the site's warehouse instead |
+
+`site.kafka.security` reaches the source as `properties.*` verbatim, with
+one translation. `sasl.mechanism: OAUTHBEARER` beside the harness's own
+`aws.region` is its MSK IAM signal, and the Java client spells that
+authentication `AWS_MSK_IAM` with the `IAMLoginModule` and its callback
+handler — so those four properties are rendered and the pseudo-key is not.
+Every other key still passes through. Neither form carries a credential:
+the module signs a token from whatever the pod's own identity is.
