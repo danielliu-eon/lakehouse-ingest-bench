@@ -16,6 +16,9 @@ otherwise as a denial minutes into a run on a live cluster.
 
 from __future__ import annotations
 
+import ast
+import importlib
+import inspect
 import json
 import os
 import re
@@ -518,6 +521,44 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
         node_selector={},
         tolerations=[],
     )
+
+
+def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:
+    """An inline `python -c` is a call site neither mypy nor a test would see.
+
+    `measure-producer.sh` reaches into `kafka_admin` directly, so when those
+    functions gained the client properties every call takes, that script kept
+    passing the old arity — and nothing short of running it could say so. Every
+    call whose arguments are literals is bound against the real signature here.
+    """
+    checked = 0
+    for script in _shell_entrypoints():
+        for snippet in re.findall(r"python -c '(.*?)'", script.read_text()):
+            program = ast.parse(snippet.replace('\\"', '"'))
+            modules = {
+                alias.asname or alias.name: importlib.import_module(f"ingest_bench.{alias.name}")
+                for node in ast.walk(program)
+                if isinstance(node, ast.ImportFrom) and node.module == "ingest_bench"
+                for alias in node.names
+            }
+            for call in ast.walk(program):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                target = call.func.value
+                if not isinstance(target, ast.Name) or target.id not in modules:
+                    continue
+                try:
+                    args = [ast.literal_eval(argument) for argument in call.args]
+                    kwargs = {str(word.arg): ast.literal_eval(word.value) for word in call.keywords}
+                except ValueError:
+                    # An argument computed rather than written down; its own
+                    # call is checked on its own turn through this loop.
+                    continue
+                function = getattr(modules[target.id], call.func.attr)
+                signature = inspect.signature(function)
+                signature.bind(*args, **kwargs)  # raises TypeError on an argument it does not take
+                checked += 1
+    assert checked >= 2, f"expected to find harness calls in the shell to check, bound {checked}"
 
 
 def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:

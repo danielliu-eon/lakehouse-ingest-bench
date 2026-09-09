@@ -54,7 +54,7 @@ log "corpus $CORPUS_URI: $ROW_COUNT rows, $ENCODED_BYTES encoded bytes"
 # A topic that already exists holds records from an earlier attempt at this
 # same measurement; drop it first rather than append to it silently.
 log "creating the measure topic (8 partitions)"
-harness "python -c 'from ingest_bench import kafka_admin as k; k.delete_topic(\"kafka:9092\", \"measure\"); k.create_topic(\"kafka:9092\", \"measure\", 8, 1, {})'"
+harness "python -c 'from ingest_bench import kafka_admin as k; k.delete_topic(\"kafka:9092\", \"measure\", client={}); k.create_topic(\"kafka:9092\", \"measure\", 8, 1, topic_config={}, client={})'"
 
 EPOCH=$(($(date +%s) - 3600))
 log "producing $CORPUS_URI into measure (epoch $EPOCH, speed 1000)"
