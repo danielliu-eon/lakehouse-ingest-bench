@@ -78,6 +78,22 @@ def _iam_documents() -> list[Path]:
     return sorted((AWS_DEPLOY / "iam").glob("*.json"))
 
 
+# The first and last lines of the Kafka-version choice in `setup.sh`, so the
+# block can be lifted out and run on its own. Anchors rather than a copy: a
+# copy would keep passing after the script's own version of it broke.
+_VERSION_CHOICE_FIRST = 'MSK_KAFKA_VERSION="$(tr '
+_VERSION_CHOICE_LAST = "set MSK_KAFKA_VERSION yourself"
+
+
+def _version_choice_block() -> str:
+    lines = AWS_SETUP.read_text().splitlines()
+    starts = [index for index, line in enumerate(lines) if _VERSION_CHOICE_FIRST in line]
+    ends = [index for index, line in enumerate(lines) if _VERSION_CHOICE_LAST in line]
+    assert len(starts) == 1 and len(ends) == 1, "setup.sh no longer holds one Kafka-version choice to lift out"
+    assert starts[0] < ends[0]
+    return "\n".join(lines[starts[0] : ends[0] + 1])
+
+
 def _mapping(value: object) -> dict[str, object]:
     """``value`` as a mapping, for reading parsed YAML and JSON under strict typing."""
     assert isinstance(value, dict), f"expected a mapping, got {type(value).__name__}"
@@ -183,6 +199,46 @@ def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
     refused = subprocess.run([str(AWS_TEARDOWN), "--everything"], capture_output=True, text=True, env=environment)
     assert refused.returncode == 2, refused.stdout
     assert "unknown argument --everything" in refused.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "offered, chosen",
+    [
+        # The newest plain 3.x wins, and 10 is newer than 6 rather than sorting
+        # before it. A `.tiered` variant is a different storage mode, so it is
+        # not what an unset knob should pick even though it sorts higher.
+        ("3.6.0\t3.10.0\t3.6.0.tiered\t2.8.1", "3.10.0"),
+        ("3.6.0", "3.6.0"),
+        # No plain 3.x at all: the script must reach its own refusal.
+        ("2.8.1\t4.0.0", None),
+        ("", None),
+    ],
+)
+def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str | None) -> None:
+    """Run `setup.sh`'s own version-selection lines against a fixed answer from MSK.
+
+    The whole path is unreachable from the guard tests — it sits behind a live
+    account — so the block is lifted out of the script and run on its own. It is
+    worth running rather than reading because the filter is a pipeline inside an
+    assignment: under `pipefail` an unguarded one aborts the script the moment
+    `grep` matches nothing, which silently skipped the refusal below it.
+    """
+    harness = f"""
+        set -euo pipefail
+        log() {{ printf 'log %s\\n' "$*"; }}
+        die() {{ printf 'die %s\\n' "$*"; exit 3; }}
+        KAFKA_VERSIONS="{offered}"
+{_version_choice_block()}
+        printf 'chose %s\\n' "$MSK_KAFKA_VERSION"
+    """
+    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    if chosen is None:
+        assert out.returncode == 3, f"expected the refusal, got {out.returncode}: {out.stdout}{out.stderr}"
+        assert "die no ACTIVE 3.x Kafka version" in out.stdout, out.stdout + out.stderr
+    else:
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert f"chose {chosen}" in out.stdout, out.stdout + out.stderr
 
 
 def test_the_setup_script_renders_only_the_placeholders_it_exports() -> None:
@@ -309,15 +365,24 @@ def test_the_namespace_manifest_renders_both_identities_and_the_flink_rbac() -> 
 
     # The JobManager creates its own TaskManager pods and the ConfigMaps that
     # configure them, so these are the resources a FlinkDeployment cannot start
-    # without.
+    # without. The verbs are enumerated rather than `*`, so a Role that widens
+    # to a wildcard is a failure and not a silent grant of everything the API
+    # group ever gains.
     role = by_kind["Role"][0]
     granted: set[tuple[str, str]] = set()
     for entry in _sequence(role["rules"]):
         rule = _mapping(entry)
+        verbs = {str(verb) for verb in _sequence(rule["verbs"])}
+        assert verbs == {"get", "list", "watch", "create", "update", "patch", "delete"}, verbs
         for group in _sequence(rule["apiGroups"]):
             for resource in _sequence(rule["resources"]):
                 granted.add((str(group), str(resource)))
-    assert {("", "pods"), ("", "configmaps"), ("apps", "deployments")} <= granted
+    assert granted == {
+        ("", "pods"),
+        ("", "configmaps"),
+        ("apps", "deployments"),
+        ("apps", "deployments/finalizers"),
+    }
 
     binding = by_kind["RoleBinding"][0]
     assert _mapping(binding["roleRef"])["name"] == _mapping(role["metadata"])["name"]
