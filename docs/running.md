@@ -86,11 +86,11 @@ stack, one broker, therefore gets 1.
 
 The harness implements no authentication.
 
-**Kafka.** `site.kafka.security` is handed to every Kafka client — the admin
-client that creates the topic, and each producer shard — verbatim, as librdkafka
-properties; `produce --kafka-prop key=value` adds the same properties to one
-shard, over the producer's own defaults. A cluster this repository has never
-heard of is therefore reachable by configuration alone.
+**Kafka.** `site.kafka.security` reaches the admin client that creates the topic
+verbatim, as librdkafka properties. A producer shard reads no site config, so a
+driver carries the same properties to it with `produce --kafka-prop key=value`,
+applied over the producer's own defaults. Nothing about SASL, mTLS or a
+proprietary broker is implemented here; configuration is the whole interface.
 
 **Object storage and catalogs.** The cloud SDK's default credential chain: pod
 identity or an instance role in a cluster, an ambient profile on a laptop. Static
