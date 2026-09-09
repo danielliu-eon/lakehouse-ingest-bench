@@ -408,6 +408,32 @@ def test_a_run_can_still_redirect_its_checkpoints(meta: metadata.CorpusMetadata)
     assert document["spec"]["flinkConfiguration"]["state.checkpoints.dir"] == "s3://bench-bucket/checkpoints"
 
 
+def test_the_crd_fields_follow_the_effective_conf(meta: metadata.CorpusMetadata) -> None:
+    """A setting the operator restates as a CRD field is read back out of the conf.
+
+    The operator applies `job.parallelism` and the two `resource.memory`
+    fields over `spec.flinkConfiguration`, so a run whose `extra_flink_conf`
+    moved one of them would be honoured by the job it submitted and overruled
+    by the cluster running it.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    override = {
+        "parallelism.default": "3",
+        "jobmanager.memory.process.size": "3072m",
+        "taskmanager.memory.process.size": "6144m",
+    }
+    spec = replace(spec, engine_block={**spec.engine_block, "extra_flink_conf": override})
+    site = _aws_site()
+    d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    deployment = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))["spec"]
+    assert deployment["job"]["parallelism"] == 3
+    assert deployment["jobManager"]["resource"] == {"memory": "3072m", "cpu": 1.0}
+    assert deployment["taskManager"]["resource"] == {"memory": "6144m", "cpu": 2.0}
+    # The operator restates neither of these, so they stay the knobs' to set.
+    assert deployment["taskManager"]["replicas"] == 2
+    assert deployment["flinkConfiguration"]["taskmanager.numberOfTaskSlots"] == "4"
+
+
 def test_render_job_configmap(meta: metadata.CorpusMetadata) -> None:
     """The two rendered files, as the pod reads them off a mount."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")

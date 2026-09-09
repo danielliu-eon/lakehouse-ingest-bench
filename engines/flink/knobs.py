@@ -598,9 +598,16 @@ def render_flinkdeployment(
             "mode": "standalone",
             "serviceAccount": cluster.flink_service_account,
             "flinkConfiguration": conf,
-            "jobManager": {"resource": {"memory": f"{knobs.jm_mem_mb}m", "cpu": knobs.jm_cpu}},
+            # The three fields below are read back out of the effective conf
+            # rather than off the knobs, because the operator applies a CRD
+            # field over `spec.flinkConfiguration`: a run that overrode one of
+            # these through `extra_flink_conf` would otherwise be honoured by
+            # the job it submitted and discarded by the cluster running it.
+            # `replicas` and the slot count are not restated in the conf, and
+            # `cpu` has no conf key at all, so those stay knobs.
+            "jobManager": {"resource": {"memory": conf["jobmanager.memory.process.size"], "cpu": knobs.jm_cpu}},
             "taskManager": {
-                "resource": {"memory": f"{knobs.tm_mem_mb}m", "cpu": knobs.tm_cpu},
+                "resource": {"memory": conf["taskmanager.memory.process.size"], "cpu": knobs.tm_cpu},
                 "replicas": knobs.taskmanagers,
             },
             "job": {
@@ -616,7 +623,7 @@ def render_flinkdeployment(
                     "--conf",
                     f"{_RUN_MOUNT}/{CONF_FILE}",
                 ],
-                "parallelism": knobs.parallelism_default(),
+                "parallelism": int(conf["parallelism.default"]),
                 # A run is scored once and never resumed, so there is no state
                 # to carry across an edit of this object.
                 "upgradeMode": "stateless",
