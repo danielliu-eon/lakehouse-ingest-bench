@@ -194,3 +194,6 @@ points for the smoke corpus.
 `gate --out runs/<run_id>/scores` answers `PASS`, `UNDERSIZED` or `VOID` from the
 same artifacts while a run is still going, which a sweep uses to abandon an
 undersized fleet early.
+
+One recorded run of the smoke, with the two artifacts behind its verdict, is in
+[`examples/smoke-flink/`](examples/smoke-flink/).
