@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import fsspec
 import pytest
 
 from ingest_bench import uri
@@ -58,3 +59,62 @@ def test_read_bytes_reads_the_whole_object_rather_than_a_buffered_file(
 
     monkeypatch.setattr(uri, "filesystem_for", lambda _: (Republished(), "runs/r/publish_log-0.jsonl"))
     assert uri.read_bytes("s3://runs/r/publish_log-0.jsonl") == b"fresh"
+
+
+def _recording_filesystem(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Patches ``fsspec.filesystem`` and returns the kwargs the next s3 call passes."""
+    calls: dict[str, object] = {}
+
+    def fake_filesystem(protocol: str, **kwargs: object) -> object:
+        calls["protocol"] = protocol
+        calls.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(fsspec, "filesystem", fake_filesystem)
+    return calls
+
+
+def test_s3_filesystem_passes_aws_region_as_client_kwarg(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    calls = _recording_filesystem(monkeypatch)
+    uri.filesystem_for("s3://bucket/corpus")
+    assert calls["client_kwargs"] == {"region_name": "eu-west-1"}
+    assert calls["use_listings_cache"] is False
+
+
+def test_s3_filesystem_falls_back_to_aws_default_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-south-1")
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    calls = _recording_filesystem(monkeypatch)
+    uri.filesystem_for("s3://bucket/corpus")
+    assert calls["client_kwargs"] == {"region_name": "ap-south-1"}
+
+
+def test_s3_filesystem_prefers_aws_region_over_aws_default_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-2")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    calls = _recording_filesystem(monkeypatch)
+    uri.filesystem_for("s3://bucket/corpus")
+    assert calls["client_kwargs"] == {"region_name": "us-east-2"}
+
+
+def test_s3_filesystem_omits_region_when_neither_env_var_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    calls = _recording_filesystem(monkeypatch)
+    uri.filesystem_for("s3://bucket/corpus")
+    assert "client_kwargs" not in calls
+    assert calls["use_listings_cache"] is False
+
+
+def test_s3_filesystem_combines_endpoint_and_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "us-east-2")
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://minio:9000")
+    calls = _recording_filesystem(monkeypatch)
+    uri.filesystem_for("s3://bucket/corpus")
+    assert calls["client_kwargs"] == {"endpoint_url": "http://minio:9000", "region_name": "us-east-2"}

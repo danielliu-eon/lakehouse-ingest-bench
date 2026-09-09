@@ -43,8 +43,19 @@ def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
         # leaving the offer looking as though it never ended.
         kwargs: dict[str, object] = {"use_listings_cache": False}
         endpoint = os.environ.get("AWS_ENDPOINT_URL")
-        if endpoint:
-            kwargs["client_kwargs"] = {"endpoint_url": endpoint}
+        # botocore resolves the region from AWS_DEFAULT_REGION only, while the
+        # rest of the AWS tooling (CLI, Java SDK, this harness's own pod
+        # templates) speaks AWS_REGION. Left unset, s3fs signs for us-east-1
+        # against the global endpoint, and a bucket that lives elsewhere
+        # rejects the redirected request as unsigned.
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if endpoint or region:
+            client_kwargs: dict[str, str] = {}
+            if endpoint:
+                client_kwargs["endpoint_url"] = endpoint
+            if region:
+                client_kwargs["region_name"] = region
+            kwargs["client_kwargs"] = client_kwargs
         return fsspec.filesystem("s3", **kwargs), uri[len("s3://") :]
     if uri.startswith("gs://"):
         return fsspec.filesystem("gcs"), uri[len("gs://") :]
