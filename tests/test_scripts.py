@@ -318,6 +318,22 @@ def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str 
         assert f"chose {chosen}" in out.stdout, out.stdout + out.stderr
 
 
+def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:
+    """`downloads.apache.org` carries only the current releases, so a pin 404s there.
+
+    That is not a failure a pinned version can avoid by being new: it becomes
+    one the day the next release lands, and `setup.sh` then refuses a cluster it
+    was working on the day before. `archive.apache.org` keeps every release,
+    current ones included. The version has to reach the URL from the variable
+    too — a second one written into the URL would install a chart the log names
+    wrongly.
+    """
+    setup = AWS_SETUP.read_text()
+    urls = re.findall(r'"(https://\S*flink-kubernetes-operator\S*)"', setup)
+    assert urls == ["https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/"], urls
+    assert 'FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-' in setup, "the pin should be overridable"
+
+
 def test_the_setup_script_renders_only_the_placeholders_it_exports() -> None:
     """The envsubst argument in `setup.sh` and the documents' variables are one list.
 

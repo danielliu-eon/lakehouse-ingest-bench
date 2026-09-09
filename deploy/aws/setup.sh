@@ -48,7 +48,8 @@ MSK_IAM_PORT=9098
 
 # Pinned rather than tracked: the operator's CRD version and the FlinkDeployment
 # fields the harness renders have to agree, and `latest` would move under a run.
-FLINK_OPERATOR_VERSION=1.10.0
+# 1.15's CRD still lists `flinkVersion: v1_20`, which is what the engine renders.
+FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-1.15.0}"
 FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
 FLINK_OPERATOR_NAMESPACE=flink-operator
 
@@ -121,8 +122,11 @@ if kubectl --context "$KUBE_CONTEXT" get crd flinkdeployments.flink.apache.org >
 	log "the flinkdeployments CRD is present"
 else
 	log "installing the Flink Kubernetes Operator $FLINK_OPERATOR_VERSION"
+	# archive.apache.org, not downloads.apache.org: the download mirror serves
+	# only the current releases, so the moment a pinned version stops being one
+	# its chart 404s. The archive keeps every release, current ones included.
 	helm repo add flink-operator-repo \
-		"https://downloads.apache.org/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/" --force-update
+		"https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/" --force-update
 	# webhook.create=false: the chart's validating webhook needs cert-manager,
 	# which is a second operator to install and keep alive for validation the
 	# harness does not depend on.

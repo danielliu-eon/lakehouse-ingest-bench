@@ -34,6 +34,7 @@ this repository names an account, a region, a cluster or a bucket.
 | `MSK_BROKER_TYPE` | `kafka.m5.large` | Broker instance type |
 | `MSK_BROKERS` | `2` | Broker count. One broker per availability zone, so the VPC needs a private subnet in this many zones |
 | `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version, printed either way |
+| `FLINK_OPERATOR_VERSION` | `1.15.0` | The operator chart installed when the CRD is absent, from `archive.apache.org` — it keeps every release, where the download mirror serves only current ones |
 | `NAMESPACE` | `ingest-bench` | The Kubernetes namespace the harness Jobs and the Flink deployments run in |
 | `MSK_ACTIVE_WAIT_S` | `3600` | How long `setup.sh` waits for MSK to reach `ACTIVE` |
 | `MSK_DELETED_WAIT_S` | `1800` | How long `teardown.sh` waits for MSK to disappear before deleting its security group |
@@ -48,20 +49,19 @@ deploy/aws/setup.sh
 Preflight first, and each refusal names its fix: the caller's identity, the
 cluster, `kubectl` reaching it, an amd64 node, the `eks-pod-identity-agent`
 add-on (installed and waited for if absent) and the
-`flinkdeployments.flink.apache.org` CRD (the Flink Kubernetes Operator 1.10.0 is
-installed with `webhook.create=false` if absent, so no cert-manager is needed).
-The operator's chart version is printed either way. Then:
+`flinkdeployments.flink.apache.org` CRD (the operator is installed with
+`webhook.create=false` if absent, so no cert-manager is needed, and its chart
+version is printed either way). Then:
 
 - **S3** — the bucket, with public access blocked, versioning left off and the
   `lakehouse-ingest-bench` tag.
 - **ECR** — `lakehouse-ingest-bench/harness` and `lakehouse-ingest-bench/flink`.
-- **MSK** — a provisioned cluster with IAM as its only client authentication and
-  no unauthenticated listener, TLS in transit, 100 GiB per broker, and brokers
-  in the EKS cluster's own private subnets, one per availability zone. Its
-  security group opens 9098 to every CIDR the VPC has: IAM decides who may
-  connect, the group only scopes the network, and a CIDR rule reaches managed
-  nodes, self-managed nodes and autoscaler-provisioned nodes alike where a rule
-  naming the cluster's security group reaches only the nodes carrying it.
+- **MSK** — a provisioned cluster, IAM its only client authentication and no
+  unauthenticated listener, TLS in transit, 100 GiB per broker, brokers in the
+  EKS cluster's own private subnets one per availability zone. Its security
+  group opens 9098 to every CIDR the VPC has: IAM decides who may connect, the
+  group only scopes the network, and a CIDR rule reaches every node in the VPC
+  where one naming the cluster's own group reaches only those carrying it.
 - **IAM** — one role, `lakehouse-ingest-bench-harness`, trusted by
   `pods.eks.amazonaws.com` for `sts:AssumeRole` and `sts:TagSession`, with an
   inline policy over the bucket's three prefixes, the `ingest_bench` Glue
@@ -71,17 +71,16 @@ The operator's chart version is printed either way. Then:
   `ingest-bench-flink` ServiceAccounts, and the Role and RoleBinding the
   JobManager needs to raise its own TaskManagers.
 
-It ends by printing the values to fill into `site.yaml` — copy
-`site.aws.example.yaml` — including the IAM bootstrap string.
+It ends by printing the values to fill into `site.yaml` (copy
+`site.aws.example.yaml`), the IAM bootstrap string among them.
 
 With it filled in, `scripts/push-images.sh` builds and pushes both images, and
 `scripts/gen-corpus.sh <preset>` builds a corpus into the bucket as a Job.
 
 > **MSK bills by the hour whether or not a run is using it,** and reaching
 > `ACTIVE` takes 15 to 30 minutes. Two `kafka.m5.large` brokers with 100 GiB
-> each are a few dollars a day. Tear the cluster down between campaigns rather
-> than leaving it up; `setup.sh` recreates it, and a re-run against an existing
-> one changes nothing.
+> each are a few dollars a day. Tear it down between campaigns; `setup.sh`
+> recreates it, and a re-run against an existing cluster changes nothing.
 
 ## `teardown.sh`
 
@@ -103,15 +102,14 @@ is a property of the cluster rather than of this benchmark.
 Two conventions, on purpose. Files here — the IAM documents under `iam/` and
 `k8s/namespace.yaml.tmpl` — use `${NAME}` and are rendered by these bash scripts
 with `envsubst`. The Kubernetes templates the harness renders in Python use
-`__NAME__` markers instead, so a manifest carrying shell or Helm syntax of its
-own is never touched by the wrong renderer.
+`__NAME__` instead, so a manifest carrying shell or Helm syntax of its own is
+never touched by the wrong renderer.
 
 ## If you have no cluster
 
 `eksctl-cluster.example.yaml` creates a minimal one: three `m6i.xlarge` amd64
 nodes in private subnets, the Pod Identity agent, and its own VPC across three
-availability zones — which is also where `setup.sh` puts the MSK brokers.
-Replace `YOUR_CLUSTER_NAME` and `YOUR_REGION` first.
+zones, where `setup.sh` also puts the MSK brokers. Replace both placeholders.
 
 ```bash
 eksctl create cluster -f deploy/aws/eksctl-cluster.example.yaml   # about 20 minutes
