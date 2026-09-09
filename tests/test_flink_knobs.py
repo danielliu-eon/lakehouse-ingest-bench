@@ -76,51 +76,41 @@ def test_render_sql_and_conf(meta: metadata.CorpusMetadata) -> None:
     assert set(files) == {"job.sql", "flink-conf.yaml", "flink.env"}
 
 
-REGISTRY = model.SchemaRegistryConfig(url="http://schema-registry:8080/apis/ccompat/v7", basic_auth_user_info=None)
+def _confluent(spec: model.RunSpec) -> model.RunSpec:
+    return replace(spec, kafka=replace(spec.kafka, value_encoding="confluent"))
 
 
-def test_a_confluent_run_reads_through_the_registry_format(meta: metadata.CorpusMetadata) -> None:
-    """The registry format, the site's registry, and the corpus schema as the reader's.
+def test_a_confluent_run_is_refused_with_the_reason_it_cannot_be_read(meta: metadata.CorpusMetadata) -> None:
+    """Flink reads raw Avro only, and the refusal names both halves of why.
 
-    The reader schema is stated rather than derived from the DDL because the
-    registry format declares no timestamp-mapping option: a derived one is built
-    under the legacy mapping, which refuses the `TIMESTAMP(6)` column outright.
-    Stating the corpus's own document also makes reader and writer one schema.
+    Its `avro-confluent` format derives a reader schema from the DDL even when
+    told one, under a timestamp mapping that caps SQL TIMESTAMP at
+    milliseconds, so the corpus's TIMESTAMP(6) column cannot be planned. And
+    the way round it — reading the column as BIGINT and rebuilding the
+    timestamp — has only millisecond precision to rebuild it from, so the run
+    would commit event times the corpus never published.
     """
-    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
-    site = replace(_site(), schema_registry=REGISTRY)
-    d = derive.derive(spec, site, stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
-    sql = knobs.render_sql(spec, site, d, meta)
-    assert "'format' = 'avro-confluent'" in sql
-    assert f"'avro-confluent.url' = '{REGISTRY.url}'" in sql
-    assert f"'avro-confluent.schema' = '{meta.avro_schema_json()}'" in sql
-    # The plain format's options are the other encoding's, and neither is a
-    # key `avro-confluent` declares — an unknown format option fails planning.
-    assert "'format' = 'avro'," not in sql and "timestamp_mapping" not in sql
-    # Everything that is not the format is what a raw-Avro run renders.
-    assert "event_time TIMESTAMP(6) NOT NULL" in sql and "'scan.startup.mode' = 'earliest-offset'" in sql
-    assert "'topic' = 'smoke-flink-confluent-20260909T000000Z'" in sql
-    assert len(job.split_statements(sql)) == 3
-    # No basic auth on an open registry: `USER_INFO` with nothing to send is a
-    # credentials source the client would try to use.
-    assert "basic-auth" not in sql
+    spec = _confluent(model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml"))
+    with pytest.raises(ValueError, match="reads raw Avro only") as raised:
+        knobs.validate(spec.engine_block, spec, meta)
+    message = str(raised.value)
+    assert "TIMESTAMP(6)" in message and "event_time" in message and "truncated" in message
 
-
-def test_a_registry_that_authenticates_is_named_by_reference(meta: metadata.CorpusMetadata) -> None:
-    """The credential reaches the job as the reference the site wrote, resolved at submission."""
-    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
-    site = replace(_site(), schema_registry=replace(REGISTRY, basic_auth_user_info="${env:IB_REGISTRY_AUTH}"))
-    d = derive.derive(spec, site, stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
-    sql = knobs.render_sql(spec, site, d, meta)
-    assert "'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'" in sql
-    assert "'avro-confluent.basic-auth.user-info' = '${env:IB_REGISTRY_AUTH}'" in sql
-
-
-def test_a_confluent_run_needs_a_site_that_names_a_registry(meta: metadata.CorpusMetadata) -> None:
-    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    # And again at the render, for a caller that never validated: the source
+    # would otherwise be given the raw-Avro format for Confluent-framed bytes,
+    # and every record would fail to decode five bytes in.
     d = derive.derive(spec, _site(), stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
-    with pytest.raises(ValueError, match="kafka.schema_registry"):
+    with pytest.raises(ValueError, match="reads raw Avro only"):
         knobs.render_sql(spec, _site(), d, meta)
+
+
+def test_a_raw_avro_run_still_renders_the_plain_format(meta: metadata.CorpusMetadata) -> None:
+    """The refusal is the encoding's, not the corpus's: the default still reads."""
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    d = derive.derive(spec, _site(), stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
+    knobs.validate(spec.engine_block, spec, meta)
+    sql = knobs.render_sql(spec, _site(), d, meta)
+    assert "'format' = 'avro'" in sql and "avro-confluent" not in sql
 
 
 def test_ddl_type_mapping() -> None:

@@ -109,8 +109,7 @@ _MAX_PARALLELISM_FACTOR = 4
 # non-legacy Avro mapping the source reads that column as Avro
 # `local-timestamp-micros`, which annotates a `long` — the same wire form as
 # the corpus's `timestamp-micros`, differing only in the logical type's name,
-# and Avro's binary encoding ignores the annotation. The registry format reads
-# the corpus's annotation itself and lands the same microseconds here.
+# and Avro's binary encoding ignores the annotation.
 _DDL_TYPES = {
     "long": "BIGINT",
     "string": "STRING",
@@ -119,6 +118,33 @@ _DDL_TYPES = {
     "timestamp": "TIMESTAMP(6)",
     "binary": "BYTES",
 }
+
+# The corpus type whose Flink SQL name is `TIMESTAMP(6)`, which is the type
+# `avro-confluent` cannot plan — see `validate`.
+_MICROS_TIMESTAMP = "timestamp"
+
+# Why a Flink run reads one encoding only. Two upstream facts, and the second
+# is what rules out every workaround for the first:
+#
+#   * `avro-confluent` builds its reader schema from the DDL — and does so even
+#     when its own `schema` option states one, since the factory passes that
+#     conversion to `Optional.orElse`, which evaluates eagerly. The conversion
+#     runs under Flink's legacy Avro timestamp mapping, which caps SQL
+#     `TIMESTAMP` at milliseconds, and the format declares no option to
+#     disable it. So a source with a `TIMESTAMP(6)` column cannot be planned.
+#   * Reading that column as `BIGINT` and rebuilding the timestamp in the
+#     insert needs `TO_TIMESTAMP_LTZ`, whose runtime accepts second and
+#     millisecond precision only. The run would commit event times truncated
+#     to milliseconds — a column the corpus published, changed by the reader.
+#
+# Every corpus carries `event_time` among its reserved fields, so this holds
+# for all of them. An engine that reads the five-byte header itself has no such
+# limitation; that is where a Confluent-framed run belongs.
+_CONFLUENT_REFUSAL = (
+    "a Flink run reads raw Avro only: its `avro-confluent` format plans no TIMESTAMP(6) column, and reading the "
+    "column as BIGINT would commit millisecond-truncated event times. Offer the corpus to Flink as "
+    "`kafka.value_encoding: avro`, or offer it Confluent-framed to an engine that reads the header itself"
+)
 
 # Amazon MSK's IAM authentication, as the Java client spells it. The harness
 # signals it with librdkafka's `OAUTHBEARER` beside its own `aws.region`
@@ -317,13 +343,16 @@ def read(block: dict[str, object]) -> Knobs:
 
 
 def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> None:
-    """Refuse a Flink block that cannot describe a runnable cluster.
+    """Refuse a Flink block that cannot describe a runnable cluster, or a run it cannot read.
 
-    ``meta`` is unread: every knob here is about the compute, and the corpus
-    constrains none of them. It stays in the signature because the harness
-    calls every managed engine's validator the same way.
+    ``meta`` is read only for the encoding check below: every knob here is
+    about the compute, which the corpus constrains not at all.
     """
     knobs = read(block)
+    if spec.kafka.value_encoding == VALUE_ENCODING_CONFLUENT:
+        micros = sorted(name for name, kind in meta.iceberg_types.items() if kind == _MICROS_TIMESTAMP)
+        if micros:
+            raise ValueError(f"{_CONFLUENT_REFUSAL}. Corpus {meta.name!r} declares {micros} as TIMESTAMP(6)")
     if knobs.source_parallelism > spec.kafka.partitions:
         raise ValueError(
             f"spec.flink.source_parallelism {knobs.source_parallelism} exceeds the topic's "
@@ -398,46 +427,24 @@ def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
     return [(f"properties.{key}", value) for key, value in (*_MSK_IAM_PROPS, *carried)]
 
 
-def _format_options(spec: RunSpec, site: SiteConfig, meta: CorpusMetadata) -> list[tuple[str, str]]:
-    """The format the source decodes values with, as the run's encoding asks for.
+def _format_options(spec: RunSpec) -> list[tuple[str, str]]:
+    """The format the source decodes values with.
 
-    Raw Avro derives its reader schema from the DDL. The registry format cannot:
-    it declares no timestamp-mapping option, so a DDL-derived reader schema
-    would be built under Flink's legacy mapping, which refuses `TIMESTAMP(6)`
-    outright. Its `schema` option is the way out and the better answer anyway —
-    the reader schema becomes the corpus's own registered document, so the
-    mapping question never arises and reader and writer are the same schema.
+    One format, because Flink reads only one of the two encodings a run can
+    offer: `validate` refuses the other, and this is the second gate for a
+    caller that renders without validating first.
     """
-    if spec.kafka.value_encoding != VALUE_ENCODING_CONFLUENT:
-        return [
-            ("format", "avro"),
-            # Flink's legacy mapping sends SQL `TIMESTAMP` to Avro
-            # `timestamp-*`, which it caps at millisecond precision, so a
-            # `TIMESTAMP(6)` column cannot be planned at all while the legacy
-            # default stands. Disabled, the column maps to
-            # `local-timestamp-micros` instead: microseconds, zoneless, and the
-            # same `long` on the wire as the corpus wrote.
-            ("avro.timestamp_mapping.legacy", "false"),
-        ]
-    if site.schema_registry is None:
-        raise ValueError(
-            f"the run offers {VALUE_ENCODING_CONFLUENT!r} values, which name a registered schema, and the site "
-            "declares no kafka.schema_registry.url for the source to resolve them against"
-        )
-    options = [
-        ("format", "avro-confluent"),
-        ("avro-confluent.url", site.schema_registry.url),
-        ("avro-confluent.schema", meta.avro_schema_json()),
+    if spec.kafka.value_encoding == VALUE_ENCODING_CONFLUENT:
+        raise ValueError(_CONFLUENT_REFUSAL)
+    return [
+        ("format", "avro"),
+        # Flink's legacy mapping sends SQL `TIMESTAMP` to Avro `timestamp-*`,
+        # which it caps at millisecond precision, so a `TIMESTAMP(6)` column
+        # cannot be planned at all while the legacy default stands. Disabled,
+        # the column maps to `local-timestamp-micros` instead: microseconds,
+        # zoneless, and the same `long` on the wire as the corpus wrote.
+        ("avro.timestamp_mapping.legacy", "false"),
     ]
-    if site.schema_registry.basic_auth_user_info is not None:
-        options += [
-            ("avro-confluent.basic-auth.credentials-source", "USER_INFO"),
-            # The site's literal, which may be a `${env:NAME}` reference: the
-            # submitter substitutes it from the container's own environment, so
-            # this file carries the name and not the credential.
-            ("avro-confluent.basic-auth.user-info", site.schema_registry.basic_auth_user_info),
-        ]
-    return options
 
 
 def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
@@ -454,7 +461,7 @@ def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusM
         # and be scored as having lost it.
         ("scan.startup.mode", "earliest-offset"),
         *_kafka_options(site.kafka_security),
-        *_format_options(spec, site, meta),
+        *_format_options(spec),
     ]
     return f"CREATE TABLE {SOURCE_TABLE} (\n{columns}\n) WITH (\n{_with_clause(options)}\n)"
 

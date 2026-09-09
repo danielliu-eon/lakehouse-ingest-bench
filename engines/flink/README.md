@@ -10,7 +10,6 @@ or serializer is written here — so a Flink result is Flink's.
 |---|---|
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
 | Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro:1.20.1` with `avro.timestamp_mapping.legacy = false` — the legacy default caps SQL `TIMESTAMP` at milliseconds, so a `TIMESTAMP(6)` column cannot be planned at all |
-| Confluent Avro | `flink-sql-avro-confluent-registry:1.20.1`, for a run whose spec says `kafka.value_encoding: confluent` |
 | Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — Iceberg resolves a table through Hadoop's `Configuration` whichever FileIO reads it |
@@ -163,23 +162,34 @@ unchanged bar one, and `type` is translated rather than passed on:
 | `s3.{endpoint,access-key-id,secret-access-key,path-style-access}` | unchanged |
 | `site.warehouse` on `s3://` / `gs://` | adds the matching `'io-impl'`. The catalog's own `warehouse` is not always a location — a Glue REST endpoint takes the account id there — so the scheme is read off the site's warehouse instead |
 
-## Confluent wire format
+## Confluent wire format: refused, and why
 
-A run whose spec says `kafka.value_encoding: confluent` is offered with the
-five-byte Confluent header in front of every value, and the source reads it
-with `format = 'avro-confluent'` against `site.kafka.schema_registry.url`.
-Where the site also sets `basic_auth_user_info`, the DDL adds
-`avro-confluent.basic-auth.credentials-source = USER_INFO` and the literal the
-site wrote — a `${env:NAME}` reference stays a reference until the submitter
-substitutes it.
+`kafka.value_encoding: confluent` is refused at stage time for a Flink run —
+`knobs.validate` raises, before a topic exists — because Flink 1.20.1 cannot
+read such a topic without changing the data. Two upstream facts, the second of
+which rules out the way round the first:
 
-The reader schema is **stated**, as `avro-confluent.schema` carrying the
-corpus's own `schema.avsc`, and there is no `avro-confluent.timestamp_mapping`
-key. The registry format declares no such option, so an unknown one fails
-validation, and its reader schema is otherwise derived from the DDL under
-Flink's legacy timestamp mapping — which refuses `TIMESTAMP(6)` outright. What
-is stated is the schema that was registered, so the reader and the writer are
-one document and the mapping question does not arise.
+- **`avro-confluent` cannot plan a `TIMESTAMP(6)` column.** It builds its
+  reader schema from the DDL under Flink's legacy Avro timestamp mapping, which
+  caps SQL `TIMESTAMP` at milliseconds, and it declares no option to disable
+  that mapping (`avro.timestamp_mapping.legacy` belongs to the plain `avro`
+  format; an unknown `avro-confluent.*` key fails validation). Its own `schema`
+  option does not help: `RegistryAvroFormatFactory` passes the DDL conversion
+  to `Optional.orElse`, which evaluates eagerly, so the conversion runs — and
+  throws — even when a reader schema is stated. Still the case on Flink master.
+- **The column cannot be rebuilt from a `BIGINT`.** Declaring it `BIGINT` and
+  converting in the insert needs `TO_TIMESTAMP_LTZ`, whose runtime accepts
+  second and millisecond precision only, and Flink SQL has no exact
+  microsecond route. The run would commit event times truncated to
+  milliseconds — a column the corpus published, changed by the reader, in the
+  column freshness is measured on.
+
+Every corpus carries `event_time` among its reserved fields, so this is not a
+workload one can avoid. Offer the corpus to Flink as `avro`, which is what
+`runs/smoke-flink.yaml` does; a Confluent-framed run belongs to an engine that
+reads the five-byte header itself — `runs/smoke-external-confluent.yaml` is
+that spec. The harness half is unaffected: staging registers the schema and
+the producer frames every value whatever engine is reading.
 
 `site.kafka.security` reaches the source as `properties.*` verbatim, with
 one translation. `sasl.mechanism: OAUTHBEARER` beside the harness's own

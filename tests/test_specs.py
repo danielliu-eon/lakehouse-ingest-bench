@@ -44,7 +44,7 @@ def test_spec_refusals(tmp_path: Path) -> None:
 def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know(tmp_path: Path) -> None:
     """The wire format is the corpus's own unless a run asks for the other one."""
     assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").kafka.value_encoding == "avro"
-    confluent = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
+    confluent = model.load_run_spec(ROOT / "runs" / "smoke-external-confluent.yaml")
     assert confluent.kafka.value_encoding == "confluent"
 
     base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())

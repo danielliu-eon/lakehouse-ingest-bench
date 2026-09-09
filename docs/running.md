@@ -46,9 +46,11 @@ before teardown.
 five-byte Confluent header instead of as raw Avro, and staging registers the
 corpus's schema under `<topic>-value` with `site.kafka.schema_registry.url`
 first. The local stack runs a registry for that, so
-`scripts/smoke.sh --spec runs/smoke-flink-confluent.yaml` needs nothing extra;
-a site of your own names its own registry, and staging refuses such a spec
-before it touches the cluster where the site declares none.
+`scripts/smoke.sh --engine external --spec runs/smoke-external-confluent.yaml`
+needs nothing extra; a site of your own names its own registry, and staging
+refuses such a spec before it touches the cluster where the site declares
+none. Flink is not one of the engines that can read it — see "Confluent wire
+format" in `engines/flink/README.md` for the two upstream reasons.
 
 On repeat runs: teardown wipes the object store, so each run regenerates the
 corpus, and with `--keep` a second run at a *different* `--set` leaves two

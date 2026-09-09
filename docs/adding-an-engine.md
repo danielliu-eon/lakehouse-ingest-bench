@@ -89,6 +89,11 @@ credential, where the registry needs one, is the operator's and is not in
 Nothing else about the run changes: the rows, the keys, the table and the
 scoring are what a raw-Avro run's are.
 
+The shipped external spec for this is `runs/smoke-external-confluent.yaml`.
+Flink cannot be the engine on it — its registry format cannot plan the
+corpus's microsecond timestamp column, and `engines/flink/README.md` has the
+two upstream reasons — so the walk-through below is a raw-Avro run.
+
 ## Walk-through: an engine the harness does not manage
 
 This runs the local stack, stages an external run, and starts Flink by hand as

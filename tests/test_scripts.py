@@ -738,7 +738,7 @@ def test_the_smoke_stages_the_spec_it_was_given() -> None:
     text = SMOKE.read_text()
     assert "--spec)" in text and 'SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"' in text
     assert '--spec /runs/$(basename "$SPEC_FILE")' in text
-    assert (REPO_ROOT / "runs" / "smoke-flink-confluent.yaml").exists()
+    assert (REPO_ROOT / "runs" / "smoke-external-confluent.yaml").exists()
 
 
 # ---------------------------------------------------------------------------
