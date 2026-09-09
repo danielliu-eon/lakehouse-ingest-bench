@@ -18,12 +18,16 @@ Six rules. Break one and the run is not comparable to any other.
 
 1. Consume the topic from the earliest offset. Values are Avro binary
    single-record encoding per `schema.avsc`; keys are UTF-8 strings or null.
-2. Append every row to the table, mapping columns one to one by name.
-   Extra columns are allowed; dropped, renamed or retyped ones void the run.
-   `corpus.json` publishes the Iceberg type of every column, and the scorer
-   checks the table's columns and types against it the first time it loads the
-   table, voiding the run on a mismatch. This is the rule that matters when
-   the engine creates the table, since the harness then never sees its DDL.
+2. Append every row to the table, mapping columns one to one by name, and
+   declare every corpus column `NOT NULL`. Extra columns are allowed and may be
+   nullable; a corpus column that is dropped, renamed, retyped or optional voids
+   the run. `corpus.json` publishes the Iceberg type of every column, and the
+   scorer checks the table's columns, their types and their required-ness
+   against it the first time it loads the table. Nullability counts because an
+   optional column is encoded differently, so the file geometry two runs are
+   compared on would stop being a fact about their engines. This is the rule
+   that matters when the engine creates the table, since the harness then never
+   sees its DDL.
 3. Append-only: no delete files, no upserts, no overwrites.
 4. Data files in Parquet or ORC.
 5. Commit through the catalog the harness names.

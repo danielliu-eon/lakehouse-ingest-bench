@@ -63,7 +63,7 @@ def read_metadata(table: Table) -> TableMetadata:
 
 
 def check_table_schema(schema: Schema, meta: CorpusMetadata) -> list[str]:
-    """Every corpus column the table does not hold under the type the corpus publishes.
+    """Every way the table's columns depart from the ones the corpus publishes.
 
     An engine that creates its own table chooses the column set, and a table
     that dropped, renamed or retyped a column still carries the ids the tally
@@ -72,18 +72,29 @@ def check_table_schema(schema: Schema, meta: CorpusMetadata) -> list[str]:
     contract is that the corpus's columns survive one to one, not that nothing
     else may be added.
 
+    A corpus column must also be required, as the corpus's own schema declares
+    it. Nullability is not cosmetic: an optional column is encoded with
+    definition levels and is a candidate for a different page layout, so the
+    file geometry two runs are compared on stops being a fact about their
+    engines. It is also what would let a writer that dropped a value commit
+    anyway, and the loss would read as a null rather than as a fault.
+
     ``str`` of an Iceberg primitive type is the same name the corpus publishes,
     which is what lets the comparison stay a string one rather than needing a
     second copy of the type map that built the table.
     """
-    held = {field.name: str(field.field_type) for field in schema.fields}
+    held = {field.name: field for field in schema.fields}
     mismatches: list[str] = []
     for name in meta.field_names():
         published = meta.iceberg_types[name]
         if name not in held:
             mismatches.append(f"the table has no column {name!r}, which the corpus publishes as {published}")
-        elif held[name] != published:
-            mismatches.append(f"column {name!r} is {held[name]} in the table and {published} in the corpus")
+            continue
+        field = held[name]
+        if str(field.field_type) != published:
+            mismatches.append(f"column {name!r} is {field.field_type} in the table and {published} in the corpus")
+        if not field.required:
+            mismatches.append(f"column {name!r} is optional, corpus columns are required")
     return mismatches
 
 

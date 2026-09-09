@@ -241,9 +241,22 @@ def test_check_table_schema_reads_the_columns_the_table_holds(tmp_path: Path, co
         "column 'event_time' is long in the table and timestamp in the corpus"
     ]
 
-    # An engine free to add a column of its own is still holding the corpus's.
+    # An engine free to add a column of its own is still holding the corpus's,
+    # and an extra column is under no obligation to be required.
     widened = _table_of(props, "shape4", [*fields, NestedField(900, "ingest_ms", LongType(), required=False)])
     assert snapshots.check_table_schema(widened.schema(), corpus) == []
+
+    optional = _table_of(
+        props,
+        "shape5",
+        [
+            f if f.name != "event_type" else NestedField(f.field_id, f.name, f.field_type, required=False)
+            for f in fields
+        ],
+    )
+    assert snapshots.check_table_schema(optional.schema(), corpus) == [
+        "column 'event_type' is optional, corpus columns are required"
+    ]
 
 
 def test_a_table_missing_a_corpus_column_voids_the_run(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
@@ -280,6 +293,41 @@ def test_a_table_missing_a_corpus_column_voids_the_run(tmp_path: Path, corpus: m
     # Nothing was tallied: the rows are there, and they describe another table.
     assert summary["committed_rows"] == 0
     assert cli.gate(["--out", str(tmp_path / "out")]) == 5
+
+
+def test_an_optional_corpus_column_voids_the_run(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    fields = [
+        f if f.name != "event_type" else NestedField(f.field_id, f.name, f.field_type, required=False)
+        for f in create.iceberg_schema(corpus).fields
+    ]
+    table = _table_of(props, "run8", fields)
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _finished_producer(logs, records, epoch)
+    # Every row of the offer is in the table and every value is present, so the
+    # column's nullability is the only thing left to void this run.
+    for record in records:
+        table.append(_rows_of(record, corpus))
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.run8",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["state"] == "void" and summary["run_valid"] is False
+    assert summary["reason"] == "table schema mismatch: column 'event_type' is optional, corpus columns are required"
+    assert summary["committed_rows"] == 0
 
 
 def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
