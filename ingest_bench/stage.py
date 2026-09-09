@@ -199,9 +199,10 @@ def _facts(
     the producer starts, not when the topic is created, so a staged run that
     waits an hour for an operator is not scored from the moment it was staged.
 
-    The three registry facts are null for a raw-Avro run, and stated anyway:
-    a reader that has to check whether a key exists before it can tell which
-    encoding a run offered would read a missing key as a missing answer.
+    ``value_encoding`` is stated for every run and the three registry facts
+    are null where it is the raw one, rather than being left out: a reader that
+    had to tell an absent key from a null one would read a harness too old to
+    know the difference as a run that offered raw Avro.
     """
     return {
         "run_id": derived.run_id,
