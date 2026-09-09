@@ -44,6 +44,7 @@ from ingest_bench.specs.model import KubernetesConfig, load_site
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 AWS_DEPLOY = REPO_ROOT / "deploy" / "aws"
+K8S_LIB = SCRIPTS / "_k8s.sh"
 SMOKE = SCRIPTS / "smoke.sh"
 GEN_CORPUS = SCRIPTS / "gen-corpus.sh"
 PUSH_IMAGES = SCRIPTS / "push-images.sh"
@@ -129,13 +130,22 @@ def _shell_function(path: Path, name: str) -> str:
 
     Lifted rather than copied for the same reason as the block above: a copy
     would keep passing after the script's own version of it broke.
+
+    The closing brace is the first line that is one, which these scripts'
+    indentation makes the function's own — every brace inside a body is
+    indented. `bash -n` over the lifted text is what anchors that: a body that
+    broke the convention would otherwise be silently cut in half and the
+    remainder run as if it were the whole function.
     """
     lines = path.read_text().splitlines()
     starts = [index for index, line in enumerate(lines) if line == f"{name}() {{"]
     assert len(starts) == 1, f"{path.name} does not hold exactly one {name}"
     ends = [index for index, line in enumerate(lines) if line == "}" and index > starts[0]]
     assert ends, f"{path.name}'s {name} does not close"
-    return "\n".join(lines[starts[0] : ends[0] + 1])
+    lifted = "\n".join(lines[starts[0] : ends[0] + 1])
+    parsed = subprocess.run(["bash", "-n"], input=lifted, capture_output=True, text=True)
+    assert parsed.returncode == 0, f"{path.name}'s {name} did not lift out whole: {parsed.stderr}"
+    return lifted
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -211,6 +221,80 @@ def test_every_script_is_executable() -> None:
         # A sourced file that is executable invites being run, and neither of
         # these does anything on its own but set variables the caller needs.
         assert not os.access(script, os.X_OK), f"{script} is sourced, so it should not be executable"
+
+
+@dataclass(frozen=True)
+class WaitedJob:
+    """One run of `k8s_wait_job`, and every `kubectl` call it made."""
+
+    result: subprocess.CompletedProcess[str]
+    calls: str
+
+
+def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
+    """`_k8s.sh`'s own wait, against a `kubectl` answering one reading at a time.
+
+    Lifted and run rather than read, because every branch in it is a different
+    end for a driver: a Job that completed, one that failed with its log to
+    show, and one that is still going when the caller's budget runs out.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        calls = Path(directory) / "kubectl-calls.log"
+        calls.touch()
+        conditions = Path(directory) / "conditions"
+        conditions.write_text("".join(f"{answer}\n" for answer in answers))
+        harness = f"""
+            set -euo pipefail
+            log() {{ printf 'log %s\\n' "$*"; }}
+            die() {{ printf 'die %s\\n' "$*"; exit 3; }}
+            KUBE_CONTEXT=a-cluster
+            SITE_NAMESPACE=ingest-bench
+            K8S_JOB_POLL_S=1
+            kubectl() {{
+                printf 'kubectl %s\\n' "$*" >>'{calls}'
+                case "$*" in
+                *jsonpath*)
+                    head -n 1 '{conditions}'
+                    tail -n +2 '{conditions}' >'{conditions}.rest'
+                    mv '{conditions}.rest' '{conditions}'
+                    ;;
+                *logs*) printf 'the job said this\\n' ;;
+                esac
+            }}
+{_shell_function(K8S_LIB, "k8s_job_tail")}
+{_shell_function(K8S_LIB, "k8s_wait_job")}
+            k8s_wait_job a-job {timeout_s}
+        """
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+        return WaitedJob(result=result, calls=calls.read_text())
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("answers", "status", "said", "tailed"),
+    [
+        # A Job announces nothing until it has an end to announce, so the empty
+        # reading is the normal first one.
+        (["", "Complete"], 0, "log job/a-job completed", False),
+        # Both conditions are read, and not `complete` alone: a failed Job
+        # never gains that one, so a wait on it would spend the whole timeout —
+        # hours, for a generation — to report a failure announced in seconds.
+        (["Failed"], 3, "die job/a-job failed", True),
+        (["", ""], 3, "die job/a-job did not complete within 1s", True),
+    ],
+)
+def test_a_job_is_waited_for_until_it_reaches_one_of_its_two_ends(
+    answers: list[str], status: int, said: str, tailed: bool
+) -> None:
+    waited = _waited_job(answers)
+    assert waited.result.returncode == status, waited.result.stdout + waited.result.stderr
+    assert said in waited.result.stdout, waited.result.stdout
+    # Its own log, and only where the end was not the good one.
+    assert ("logs job/a-job --tail=40" in waited.calls) is tailed, waited.calls
+    assert ("the job said this" in waited.result.stderr) is tailed, waited.result.stderr
+    # Only the conditions the API says are true, so a `Failed: False` cannot be
+    # read as a failure.
+    assert '{range .status.conditions[?(@.status=="True")]}' in waited.calls, waited.calls
 
 
 def test_both_workflows_install_the_same_checked_yq() -> None:
