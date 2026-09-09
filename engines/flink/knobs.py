@@ -22,7 +22,7 @@ from engines.flink.script import join_statements
 from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
-from ingest_bench.kafka_auth import REGION_KEY
+from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
 from ingest_bench.specs.model import (
@@ -194,11 +194,10 @@ _REGISTRY_USER_INFO_KEY = "avro-confluent.basic-auth.user-info"
 # module below signs per connection from whatever credentials the pod holds.
 # So the signal is translated rather than passed through — and neither form
 # carries a credential, which is why an MSK site needs no secret in a file.
-_SASL_MECHANISM_KEY = "sasl.mechanism"
 _OAUTHBEARER = "OAUTHBEARER"
 _MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
     ("security.protocol", "SASL_SSL"),
-    (_SASL_MECHANISM_KEY, "AWS_MSK_IAM"),
+    (MECHANISM_KEY, "AWS_MSK_IAM"),
     ("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;"),
     ("sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler"),
 )
@@ -456,7 +455,7 @@ def _column_ddl(name: str, meta: CorpusMetadata) -> str:
 
 def _is_msk_iam(security: dict[str, str]) -> bool:
     """Whether the site's Kafka properties are the harness's MSK IAM signal."""
-    return _SASL_MECHANISM_KEY in security and security[_SASL_MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
+    return MECHANISM_KEY in security and security[MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
 
 
 def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
