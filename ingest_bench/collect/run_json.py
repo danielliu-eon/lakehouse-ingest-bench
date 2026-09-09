@@ -185,6 +185,33 @@ def keepup_figures(summary: dict[str, object]) -> dict[str, object]:
     return {name: keepup[name] for name in _KEEPUP_FIGURES}
 
 
+def publish_log_summary(path: Path, records: list[PublishRecord]) -> dict[str, object]:
+    """One producer shard's log reduced to the totals a result needs of it.
+
+    The per-batch records are the offer's raw history, one entry per batch and
+    so thousands of them for an hour run. What a reader compares runs by is the
+    interval a shard was acking over and how much it got through, so that is
+    what is published; the logs themselves stay under the runs prefix for
+    anyone re-deriving the rest.
+
+    ``done`` is the shard's trailer: a shard that stopped early never writes
+    one, so a result whose shards are not all done describes a partial offer
+    whatever its other figures say.
+    """
+    return {
+        "shard": publish_log.shard_index(path.name),
+        "batches": len(records),
+        "first_scheduled_ms": min((record.scheduled_ms for record in records), default=None),
+        "first_ack_ms": min((record.first_ack_ms for record in records), default=None),
+        "last_ack_ms": max((record.last_ack_ms for record in records), default=None),
+        "bytes": sum(record.bytes for record in records),
+        "rows": sum(record.rows for record in records),
+        "behind_ms_max": publish_log.behind_ms(records),
+        "errors": sum(record.errors for record in records),
+        "done": publish_log.shard_done(path),
+    }
+
+
 def producer_figures(records: list[PublishRecord], summary: dict[str, object] | None) -> dict[str, object]:
     """What the offer did, from the publish logs where they were fetched.
 
@@ -300,7 +327,12 @@ def build_run_json(
     exactness = None if exactness_path is None else _read_json(exactness_path)
     geometry = None if geometry_path is None else _read_json(geometry_path)
     snapshots = [] if snapshots_path is None else _read_jsonl(snapshots_path)
-    records = [record for path in log_paths for record in publish_log.read(path)]
+    publish_logs: list[dict[str, object]] = []
+    records: list[PublishRecord] = []
+    for log_path in log_paths:
+        shard_records = publish_log.read(log_path)
+        publish_logs.append(publish_log_summary(log_path, shard_records))
+        records.extend(shard_records)
 
     epoch = facts["epoch"]
     # The epoch is the run's own record of its time origin, and it is null until
@@ -321,11 +353,13 @@ def build_run_json(
     ):
         if path is not None:
             artifacts[name] = str(path.relative_to(run_dir))
-    # These two are embedded rather than pointed at: they are the per-commit and
-    # per-batch series every derived figure was drawn from, and a result that
-    # only names them is a result nobody can re-derive.
+    # The commit series is embedded rather than pointed at: it is a few hundred
+    # records for an hour run, every freshness and geometry figure was drawn
+    # from it, and a result that only names it is a result nobody can re-derive.
     artifacts["snapshots"] = snapshots
-    artifacts["publish_logs"] = [asdict(record) for record in records]
+    # The offer's history is not, because it is one record per batch. Each
+    # shard's totals stand in, and the logs stay under the runs prefix.
+    artifacts["publish_logs"] = publish_logs
 
     document: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,

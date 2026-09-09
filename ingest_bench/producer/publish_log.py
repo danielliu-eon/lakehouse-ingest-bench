@@ -126,7 +126,7 @@ def log_names(uri_prefix: str) -> list[str]:
     ]
 
 
-def _shard_index(name: str) -> int:
+def shard_index(name: str) -> int:
     """The shard a log file name belongs to.
 
     A name carrying no index is refused rather than skipped: the scorer decides
@@ -150,7 +150,7 @@ def shards_done(uri_prefix: str) -> set[int]:
     """
     if not uri.exists(uri_prefix):
         return set()
-    return {_shard_index(name) for name in log_names(uri_prefix) if _trailed(uri.read_text(uri.join(uri_prefix, name)))}
+    return {shard_index(name) for name in log_names(uri_prefix) if _trailed(uri.read_text(uri.join(uri_prefix, name)))}
 
 
 def read_all(uri_prefix: str) -> list[PublishRecord]:

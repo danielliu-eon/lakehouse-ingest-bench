@@ -1,9 +1,8 @@
 # The result document (`run.json`, `schema_version: 2`)
 
-`collect --run-dir runs/<run_id> --site site.yaml` reads a finished run
-directory and writes one JSON document: every figure the run is compared by, in
-one place, with the operator's site taken out of it. That document is what
-`results/` holds and what `results-table` renders.
+`collect` reads a finished run directory and writes one JSON document: every
+figure the run is compared by, in one place, with the operator's site taken out
+of it. It is what `results/` holds and what `results-table` renders.
 
 ```
 collect --run-dir runs/<run_id> --site site.yaml            # → runs/<run_id>/run.json
@@ -33,8 +32,8 @@ grows a new field carrying a path is covered without an edit here.
 3. **`site.kafka.security` is never read**, so neither its keys nor its values
    reach the document under any name.
 
-What remains site-specific by design: the catalog `uri` (it says which catalog
-implementation was used, which is part of comparability) and the prices.
+Left in by design: the catalog `uri`, which says which catalog implementation a
+result was measured against, and the prices.
 
 ## Top level
 
@@ -66,8 +65,7 @@ implementation was used, which is part of comparability) and the prices.
 | `corpus_hash` | from `summary.json` |
 
 The fleet is what the run *asked for* — container requests, not the nodes they
-landed on. A run is charged for the compute it reserved whether the cluster
-packed it onto two machines or twenty.
+landed on — so it is the same number however the cluster packed it.
 
 ## `artifacts`
 
@@ -75,12 +73,29 @@ Relative paths for the inputs `collect` found: `spec`, `facts`, `timeline`,
 `engine_image`, `summary`, `freshness`, `exactness`, `geometry`,
 `keepup_samples`. A path is absent exactly when the file is named in `missing`.
 
-Two are embedded whole rather than pointed at, because every derived figure is
-drawn from them and a result nobody can re-derive is not evidence:
+`snapshots` is embedded whole rather than pointed at — the parsed
+`snapshots.jsonl`, one record per commit, a few hundred for an hour run. Every
+freshness and geometry figure was drawn from it, and a result nobody can
+re-derive is not evidence.
 
-- `snapshots` — the parsed `snapshots.jsonl`, one record per commit.
-- `publish_logs` — the parsed `producer/publish_log-*.jsonl` records, one per
-  batch, merged across shards.
+`publish_logs` is **summarized per shard**, because the offer's history is one
+record per batch and runs to thousands. One entry per
+`producer/publish_log-<i>.jsonl`:
+
+| Field | What it holds |
+|---|---|
+| `shard` | the index in the file's name |
+| `batches` | how many records the log holds |
+| `first_scheduled_ms` | when the shard's earliest batch was due |
+| `first_ack_ms`, `last_ack_ms` | the interval the shard was acknowledging over |
+| `bytes`, `rows` | what the shard published in total |
+| `behind_ms_max` | the worst gap between a batch being due and first acked |
+| `errors` | delivery errors across the shard |
+| `done` | whether the log carries its trailer. A shard that stopped early never writes one, so a result whose shards are not all `done` describes a partial offer whatever its other figures say |
+
+The full per-batch logs stay in the object store under
+`<runs_root>/<run_id>/producer/`; that is where to go to re-derive the offer
+itself rather than the totals.
 
 ## `data`
 

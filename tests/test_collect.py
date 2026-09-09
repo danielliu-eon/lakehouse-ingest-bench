@@ -474,6 +474,71 @@ def test_run_json_derives_the_figures_a_result_is_read_by(tmp_path: Path) -> Non
     assert document["geometry"] == _geometry()
 
 
+def test_run_json_summarizes_each_producer_shard(tmp_path: Path) -> None:
+    run_dir = _run_dir(tmp_path)
+    # A second shard that stopped without its trailer: a result whose shards are
+    # not all done describes a partial offer.
+    (run_dir / "producer" / "publish_log-1.jsonl").write_text(
+        json.dumps(
+            {
+                "batch": 2,
+                "scheduled_ms": EPOCH_MS + 2000,
+                "first_ack_ms": EPOCH_MS + 2100,
+                "last_ack_ms": EPOCH_MS + 2400,
+                "rows": 50,
+                "bytes": 1_000,
+                "errors": 3,
+            }
+        )
+        + "\n"
+    )
+    artifacts = _build(run_dir, _site(tmp_path))["artifacts"]
+    assert isinstance(artifacts, dict)
+    assert artifacts["publish_logs"] == [
+        {
+            "shard": 0,
+            "batches": 2,
+            "first_scheduled_ms": EPOCH_MS,
+            "first_ack_ms": EPOCH_MS,
+            "last_ack_ms": LAST_ACK_MS,
+            "bytes": 1_800_000_000,
+            "rows": 200,
+            "behind_ms_max": 315,
+            "errors": 0,
+            "done": True,
+        },
+        {
+            "shard": 1,
+            "batches": 1,
+            "first_scheduled_ms": EPOCH_MS + 2000,
+            "first_ack_ms": EPOCH_MS + 2100,
+            "last_ack_ms": EPOCH_MS + 2400,
+            "bytes": 1_000,
+            "rows": 50,
+            "behind_ms_max": 100,
+            "errors": 3,
+            "done": False,
+        },
+    ]
+
+
+def test_run_json_points_at_the_run_s_own_artifacts(tmp_path: Path) -> None:
+    run_dir = _run_dir(tmp_path)
+    artifacts = _build(run_dir, _site(tmp_path))["artifacts"]
+    assert isinstance(artifacts, dict)
+    assert artifacts["spec"] == "spec.yaml"
+    assert artifacts["facts"] == "facts.json"
+    assert artifacts["timeline"] == "timeline.log"
+    assert artifacts["engine_image"] == "engine-image.json"
+    assert artifacts["summary"] == "scores/summary.json"
+    assert artifacts["geometry"] == "scores/geometry.json"
+    assert artifacts["keepup_samples"] == "scores/keepup_samples.jsonl"
+    # The commit series is embedded whole; every freshness figure came from it.
+    snapshots = artifacts["snapshots"]
+    assert isinstance(snapshots, list)
+    assert [row["snapshot_id"] for row in snapshots] == [11, 12]
+
+
 def test_run_json_costs_the_fleet_over_the_run(tmp_path: Path) -> None:
     document = _build(_run_dir(tmp_path), _site(tmp_path))
     derived = document["derived"]
