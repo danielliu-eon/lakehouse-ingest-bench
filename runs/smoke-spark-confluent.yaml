@@ -1,5 +1,11 @@
 # `smoke-spark.yaml` with every value behind the five-byte Confluent header,
-# which proves a Confluent-framed run is readable end to end by a real engine.
+# which proves a Confluent-framed run is readable end to end by stock Spark.
+#
+# The job drops the header and decodes the rest against the corpus's schema,
+# so the framing costs it a `substring` and nothing else. Registering the
+# schema is still what gives the header its id: the site has to declare
+# `kafka.schema_registry`, or staging refuses this spec before it touches the
+# cluster.
 name: smoke-spark-confluent
 engine: spark
 corpus: smoke

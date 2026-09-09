@@ -197,6 +197,22 @@ def _confluent(spec: model.RunSpec) -> model.RunSpec:
     return replace(spec, kafka=replace(spec.kafka, value_encoding="confluent"))
 
 
+def test_the_shipped_confluent_spec_is_the_raw_one_plus_its_encoding() -> None:
+    """The two shipped Spark smokes differ in the framing and in nothing else.
+
+    A knob that drifted between them would make the pair a comparison of two
+    fleets rather than of two wire formats.
+    """
+    raw = model.load_run_spec(ROOT / "runs" / "smoke-spark.yaml")
+    framed = model.load_run_spec(ROOT / "runs" / "smoke-spark-confluent.yaml")
+    assert raw.kafka.value_encoding == model.VALUE_ENCODING_AVRO
+    assert framed.kafka.value_encoding == model.VALUE_ENCODING_CONFLUENT
+    assert framed.engine_block == raw.engine_block
+    assert framed.kafka.partitions == raw.kafka.partitions and framed.kafka.key == raw.kafka.key
+    assert framed.producer == raw.producer and framed.scoring == raw.scoring
+    assert framed.table == raw.table and framed.corpus == raw.corpus
+
+
 def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.CorpusMetadata) -> None:
     """Spark reads either framing, so the encoding constrains the compute not at all.
 
