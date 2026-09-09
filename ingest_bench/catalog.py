@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The one catalog client and the one property loader every tool here shares.
 
 A run addresses its table through whatever catalog the site runs, and the

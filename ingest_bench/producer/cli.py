@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command line for one producer shard.
 
 A run's producers are shards of one command: they share the corpus, the topic

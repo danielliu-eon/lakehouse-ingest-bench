@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Reading what a running engine reports about itself, and refusing to guess.
 
 Every managed engine is checked against its spec the same way: a document is

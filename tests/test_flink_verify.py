@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Every drift `verify-flink` can report, against recorded JobManager answers.
 
 Staging's RUNNING wait says the operator started something. What it cannot say

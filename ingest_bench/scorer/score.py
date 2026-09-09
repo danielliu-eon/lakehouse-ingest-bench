@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The scoring loop: walk a table's commits as they land, and judge the run.
 
 Every figure a run is reported by comes out of one pass over the table's

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The scripts have to parse, and their documents have to render, before a cluster exists.
 
 A syntax error in `smoke.sh` would otherwise surface only in the compose smoke,

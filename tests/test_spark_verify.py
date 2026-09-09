@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Every drift `verify-spark` can report, against recorded driver and pod answers.
 
 Staging's RUNNING wait says the operator submitted something. What it cannot

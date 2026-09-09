@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A table's shape and its commit history, and which data files each commit added.
 
 The scorer never asks a writer what it wrote. Freshness is the wall time of a

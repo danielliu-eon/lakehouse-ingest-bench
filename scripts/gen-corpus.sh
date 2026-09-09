@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Build a corpus on the cluster: one Job of N shards, then a merge if there was
 # more than one shard.
 #

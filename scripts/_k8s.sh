@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Shared shell for the cluster drivers: read the site, render a manifest, apply
 # it, wait for the Job it made, and delete what a re-run would collide with.
 #

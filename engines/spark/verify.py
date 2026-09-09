@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What a running query actually honours, read back and compared with the spec.
 
 Staging waits for the SparkApplication to reach RUNNING, which says the

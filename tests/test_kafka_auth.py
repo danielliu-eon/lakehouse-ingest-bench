@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The one authentication the harness signs rather than passes through.
 
 Every assertion here runs without an AWS account: the token provider is

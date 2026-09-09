@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Per-batch completeness, accumulated from the row ids a table holds.
 
 Freshness and exactness are both answers to one question asked of every batch

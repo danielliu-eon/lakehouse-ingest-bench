@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What a running job actually honours, read back and compared with the spec.
 
 Staging waits for the job to reach RUNNING, which says the operator started

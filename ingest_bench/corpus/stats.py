@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Realized value shape of a corpus's columns, sampled while it is written.
 
 A preset declares what each column's values should look like; nothing about

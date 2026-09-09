@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 
 from ingest_bench.specs.env import has_placeholder, resolve_env_placeholders

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A preset is the workload definition: a schema plus the shape of the stream.
 
 Everything downstream renders from the corpus this produces, so the preset is

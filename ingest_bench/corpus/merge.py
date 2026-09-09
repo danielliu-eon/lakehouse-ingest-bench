@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Merge shard corpora into one corpus: metadata beside the per-shard data.
 
 Generating a large corpus is split across machines, and a shard sees only the

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """How a rendered SQL script is assembled and taken apart again.
 
 The renderer runs in the harness and the submitter runs inside the Flink

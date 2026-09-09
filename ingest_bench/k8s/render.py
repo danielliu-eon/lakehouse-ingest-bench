@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Render a Kubernetes manifest from a template of ``__NAME__`` markers.
 
 The templates under ``deploy/k8s/`` are applied by the run drivers, which know

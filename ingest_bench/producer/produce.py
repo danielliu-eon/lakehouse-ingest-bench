@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Send a corpus's batches into Kafka, each at the moment it is due.
 
 The producer is the offered side of the benchmark, so its only job is to be

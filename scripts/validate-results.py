@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Entry point for the results/ publication checks.
 
 The rules themselves live in `ingest_bench.collect.validate`, where they are

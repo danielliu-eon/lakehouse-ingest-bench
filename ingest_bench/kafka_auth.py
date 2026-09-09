@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Kafka client properties, and the one authentication a file cannot hold.
 
 Everything a site declares under `kafka.security` reaches a client verbatim,

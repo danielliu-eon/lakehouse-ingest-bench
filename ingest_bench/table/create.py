@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Create the Iceberg table a corpus is fed into, and drop it again.
 
 The table is the contract between the corpus and the engine under test: its

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Whether the table holds exactly the rows the corpus offered.
 
 The tally already knows where the table and the manifest disagree; this reduces

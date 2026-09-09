@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command line for building a corpus and for merging the shards of one.
 
 A corpus is built once and read by every run that is scored against it, so the

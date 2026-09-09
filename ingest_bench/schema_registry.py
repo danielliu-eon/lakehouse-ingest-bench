@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Register a corpus's Avro schema, and the five bytes a Confluent record carries.
 
 A run's records are raw Avro single-record binary by default: the corpus

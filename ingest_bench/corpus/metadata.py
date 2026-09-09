@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Read a published corpus: what it declares, and the batches it is made of.
 
 Every tool downstream of the generator — the producer, the table creator, the

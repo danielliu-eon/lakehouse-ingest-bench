@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Run a rendered streaming job on Spark, from inside the Spark image.
 
 This is the whole of the engine's code. Everything the job then does — reading

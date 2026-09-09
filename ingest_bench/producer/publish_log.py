@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What the producer actually published, batch by batch.
 
 Freshness is measured from when a batch finished being published, not from when

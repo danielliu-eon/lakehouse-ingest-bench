@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from ingest_bench import __version__
 from ingest_bench.clock import SystemClock, now_ms
 

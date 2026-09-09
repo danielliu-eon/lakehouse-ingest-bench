@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # The whole benchmark on one machine: build a corpus, stage a run, start an
 # engine on it, offer the corpus and score what reaches the table. Exits 0 only
 # when the scorer published `run_valid: true`.

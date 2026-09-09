@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Reclaim what a collected run is still paying for: its table, the warehouse
 # data behind it and, on request, its artifacts.
 #

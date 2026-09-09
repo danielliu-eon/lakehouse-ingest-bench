@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """One finished run as the document a result is published as.
 
 A run directory is the raw record: the spec that was asked for, the facts an

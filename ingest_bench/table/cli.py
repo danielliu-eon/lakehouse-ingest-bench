@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command line for creating, inspecting and dropping a run's table.
 
 The two lifecycle commands bracket a run: one creates the table the engine

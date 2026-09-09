@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # The three buckets the stack's paths name: the corpus a run reads, the
 # warehouse the catalog writes tables into, and the run directories a run
 # publishes. Created here rather than by whichever tool touches one first,

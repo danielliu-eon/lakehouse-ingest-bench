@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """When each batch is due, and which shard owns it.
 
 The corpus fixes the offered rate: a batch carries a fixed interval's worth of

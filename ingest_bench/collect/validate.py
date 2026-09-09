@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The publication rules `results/` is held to (spec §11.2), checked in one
 pass so a contributor and CI run the identical check `scripts/validate-results.py`
 merely invokes.

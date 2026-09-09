@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Generate a corpus: batch files, key sidecars, manifest, partition truth, column stats, corpus.json.
 
 The manifest is the frozen scoring input. Every figure in it is re-derived

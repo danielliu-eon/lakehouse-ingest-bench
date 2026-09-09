@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Everything on an AWS account that a run needs and no run creates for itself:
 # a bucket, two ECR repositories, an MSK cluster with its security group, one
 # IAM role reached through EKS Pod Identity, and the namespace and

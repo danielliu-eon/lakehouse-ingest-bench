@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The live verdict that stops a run that cannot pass.
 
 A run lasts hours, and most of the runs in a sizing sweep are undersized by

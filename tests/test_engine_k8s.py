@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What a shell driver is told about an engine it is about to address on a cluster.
 
 The drivers hold no engine's names. They ask for the kind of resource a run is,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The topic a run owns: created and dropped, and dropped from inside the VPC.
 
 The lifecycle tests need a broker and are marked accordingly. `drop-topic` is

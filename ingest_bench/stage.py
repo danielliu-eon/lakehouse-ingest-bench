@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Stage a run: create the topic and the table, and write down what an engine needs.
 
 Staging is the seam between the harness and whatever is being scored. It ends

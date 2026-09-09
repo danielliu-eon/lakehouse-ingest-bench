@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Start the offer and the reader of a staged run: the scorer first, the producer
 # shards once the scorer has taken a reading.
 #

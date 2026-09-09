@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The names a run answers to, all derived from its spec and its stamp.
 
 A run's topic, table and run directory are one identifier in different

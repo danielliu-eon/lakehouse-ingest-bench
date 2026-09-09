@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Declared value shape of a corpus schema, and the validation that gates it.
 
 A schema is a JSON file listing one declaration per generated column; the

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Turn a torn-down run into a read verdict and, on request, a published result.
 #
 # The scorer publishes its artifacts as it goes and its pod is gone by the time

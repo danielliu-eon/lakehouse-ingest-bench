@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Build the harness and the engine images and push them to the site's registry,
 # each tagged with the commit it was built from.
 #

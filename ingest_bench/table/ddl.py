@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Render the Spark SQL that creates the same table ``create`` would.
 
 An engine that manages its own table is given DDL rather than a pre-created

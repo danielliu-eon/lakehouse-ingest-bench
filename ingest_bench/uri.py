@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Object-store and local-path access through fsspec, so every tool takes a URI.
 
 A corpus is written once and read by the producer, the scorer and whatever

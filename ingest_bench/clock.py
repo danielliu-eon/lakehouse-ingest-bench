@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Wall clock behind a protocol so pacing and scoring can be tested with a fake."""
 
 from __future__ import annotations

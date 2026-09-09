@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The knobs a managed Spark run is sized by, and the files one run needs.
 
 Everything here renders text: the properties the job is submitted with, the

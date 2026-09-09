@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The headline table every published result is read through.
 
 `collect` writes one document per run; this turns the whole `results/`

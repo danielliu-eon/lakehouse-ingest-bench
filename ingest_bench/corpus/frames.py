@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Batch file framing: length-prefixed Avro datums, zstd-compressed.
 
 A frame is exactly one Kafka message value, so the producer splits frames and

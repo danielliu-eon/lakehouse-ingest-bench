@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Environment indirection, so no file a run writes has to hold a secret.
 
 A site config, a rendered engine script and a run's published facts are all

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The manifests a driver applies have to render, and to render into what a Job needs.
 
 Nothing here reaches a cluster: rendering is string substitution, and the whole

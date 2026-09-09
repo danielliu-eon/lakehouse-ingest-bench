@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Create and drop the topic a run publishes into, and count the cluster's brokers.
 
 A run owns its topic: it is created before the producer starts and dropped

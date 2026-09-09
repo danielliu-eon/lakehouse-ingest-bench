@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What a published result may not carry, and the one rule that takes it out.
 
 A run directory is full of one operator's site: the bucket the corpus was read

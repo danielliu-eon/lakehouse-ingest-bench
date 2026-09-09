@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Whether the fleet absorbed the offer as fast as it was offered.
 
 Freshness says how stale the table was; keep-up says whether the staleness was

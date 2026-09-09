@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Remove what `setup.sh` created, in the order that lets each deletion succeed:
 # the workloads first, then the identity they ran as, then the broker, then the
 # security group the broker's network interfaces were holding.

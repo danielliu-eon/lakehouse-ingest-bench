@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Deterministic value streams, and the row blocks assembled out of them.
 
 Every cell is a pure function of ``(seed, batch, position, column)``, so a row

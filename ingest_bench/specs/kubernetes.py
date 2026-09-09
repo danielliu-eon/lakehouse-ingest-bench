@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The Kubernetes shape of a managed engine, for the drivers that address it.
 
 A run on a cluster is one custom resource, and what a driver does to it is the

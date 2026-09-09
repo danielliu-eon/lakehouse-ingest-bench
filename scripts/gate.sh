@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Judge a run that is still going, from the artifacts the scorer publishes.
 #
 # The scorer's two published files rather than the table: the scorer has

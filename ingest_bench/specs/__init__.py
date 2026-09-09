@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What a run is asked for, where it runs, and the names that follow from both.
 
 A run is described by two files: a spec, which is the comparable part — corpus,

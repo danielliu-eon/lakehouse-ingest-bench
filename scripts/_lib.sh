@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Shared shell for the run scripts: where the stack is, how to speak to it, and
 # how to wait for the two things in it that announce readiness to nobody.
 #

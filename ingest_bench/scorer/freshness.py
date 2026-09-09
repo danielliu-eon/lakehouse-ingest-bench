@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """How stale the table is, sampled over time rather than at each commit.
 
 Freshness is one number about a whole run, and the honest one is a quantile of

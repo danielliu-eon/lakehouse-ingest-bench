@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # One producer process against the local Kafka: MB/s of encoded bytes and
 # rows/s. `--epoch` names an hour in the past at `--speed 1000`, so every
 # batch is already due the instant the producer starts — nothing about the

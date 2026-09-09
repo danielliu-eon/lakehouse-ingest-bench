@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Stop everything a run started and drop its topic, keeping everything a result
 # is made of.
 #

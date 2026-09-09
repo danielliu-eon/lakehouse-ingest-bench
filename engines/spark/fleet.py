@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The compute a Spark run asked for, per role, for the cost column.
 
 Requested and not observed: these are the numbers the spec chose, which is

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import numpy as np
 
 from ingest_bench.corpus.generate import BatchRecord

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The registry client, against a registry that is an HTTP server in this process.
 
 The Confluent registration API is one POST, so what is worth pinning is what

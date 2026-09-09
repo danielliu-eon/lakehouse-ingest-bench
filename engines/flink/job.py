@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Submit a rendered SQL script to Flink, from inside the Flink image.
 
 This is the whole of the engine's code. The script it submits is rendered by

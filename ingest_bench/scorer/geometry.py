@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The shape of the files a run left behind, sampled along the run.
 
 Freshness says whether the table was current and exactness whether it was

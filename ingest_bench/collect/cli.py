@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The commands that turn a finished run into a publishable result, and that
 turn a directory of results into the table a reader compares them on.
 

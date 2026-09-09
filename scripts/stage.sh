@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Stage a run on the cluster, and for a managed engine start it.
 #
 # Staging runs as a Job because it creates the topic, and a managed broker is

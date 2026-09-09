@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The compute a managed Flink run is given, as the cost column reads it.
 
 The knobs size the fleet in the units Flink asks for — a jobmanager, some

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The local stack's compose file has to render before anything can run it.
 
 `docker compose config` resolves the `include`, every profile's services and

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The run spec and the site config, as read off disk.
 
 Both loaders refuse what they do not recognise: an unknown key is a typo, and

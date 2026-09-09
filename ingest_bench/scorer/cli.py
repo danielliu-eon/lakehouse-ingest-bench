@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command lines for scoring a run, judging one while it goes, and its geometry.
 
 `score` is the measurement and `gate` is the decision drawn from it, and they

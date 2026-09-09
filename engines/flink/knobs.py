@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The knobs a managed Flink run is sized by, and the files one run needs.
 
 Everything here renders text: the SQL the job submits, the configuration it is
