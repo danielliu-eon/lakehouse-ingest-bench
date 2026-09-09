@@ -30,6 +30,7 @@ scripts/smoke.sh --engine external        # stage and score; you start the engin
 | Flag | Effect |
 |---|---|
 | `--engine flink\|external` | which spec under `runs/` to stage. `flink` also starts the engine; `external` prints the facts and waits |
+| `--spec PATH` | a spec under `runs/` to stage instead of `runs/smoke-<engine>.yaml` |
 | `--set KEY=VALUE` | override a corpus preset key, repeatable |
 | `--keep` | skip teardown, so the table and the stack can be inspected |
 | `--external-ready-file PATH` | with `--engine external`, wait for `PATH` to appear instead of reading a newline from stdin |
@@ -40,6 +41,14 @@ scripts/smoke.sh --engine external        # stage and score; you start the engin
 It exits 0 only when the scorer published `run_valid: true`, printing the verdict
 block first; on a failure it dumps the tail of the scorer's and the engine's logs
 before teardown.
+
+`kafka.value_encoding: confluent` on a spec offers every value behind the
+five-byte Confluent header instead of as raw Avro, and staging registers the
+corpus's schema under `<topic>-value` with `site.kafka.schema_registry.url`
+first. The local stack runs a registry for that, so
+`scripts/smoke.sh --spec runs/smoke-flink-confluent.yaml` needs nothing extra;
+a site of your own names its own registry, and staging refuses such a spec
+before it touches the cluster where the site declares none.
 
 On repeat runs: teardown wipes the object store, so each run regenerates the
 corpus, and with `--keep` a second run at a *different* `--set` leaves two

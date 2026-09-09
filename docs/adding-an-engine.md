@@ -17,7 +17,9 @@ code only when you want many runs of the same engine at different sizes.
 Six rules. Break one and the run is not comparable to any other.
 
 1. Consume the topic from the earliest offset. Values are Avro binary
-   single-record encoding per `schema.avsc`; keys are UTF-8 strings or null.
+   single-record encoding per `schema.avsc`, or that same encoding behind the
+   Confluent header when the run asks for it (see "Confluent values" below);
+   keys are UTF-8 strings or null.
 2. Append every row to the table, mapping columns one to one by name, and
    declare every corpus column `NOT NULL`. Extra columns are allowed and may be
    nullable; a corpus column that is dropped, renamed, retyped or optional voids
@@ -53,6 +55,10 @@ Staging writes `runs/<run_id>/facts.json`. It is the whole interface:
 | `topic` | the topic to consume, from its earliest offset |
 | `corpus_uri` | the corpus directory, for reference |
 | `schema_avsc_uri` | the Avro schema the values are encoded with |
+| `value_encoding` | `avro` for raw Avro binary, `confluent` for the Confluent wire format |
+| `schema_registry_url` | the registry the schema was registered with, or `null` |
+| `schema_subject` | the subject it was registered under, or `null` |
+| `schema_id` | the id every record's header names, or `null` |
 | `catalog_props` | Iceberg catalog properties, credentials redacted |
 | `table` | the `namespace.table` to append to |
 | `partition` | how the table is partitioned |
@@ -63,6 +69,25 @@ Staging writes `runs/<run_id>/facts.json`. It is the whole interface:
 The credentials are redacted because `facts.json` is meant to be publishable.
 Your own catalog credentials come from wherever you keep them — `site.yaml`
 holds the harness's copy.
+
+### Confluent values
+
+`value_encoding` is `avro` unless the run's spec says otherwise, and then the
+four keys after it are `null`: every value is the Avro binary of one record
+against `schema.avsc`, with nothing in front of it.
+
+Where it is `confluent`, each value is that same binary behind five bytes — a
+zero byte, then `schema_id` as a big-endian four-byte integer — and the schema
+was registered before the first record, under `schema_subject` at
+`schema_registry_url`. One schema and one id for the whole run, so a reader
+that resolves the writer schema by the id in each header and a reader that
+strips five bytes and uses `schema.avsc` both read every record correctly. The
+registry serves the Confluent API, so any client that speaks it will do; the
+credential, where the registry needs one, is the operator's and is not in
+`facts.json`.
+
+Nothing else about the run changes: the rows, the keys, the table and the
+scoring are what a raw-Avro run's are.
 
 ## Walk-through: an engine the harness does not manage
 
