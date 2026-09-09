@@ -23,22 +23,15 @@ from typing import Protocol, cast
 
 from ingest_bench import kafka_admin, uri
 from ingest_bench.catalog import table_identifier
+from ingest_bench.collect.redact import redact_props
 from ingest_bench.corpus import metadata
 from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.engines import knobs_for
-from ingest_bench.specs.env import has_placeholder, resolve_env_placeholders
+from ingest_bench.specs.env import resolve_env_placeholders
 from ingest_bench.table.create import create_table, parse_partition
 from ingest_bench.table.ddl import spark_sql_ddl
-
-REDACTED = "<redacted>"
-
-# A property whose name contains one of these carries a credential. Matching on
-# the name rather than the value is what keeps the run directory publishable:
-# `facts.json` is meant to be pasted into an issue or an engine's config, and a
-# catalog token is the one thing in it that must not travel.
-_SECRET_HINTS = ("token", "credential", "secret", "password")
 
 # Three replicas is what a run's records are worth: enough that losing one
 # broker mid-run does not end it, and no more than the smallest cluster anyone
@@ -146,21 +139,15 @@ def resolve_corpus_dir(corpus_root: str, name: str) -> str:
     return matches[0]
 
 
-def _names_a_secret(key: str) -> bool:
-    return any(hint in key.lower() for hint in _SECRET_HINTS)
-
-
 def redact(props: dict[str, str]) -> dict[str, str]:
     """``props`` with every credential-shaped literal value replaced.
 
-    A value that names an environment variable is published as it stands. It is
-    a reference and not a secret, and it is the one thing a reader of
-    `facts.json` needs in order to supply the credential from their own copy of
-    it — redacting it would hide which variable to set.
+    No site is passed, so the URIs among the values survive: `facts.json` is
+    what an engine is configured from, and a warehouse property rewritten to a
+    placeholder would point it at nothing. The published copy of the same
+    properties loses them; see `collect.redact`.
     """
-    return {
-        key: REDACTED if _names_a_secret(key) and not has_placeholder(value) else value for key, value in props.items()
-    }
+    return redact_props(props, None)
 
 
 def replication_factor(brokers: int) -> int:
