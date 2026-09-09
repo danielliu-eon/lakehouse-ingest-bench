@@ -3,7 +3,7 @@
 Benchmark for streaming ingest from Apache Kafka into Apache Iceberg. Measures keep-up,
 freshness (contiguous-prefix lag), exactness (loss, duplication, corruption) and file geometry
 for any engine that consumes a Kafka topic and appends to an Iceberg table. Ships Apache Flink
-today as a managed engine; Apache Spark arrives in phase 2.
+and Apache Spark as managed engines.
 
 Status: phase 1 — local end to end. See `scripts/smoke.sh`.
 
@@ -22,6 +22,7 @@ built on a Java SQL runner in place of PyFlink, is a planned follow-up.
 git clone <this repository> && cd lakehouse-ingest-bench
 uv sync                                 # only for the tests and the tools outside a container
 scripts/smoke.sh                        # about ten minutes
+scripts/smoke.sh --engine spark         # the same run on Spark
 ```
 
 That builds a five-minute 5 MB/s corpus, creates a Kafka topic and an Iceberg
@@ -71,5 +72,6 @@ an engine is.
   manage, and what a managed engine's directory holds.
 - `docs/methodology.md` — how freshness, exactness and keep-up are defined, and
   why (phase 3).
-- [`engines/flink/README.md`](engines/flink/README.md) — the managed Flink
-  engine: what it runs, its knobs, and its traps.
+- [`engines/flink/README.md`](engines/flink/README.md) and
+  [`engines/spark/README.md`](engines/spark/README.md) — each managed engine:
+  what it runs, its knobs, and its traps.
