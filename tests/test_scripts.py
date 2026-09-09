@@ -35,6 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 AWS_DEPLOY = REPO_ROOT / "deploy" / "aws"
 SMOKE = SCRIPTS / "smoke.sh"
+GEN_CORPUS = SCRIPTS / "gen-corpus.sh"
+PUSH_IMAGES = SCRIPTS / "push-images.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
@@ -159,9 +161,14 @@ def test_every_script_parses() -> None:
 
 def test_every_script_is_executable() -> None:
     entrypoints = _shell_entrypoints()
-    assert len(entrypoints) == len(_shell_files()) - 1, "one sourced library was expected, and it is not executable"
+    sourced = sorted(set(_shell_files()) - set(entrypoints))
+    assert [path.name for path in sourced] == ["_k8s.sh", "_lib.sh"], "these are the two sourced libraries"
     for script in entrypoints:
         assert os.access(script, os.X_OK), f"{script} is not executable"
+    for script in sourced:
+        # A sourced file that is executable invites being run, and neither of
+        # these does anything on its own but set variables the caller needs.
+        assert not os.access(script, os.X_OK), f"{script} is sourced, so it should not be executable"
 
 
 @needs_bash
@@ -181,6 +188,58 @@ def test_an_unknown_argument_is_refused() -> None:
     out = subprocess.run([str(SMOKE), "--warmup"], capture_output=True, text=True)
     assert out.returncode == 2, out.stdout
     assert "unknown argument --warmup" in out.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES])
+def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
+    """`--help` and an unknown argument, with no site config and no cluster.
+
+    These drivers are read before they are run, and refusing to say what they
+    do until a site config exists would be refusing the first question anyone
+    asks of them.
+    """
+    out = subprocess.run([str(script), "--help"], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "--site PATH" in out.stdout
+
+    refused = subprocess.run([str(script), "--warmup"], capture_output=True, text=True)
+    assert refused.returncode == 2, refused.stdout
+    assert "unknown argument --warmup" in refused.stderr
+
+
+@needs_bash
+def test_gen_corpus_refuses_bad_arguments_before_it_needs_a_cluster() -> None:
+    """A non-numeric `--shards` renders a Job with a completions field of 'two'.
+
+    Both refusals happen before the site config is read, because the values
+    reach a manifest and a rejected Job is a slower way to learn the same
+    thing.
+    """
+    out = subprocess.run([str(GEN_CORPUS), "smoke", "--shards", "two"], capture_output=True, text=True)
+    assert out.returncode == 1, out.stdout
+    assert "--shards must be a positive integer" in out.stderr
+
+    both = subprocess.run([str(GEN_CORPUS), "smoke", "events-100mbs-skew"], capture_output=True, text=True)
+    assert both.returncode == 1, both.stdout
+    assert "takes one preset" in both.stderr
+
+
+def test_gen_corpus_shards_each_shard_into_its_own_prefix() -> None:
+    """A sharded corpus needs a `--out` per shard, and one shard needs none.
+
+    Every shard of a preset writes a directory of the same name, so shards
+    sharing one `--out` would overwrite each other's metadata. The script
+    cannot be run without a cluster, so what is checked is the command it
+    renders into the Job.
+    """
+    text = GEN_CORPUS.read_text()
+    assert "--out $CORPUS_ROOT/shards/\\$JOB_COMPLETION_INDEX" in text
+    assert "--shard-index \\$JOB_COMPLETION_INDEX --shard-count $SHARDS" in text
+    assert "gen-corpus --preset $PRESET --out $CORPUS_ROOT --seed $SEED" in text, "one shard writes to the root"
+    for template in ("corpus-gen-job.yaml.tmpl", "harness-job.yaml.tmpl"):
+        assert f"deploy/k8s/{template}" in text
+        assert (REPO_ROOT / "deploy" / "k8s" / template).exists()
 
 
 @needs_bash

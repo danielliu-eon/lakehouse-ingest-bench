@@ -74,6 +74,9 @@ The operator's chart version is printed either way. Then:
 It ends by printing the values to fill into `site.yaml` — copy
 `site.aws.example.yaml` — including the IAM bootstrap string.
 
+With it filled in, `scripts/push-images.sh` builds and pushes both images, and
+`scripts/gen-corpus.sh <preset>` builds a corpus into the bucket as a Job.
+
 > **MSK bills by the hour whether or not a run is using it,** and reaching
 > `ACTIVE` takes 15 to 30 minutes. Two `kafka.m5.large` brokers with 100 GiB
 > each are a few dollars a day. Tear the cluster down between campaigns rather
