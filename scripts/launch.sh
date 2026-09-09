@@ -168,6 +168,12 @@ done
 # The offer
 # ---------------------------------------------------------------------------
 
+# The scorer's first-reading wait above can eat most or all of EPOCH_LEAD_S; a
+# producer applied with the epoch no longer safely ahead has its first batch
+# due before its first connection opens, and the run voids as producer_bound
+# rather than measuring the engine.
+(($(date +%s) + 30 <= EPOCH)) || die "epoch $EPOCH is under 30s away; raise EPOCH_LEAD_S (currently $EPOCH_LEAD_S) and relaunch"
+
 PRODUCER_JOB="$(producer_job "$RUN_ID")"
 PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $RUN_ID --epoch $EPOCH"
 # `$JOB_COMPLETION_INDEX` is escaped here and expanded by the shell that is the

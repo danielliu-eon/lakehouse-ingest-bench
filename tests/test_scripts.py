@@ -920,6 +920,30 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
 
 
+@needs_shell_tools
+def test_launch_refuses_to_start_the_producer_once_its_lead_has_expired(tmp_path: Path) -> None:
+    """The scorer's first-reading wait can eat EPOCH_LEAD_S; the producer must not start once it has.
+
+    A producer applied with the epoch no longer safely ahead has its first
+    batch due before its first connection opens, and the run voids as
+    producer_bound — a wasted fleet the check turns into a named refusal
+    instead.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {"EPOCH_LEAD_S": "10"})
+
+    assert run.result.returncode != 0
+    assert "EPOCH_LEAD_S" in run.result.stderr
+    # The scorer is applied before the lead is checked; only the producer —
+    # the one that would be minutes late — must not start.
+    assert [str(_mapping(document["metadata"])["name"]) for document in run.applied] == [f"scorer-{RUN_OBJECT}"]
+
+
 # `table-metadata` as the driver calls it, answering whatever the case under
 # test needs: a location, the absent-table code, or a failure of its own.
 TABLE_METADATA_STUB = """
