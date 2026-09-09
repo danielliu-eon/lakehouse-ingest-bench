@@ -106,22 +106,43 @@ RUN_ID=$(scripts/stage.sh runs/my-run.yaml | awk -F': ' '/^run_id: /{print $2}')
 scripts/launch.sh "$RUN_ID"
 scripts/gate.sh "$RUN_ID" --teardown       # every minute or so, while the run goes
 scripts/teardown.sh "$RUN_ID"              # once the offer has drained
-scripts/finish.sh "$RUN_ID"                # the verdict, read from the bucket
+scripts/finish.sh "$RUN_ID" --publish results/   # geometry, the verdict, the result
+scripts/purge.sh "$RUN_ID" --artifacts     # once you are done with the table
 ```
 
 | Driver | What it does |
 |---|---|
-| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for a managed engine applies the two documents it rendered and waits for the job to reach `RUNNING`. Prints `run_id: <id>` |
+| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for a managed engine applies the two documents it rendered, waits for the job to reach `RUNNING` and records the image it is running. Prints `run_id: <id>` |
 | `launch.sh <run_id>` | applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
 | `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing |
-| `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, and copies the table's last metadata document beside the run's artifacts |
-| `finish.sh <run_id>` | fetches `scores/` and prints the verdict block. Exits 0 only on `run_valid: true` |
+| `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, copies the table's last metadata document beside the run's artifacts, and collects the run |
+| `finish.sh <run_id>` | measures the file geometry, collects the run again, prints the verdict block and the geometry line. `--publish <dir>` also writes the result. Exits 0 only on `run_valid: true` |
+| `purge.sh <run_id>` | drops the table and removes its files, and with `--artifacts` the run's own prefix. Names everything first and asks; `--yes` answers |
 
 Teardown comes before `finish.sh` because the score is in the bucket either way,
 and every minute a drained run's fleet stays up is a minute paid for nothing.
-Neither `teardown.sh` nor anything else here deletes the table or the warehouse
-data: a run's table is its result. Drop one by hand with `drop-table --table
-<table>` when you are done with it.
+Neither `teardown.sh` nor anything else before `purge.sh` deletes the table or
+the warehouse data: a run's table is its result, and reclaiming it is a separate
+decision taken once the result has been read.
+
+`purge.sh` is the only script that deletes measured data. It reads the table's
+location out of the metadata document teardown copied rather than deriving it
+from the table's name, refuses while the run's scorer is still in the namespace,
+prints the table, the prefix and — with `--artifacts` — the run's prefix, and
+then asks. Nothing is removed without `--yes` or a `y` at the prompt.
+
+### Publishing a result
+
+`finish.sh <run_id> --publish results/` writes the run's document under
+`results/<engine>/<date>-<engine>-<corpus>-<variant>.json` and re-renders
+`results/RESULTS.md` from every document there. `--variant <name>` records the
+tuning the run stands for; any engine-specific tuning beyond the run-spec knobs
+is a separately named variant rather than a second version of one file.
+
+A run whose `run_valid` is false is refused unless `--publish-invalid` says to
+keep it labelled by its validity state. The rules a published result has to meet
+are in [`results/README.md`](../results/README.md), and the document's own schema
+is in [`results-format.md`](results-format.md).
 
 ### Which steps run in the cluster, and why
 
@@ -139,10 +160,11 @@ on a Job, fetching artifacts, judging a verdict. So the harness image carries no
 reads the cluster, the registry, the identities and the roots out of it.
 
 Install the harness itself with its `aws` extra — `uv sync --extra aws` in a
-checkout, or `pip install '.[aws]'` — because `teardown.sh` reads the table's
-last metadata document through the catalog, and pyiceberg imports `boto3` only
-when it comes to sign a Glue request. A default install reaches the catalog and
-then fails on that import.
+checkout, or `pip install '.[aws]'` — because three of the drivers reach the
+catalog or the bucket through it: `teardown.sh` reads the table's last metadata
+document, `finish.sh` walks its manifests for the geometry, and `purge.sh` drops
+the table. pyiceberg imports `boto3` only when it comes to sign a Glue request,
+so a default install reaches the catalog and then fails on that import.
 
 ### What the site declares
 
@@ -269,6 +291,7 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `flink.env` | stage | the cluster's shape, which the stack sizes containers from |
 | `flinkdeployment.yaml` | stage | the engine as the Flink operator takes it, for a run on a cluster |
 | `flink-job-configmap.yaml` | stage | `job.sql` and `flink-conf.yaml`, as the ConfigMap the engine's pods mount |
+| `engine-image.json` | stage | the image the engine ran and the digest the node pulled |
 | `publish_log-0.jsonl` | producer | one record per batch: rows, bytes, when it was due, when it was acked |
 | `scores/summary.json` | scorer | the verdict, rewritten on every poll |
 | `scores/freshness.json` | scorer | the lag quantiles and the whole lag curve, on both clocks |
@@ -277,6 +300,8 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `scores/geometry.json` | `file-sizes` | the file geometry along the run and at its end |
 | `scores/snapshots.jsonl` | scorer | one line per commit the table took |
 | `scores/keepup_samples.jsonl` | scorer | offered against committed, once per poll |
+| `table-metadata.final.json` | teardown | the table's last metadata document, copied |
+| `run.json` | `collect` | the whole result, redacted — see `results-format.md` |
 
 The publish log is also uploaded to the object store as the run goes, because
 the scorer reads the offered side from there rather than from the local disk.
@@ -324,11 +349,12 @@ rows and bytes, the file-size p50/p90/p99 with min and max, the share of files
 under 32 MiB and under 8 MiB, a log2 histogram of sizes, and per-commit
 quantiles of files added and of their sizes — at each of
 `scoring.geometry_offsets_s`, `absent` for a rung the run never reached, and at
-the final snapshot. `file-sizes --metadata runs/<run_id>/table-metadata.final.json
---epoch <facts.epoch> --out runs/<run_id>/scores` writes it: run it after
-teardown, from the copied document rather than the catalog, and before anything
-expires the run's snapshots, since the manifests an expiry drops are where every
-figure in it is read from.
+the final snapshot. `finish.sh` writes it, from the document teardown copied
+rather than through the catalog, and prints its p50 and small-file share as the
+last line of the verdict block. Run it before anything expires the run's
+snapshots: the manifests an expiry drops are where every figure in it is read
+from. `file-sizes --metadata runs/<run_id>/table-metadata.final.json --epoch
+<facts.epoch> --out runs/<run_id>/scores` is the same step on its own.
 
 One recorded run of the smoke, with the two artifacts behind its verdict, is in
 [`examples/smoke-flink/`](examples/smoke-flink/). A first run of the same
