@@ -3,3 +3,9 @@
 runs/*/
 tests
 docs
+# The tool caches. Nothing enters an image — every Dockerfile copies named
+# paths — so this is the build context each `docker build` uploads to the
+# daemon, which a warm .mypy_cache alone can double.
+.mypy_cache
+.pytest_cache
+.ruff_cache
