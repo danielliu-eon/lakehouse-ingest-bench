@@ -3,9 +3,12 @@
 `deploy/aws/setup.sh`, `scripts/push-images.sh`, `scripts/stage.sh
 runs/aws-smoke-spark.yaml`, `scripts/launch.sh`, `scripts/gate.sh` (every
 minute), `scripts/teardown.sh`, `scripts/finish.sh` ran this on 2026-09-09,
-on EKS: three `m6i.xlarge` amd64 nodes, Kubeflow spark-operator 2.5.2 (webhook
-enabled), Amazon MSK (three `kafka.m5.2xlarge` brokers, Kafka 3.9.x, IAM
-auth), Glue Iceberg REST catalog, EKS Pod Identity, images tagged `e508270`.
+on EKS: three `m6i.xlarge` amd64 nodes (recorded before the scorer and the
+producer shards went to 2 CPU each, so the same smoke needs four today — see
+§Sizing the cluster in `deploy/aws/README.md`), Kubeflow spark-operator 2.5.2
+(webhook enabled), Amazon MSK (three `kafka.m5.2xlarge` brokers, Kafka 3.9.x,
+IAM auth), Glue Iceberg REST catalog, EKS Pod Identity, images tagged
+`e508270`.
 `runs/aws-smoke-spark.yaml`: 2 executors x 2 cores, 4 GiB each, 2 GiB driver,
 a 10 s trigger interval, hash distribution mode, 4 Kafka partitions, one
 producer shard. Verdict `run_valid: true`, drained, 5,840,896 rows exact (0

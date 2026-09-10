@@ -28,10 +28,11 @@ CI runs this over the whole directory, so these fail a pull request:
 - **`spec.producer.seconds` names no limit** — absent, or written `null` to say
   the whole corpus was offered. A shortened offer is a probe, not a result.
 - **The fleet is disclosed**: at least one role, each with a `machine_type` that
-  is neither empty nor the `unspecified` a run whose knobs named none reports,
-  and a positive `vcpu` and `gib`. And `run.site_pricing` carries both rates and
-  both are above zero, so the cost column can be re-derived — a run priced at
-  zero renders as `n/a` and discloses nothing.
+  is neither empty, nor the `unspecified` a run whose knobs named none reports,
+  nor a `YOUR_` placeholder a shipped external spec left for its operator to
+  replace, and a positive `vcpu` and `gib`. And `run.site_pricing` carries both
+  rates and both are above zero, so the cost column can be re-derived — a run
+  priced at zero renders as `n/a` and discloses nothing.
 - **The scorer's summary and the derived keep-up and `producer_bound` are
   present**, not null.
 - **Every run measured a fresh table and topic.** No two documents here name

@@ -922,13 +922,14 @@ _MSK_BOOTSTRAP = (
 )
 
 
-def _write_site(path: Path, *, registry: bool = False) -> subprocess.CompletedProcess[str]:
+def _write_site(path: Path, *, registry: bool = False, yq_stub: str = "") -> subprocess.CompletedProcess[str]:
     """`setup.sh`'s own site writer, against the values a finished setup holds.
 
     Lifted and run like the bucket and broker-volume steps above: the values it
     writes are only known at the end of a live setup. What it owes is a file
     the harness's own loader accepts, which is what the tests below read it
-    with.
+    with. ``yq_stub`` is a shell function shadowing the real `yq`, for the
+    read-back this cannot otherwise make fail.
     """
     harness = f"""
         set -euo pipefail
@@ -946,6 +947,7 @@ def _write_site(path: Path, *, registry: bool = False) -> subprocess.CompletedPr
         NODE_SELECTOR='{{}}'
         TOLERATIONS='[]'
         WITH_SCHEMA_REGISTRY={"true" if registry else "false"}
+        {yq_stub}
 {_shell_function(AWS_SETUP, "write_site")}
         write_site '{path}'
     """
@@ -1005,6 +1007,29 @@ def test_the_written_site_is_never_an_overwrite(tmp_path: Path) -> None:
     assert refused.returncode == 3, refused.stdout + refused.stderr
     assert "already exists" in refused.stdout, refused.stdout
     assert existing.read_text() == kept
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    "yq_stub",
+    [
+        "yq() { printf 'no such file\\n' >&2; return 1; }",
+        "yq() { printf 'some-other-broker:9098\\n'; }",
+    ],
+    ids=["unreadable", "not-what-was-written"],
+)
+def test_a_site_that_did_not_read_back_is_removed(tmp_path: Path, yq_stub: str) -> None:
+    """Otherwise the existence refusal turns the retry that fixes it into a refusal.
+
+    A site config a driver cannot read is worth nothing to keep, and the two
+    ways the read-back fails — a file `yq` could not parse, and one whose
+    bootstrap servers are not what was written — leave the same useless file.
+    """
+    target = tmp_path / "site.yaml"
+    refused = _write_site(target, yq_stub=yq_stub)
+    assert refused.returncode == 3, refused.stdout + refused.stderr
+    assert "removed it again" in refused.stdout, refused.stdout
+    assert not target.exists()
 
 
 @needs_bash

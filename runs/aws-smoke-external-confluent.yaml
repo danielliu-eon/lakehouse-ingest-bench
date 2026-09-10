@@ -1,7 +1,8 @@
 # `aws-smoke-external.yaml` with every value behind the five-byte Confluent
 # header: the harness registers the corpus's schema at staging, and every value
 # carries the id it was registered under. docs/adding-an-engine.md §Confluent
-# values is the framing, and either way of reading it.
+# values has the framing and both ways of reading a value: resolve the writer
+# schema by that id, or strip the five bytes and use schema.avsc.
 #
 # The site has to declare `kafka.schema_registry` — the registry
 # `WITH_SCHEMA_REGISTRY=true deploy/aws/setup.sh` deploys into the namespace, or

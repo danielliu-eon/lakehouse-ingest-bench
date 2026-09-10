@@ -179,7 +179,7 @@ of three clauses to fail — `producer_bound:` before `exactness:` before
 after that prefix: `producer_bound: a batch was acknowledged 9250 ms after it
 was due, over behind_max_ms 5000`; `exactness:` with whichever of `loss_rows`,
 `duplicate_rows` and `corrupt_batches` are not zero; `freshness: window p95
-79.4 s exceeds bound 60.0 s`, or its `window max`, `the table never drained`
+79.40 s exceeds bound 60.00 s`, or its `window max`, `the table never drained`
 and `missing_emit_prefixes=` variants.
 
 `state` says how the run ended.

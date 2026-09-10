@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ingest_bench.collect.table import render_results_table
-from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, PLACEHOLDER
 from tests.test_collect import _build, _run_dir, _site
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate-results.py"
@@ -159,14 +159,16 @@ def test_validate_results_fails_on_a_null_derived_keepup(tmp_path: Path) -> None
 
 
 def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_path: Path) -> None:
-    """The empty string and the sentinel are the same non-disclosure.
+    """Three spellings of the same non-disclosure.
 
     `results/README.md` states that a published result discloses the machine
-    types behind its cost column, and a fleet can decline to say in two ways:
-    an empty string, or the sentinel word. Both are the same non-disclosure, so
-    the rule has to refuse both.
+    types behind its cost column, and a fleet can decline to say in three ways:
+    an empty string, the sentinel word an engine whose knobs named no machine
+    type reports, and the placeholder a shipped external spec leaves for its
+    operator to replace. All three are the same non-disclosure, so the rule has
+    to refuse all three.
     """
-    for absent in ("", MACHINE_TYPE_UNSPECIFIED):
+    for index, absent in enumerate(("", MACHINE_TYPE_UNSPECIFIED, f"{PLACEHOLDER}MACHINE_TYPE")):
 
         def mutate(document: dict[str, object], absent: str = absent) -> None:
             run = document["run"]
@@ -177,7 +179,7 @@ def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_pa
                 assert isinstance(role, dict)
                 role["machine_type"] = absent
 
-        result = _run(_mutated(tmp_path / absent.replace("", "empty"), mutate))
+        result = _run(_mutated(tmp_path / f"case{index}", mutate))
         assert result.returncode != 0, result.stdout
         assert "no machine_type" in result.stdout, result.stdout
 

@@ -90,7 +90,10 @@ _KUBERNETES_KEYS = frozenset(
 # creates this one under exactly this name.
 _SPARK_SERVICE_ACCOUNT = "ingest-bench-spark"
 
-_PLACEHOLDER = "YOUR_"
+# Public because `collect.validate` refuses the same prefix in a published
+# fleet's machine_type: a shipped external spec carries `YOUR_MACHINE_TYPE` for
+# its operator to replace, and two spellings of that rule would drift.
+PLACEHOLDER = "YOUR_"
 
 # The corpus's partition column, which every shipped schema carries under this
 # name. It is the default partition source because a run that says nothing
@@ -536,8 +539,8 @@ def _refuse_placeholders(value: object, where: str) -> None:
     whichever tool used it first rather than from the file that carries it.
     """
     if isinstance(value, str):
-        if _PLACEHOLDER in value:
-            raise ValueError(f"{where} still holds the {_PLACEHOLDER} placeholder: {value!r}")
+        if PLACEHOLDER in value:
+            raise ValueError(f"{where} still holds the {PLACEHOLDER} placeholder: {value!r}")
         return
     if isinstance(value, dict):
         for key, entry in cast(dict[object, object], value).items():

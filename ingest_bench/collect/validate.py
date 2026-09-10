@@ -25,7 +25,7 @@ from ingest_bench.collect.run_json import SCHEMA_VERSION
 from ingest_bench.collect.table import render_results_table
 from ingest_bench.corpus.cli import workloads_dir
 from ingest_bench.corpus.preset import corpus_hash, load_preset
-from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, PLACEHOLDER
 
 RESULTS_MD = "RESULTS.md"
 
@@ -83,11 +83,14 @@ def _fleet_failures(fleet: list[dict[str, object]]) -> list[str]:
     failures = []
     for role in fleet:
         name = role["role"]
-        # The sentinel as well as the empty string: an engine whose knobs named
-        # no machine type reports a word, and a rule that read only falsiness
-        # would wave that through while failing the engine that reported "".
-        if not role["machine_type"] or role["machine_type"] == MACHINE_TYPE_UNSPECIFIED:
-            failures.append(f"fleet: role {name!r} has no machine_type")
+        # Three spellings of the same non-disclosure: the empty string, the
+        # sentinel word an engine whose knobs named no machine type reports,
+        # and the placeholder a shipped external spec leaves for its operator
+        # to replace. A rule reading only falsiness would wave the last two
+        # through while failing the engine that reported "".
+        machine_type = str(role["machine_type"])
+        if not machine_type or machine_type == MACHINE_TYPE_UNSPECIFIED or machine_type.startswith(PLACEHOLDER):
+            failures.append(f"fleet: role {name!r} has no machine_type ({machine_type!r})")
         for field in ("vcpu", "gib"):
             value = role[field]
             if not (isinstance(value, int | float) and value > 0):

@@ -358,9 +358,9 @@ def _freshness_reason(result: freshness.FreshnessResult) -> str:
         )
     p95_s, max_s = result.window["p95_s"], result.window["max_s"]
     if p95_s is not None and p95_s > result.bound_s:
-        return f"freshness: window p95 {p95_s:.1f} s exceeds bound {result.bound_s:.1f} s"
+        return f"freshness: window p95 {p95_s:.2f} s exceeds bound {result.bound_s:.2f} s"
     if max_s is not None and max_s > result.max_bound_s:
-        return f"freshness: window max {max_s:.1f} s exceeds max bound {result.max_bound_s:.1f} s"
+        return f"freshness: window max {max_s:.2f} s exceeds max bound {result.max_bound_s:.2f} s"
     return "freshness: the measurement window holds no lag sample to judge the bound on"
 
 

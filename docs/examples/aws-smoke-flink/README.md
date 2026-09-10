@@ -3,9 +3,11 @@
 `deploy/aws/setup.sh`, `scripts/push-images.sh`, `scripts/stage.sh
 runs/aws-smoke-flink.yaml`, `scripts/launch.sh`, `scripts/gate.sh` (every
 minute), `scripts/teardown.sh`, `scripts/finish.sh` ran this on 2026-09-09,
-on EKS: three `m6i.xlarge` amd64 nodes, Flink Kubernetes Operator 1.15.0,
-Amazon MSK (three `kafka.m5.2xlarge` brokers, Kafka 3.9.x, IAM auth), Glue
-Iceberg REST catalog, EKS Pod Identity, images tagged `6d24375`.
+on EKS: three `m6i.xlarge` amd64 nodes (recorded before the scorer and the
+producer shards went to 2 CPU each, so the same smoke needs four today — see
+§Sizing the cluster in `deploy/aws/README.md`), Flink Kubernetes Operator
+1.15.0, Amazon MSK (three `kafka.m5.2xlarge` brokers, Kafka 3.9.x, IAM auth),
+Glue Iceberg REST catalog, EKS Pod Identity, images tagged `6d24375`.
 `runs/aws-smoke-flink.yaml`: 2 taskmanagers x 4 slots, 4 GiB each, 4
 partitions, one producer shard. Verdict `run_valid: true`, drained,
 5,840,896 rows exact (0 loss, 0 duplicates), freshness p50 6.745 s / p95

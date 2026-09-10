@@ -236,7 +236,7 @@ def test_a_breached_bound_names_the_freshness_clause(tmp_path: Path, corpus: met
     assert summary["run_valid"] is False and summary["state"] == "drained"
     # The offer began ten seconds before the first commit, so the window's p95
     # is measured in seconds and cannot be inside a one-second bound.
-    assert re.fullmatch(r"freshness: window p95 \d+\.\d s exceeds bound 1\.0 s", summary["reason"])
+    assert re.fullmatch(r"freshness: window p95 \d+\.\d\d s exceeds bound 1\.00 s", summary["reason"])
 
 
 def test_duplicated_rows_outrank_a_breached_bound(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
@@ -267,13 +267,13 @@ def test_the_freshness_reason_names_the_clause_that_failed() -> None:
         min_lag_s=1.0,
         missing_emit_prefixes=[],
     )
-    assert score._freshness_reason(breached) == "freshness: window p95 79.4 s exceeds bound 60.0 s"
+    assert score._freshness_reason(breached) == "freshness: window p95 79.40 s exceeds bound 60.00 s"
     assert score._freshness_reason(replace(breached, drained=False)) == "freshness: the table never drained"
     assert score._freshness_reason(replace(breached, missing_emit_prefixes=[7, 9])) == (
         "freshness: missing_emit_prefixes=2, first=7"
     )
     inside_p95 = replace(breached, window={"p50_s": 3.0, "p95_s": 10.0, "p99_s": 100.0, "max_s": 130.0})
-    assert score._freshness_reason(inside_p95) == "freshness: window max 130.0 s exceeds max bound 120.0 s"
+    assert score._freshness_reason(inside_p95) == "freshness: window max 130.00 s exceeds max bound 120.00 s"
 
 
 def _table_of(props: dict[str, str], name: str, fields: list[NestedField]) -> Table:

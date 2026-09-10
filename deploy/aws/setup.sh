@@ -607,7 +607,7 @@ fi
 # `pricing` is the one thing here that is not a property of the account, so it
 # is written at the zeros the example carries and validate-results.py refuses.
 write_site() {
-	local path=$1 parsed
+	local path=$1 parsed read_back=""
 	[[ ! -e $path ]] ||
 		die "$path already exists, and --write-site never overwrites a site config; name another path or move that file"
 	{
@@ -661,12 +661,18 @@ write_site() {
 	} >"$path"
 	# Read back rather than trusted: this is the file every driver reads, and a
 	# value that needed quoting is a refusal here instead of a stage Job that
-	# could not find the broker.
+	# could not find the broker. A file that failed it is removed, because the
+	# existence refusal above would otherwise turn a second attempt at the same
+	# path into a second refusal.
 	if ! parsed="$(yq -e '.kafka.bootstrap_servers' "$path" 2>&1)"; then
-		die "wrote $path, and yq could not read a site config out of it: $parsed"
+		read_back="yq could not read a site config out of it: $parsed"
+	elif [[ $parsed != "$BOOTSTRAP" ]]; then
+		read_back="its kafka.bootstrap_servers reads back as '$parsed' rather than '$BOOTSTRAP'"
 	fi
-	[[ $parsed == "$BOOTSTRAP" ]] ||
-		die "wrote $path, whose kafka.bootstrap_servers reads back as '$parsed' rather than '$BOOTSTRAP'"
+	if [[ -n $read_back ]]; then
+		rm -f "$path"
+		die "wrote $path and removed it again: $read_back"
+	fi
 	log "wrote $path"
 }
 
