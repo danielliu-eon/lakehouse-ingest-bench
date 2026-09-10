@@ -13,6 +13,9 @@
 # source spreads a topic's partitions over whatever cores it has: a fleet wider
 # than the topic costs idle cores rather than buying a reader. One shuffle
 # partition per core, which `hash` then distributes the writers over.
+#
+# Fifteen four-vCPU nodes, this fleet plus the harness's own pods and the
+# 2-CPU driver among them: see "Sizing the cluster" in deploy/aws/README.md.
 name: aws-100mbs-skew-spark-hash
 engine: spark
 corpus: events-100mbs-skew

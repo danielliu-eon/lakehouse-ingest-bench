@@ -88,12 +88,12 @@ fast an engine is.
 
 A measured run needs a cluster, and the cluster is yours: neither deploy script
 creates, deletes or reconfigures it. Once per account,
-[`deploy/aws/README.md`](deploy/aws/README.md) takes you from an empty account to
-a corpus in a bucket — `setup.sh`, a filled-in `site.yaml`, `push-images.sh`,
-`gen-corpus.sh`. Once per run, [`docs/running.md`](docs/running.md) is the order
-the drivers go in: `stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` →
-`finish.sh` → `purge.sh`. Amazon MSK bills by the hour whether or not a run is
-using it, so tear it down between campaigns.
+[`deploy/aws/README.md`](deploy/aws/README.md) takes an empty account to a
+corpus in a bucket — `setup.sh`, a filled-in `site.yaml`, `push-images.sh`,
+`gen-corpus.sh` — and its §Sizing the cluster counts the nodes a spec needs.
+Once per run, [`docs/running.md`](docs/running.md) is the drivers' order:
+`stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` → `finish.sh` → `purge.sh`.
+Amazon MSK bills by the hour, idle or not, so tear it down between campaigns.
 
 ## Publishing a result
 

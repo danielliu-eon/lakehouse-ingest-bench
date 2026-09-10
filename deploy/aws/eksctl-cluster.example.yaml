@@ -21,14 +21,16 @@ addons:
   - name: eks-pod-identity-agent
 managedNodeGroups:
   - name: amd64
-    # 4 vCPU / 16 GiB each; three of them hold the smoke run's Flink fleet
-    # (2 x 4 GiB taskmanagers + jobmanager), the scorer, the producer and a
-    # four-shard corpus generation with room to spare.
+    # 4 vCPU / 16 GiB each, and a node of that shape takes one 2-CPU pod: four
+    # are what a smoke spec's peak needs — two taskmanagers or executors, the
+    # scorer and one producer shard, with the 1-CPU jobmanager or driver beside
+    # one of them. The hour-long specs need far more; "Sizing the cluster" in
+    # README.md counts both.
     instanceType: m6i.xlarge
     amiFamily: AmazonLinux2023
-    desiredCapacity: 3
-    minSize: 3
-    maxSize: 3
+    desiredCapacity: 4
+    minSize: 4
+    maxSize: 4
     volumeSize: 80
     privateNetworking: true
     tags:

@@ -34,6 +34,61 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
   buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
   add-ons and pod identity associations.
 
+## Sizing the cluster
+
+A run's pods are scheduled on their CPU requests, and most of them ask for two
+cores. What each asks for:
+
+| Pod | How many | CPU | Memory |
+|---|---|---|---|
+| Scorer | one per run | `2` | `2Gi` |
+| Producer shard | `producer.shards` | `2` | `PRODUCER_MEMORY` (`2Gi`) |
+| Corpus generator | `gen-corpus.sh --shards` | `1` | `GEN_MEMORY` (`2Gi`) |
+| Stage, and every other harness Job | one at a time | `500m` | `1Gi` |
+| Schema registry | one, under `WITH_SCHEMA_REGISTRY=true` | `200m` | `512Mi` |
+| Flink jobmanager | one | `jm_cpu` (`1`) | `jm_mem_mb` |
+| Flink taskmanager | `taskmanagers` | `tm_cpu` | `tm_mem_mb` |
+| Spark driver | one | `driver_cores` (`1`) | `driver_mem_mb` |
+| Spark executor | `executors` | `executor_cores` | `executor_mem_mb` |
+
+The first five are the templates under `deploy/k8s/`; the engines' four are
+knobs their spec sets, rendered into a `FlinkDeployment` by
+[`engines/flink/knobs.py`](../../engines/flink/knobs.py) and a
+`SparkApplication` by [`engines/spark/knobs.py`](../../engines/spark/knobs.py).
+
+A node takes `floor((allocatable − daemonsets) / 2)` of the 2-CPU pods among
+them, and on a 4-vCPU node that is one: allocatable is already under 4 CPU
+before a daemonset has asked for anything, so no two of them fit however little
+the rest holds. CPU is what runs out first at these sizes — the largest memory
+request any shipped spec makes is `executor_mem_mb: 8192`, on a node with 16
+GiB. What ignoring the rule costs a run is
+[`docs/pitfalls.md`](../../docs/pitfalls.md) §One 2-CPU pod per small node.
+
+Count the pods that are up together, which is the engine's fleet, the scorer and
+the shards: a corpus is generated before a run, and the stage Job has finished
+before `stage.sh` applies the engine's documents.
+
+- `aws-smoke-flink.yaml` — two taskmanagers at `tm_cpu: 2`, one shard and the
+  scorer are four 2-CPU pods, so **four nodes**, with the 1-CPU jobmanager
+  beside one of them. `aws-smoke-spark.yaml` counts the same way, its driver
+  defaulting to one core.
+- `aws-100mbs-skew-flink-hash.yaml` — eight taskmanagers, five shards and the
+  scorer: **14 nodes**, the jobmanager again beside a taskmanager.
+  `aws-100mbs-skew-spark-hash.yaml` sets `driver_cores: 2`, which is a node of
+  its own: **15**.
+
+Grow a node group by raising its maximum along with its size, since the maximum
+is what caps it:
+
+```bash
+eksctl scale nodegroup --cluster <name> --name amd64 --nodes 14 --nodes-max 14
+```
+
+`launch.sh` counts the nodes with 2 CPU free before it applies anything and
+warns when there are fewer than the scorer and the shards need — the fleet is
+already running by then, so it is not in that count. It warns and never refuses:
+on an autoscaled cluster, the Pending pod is what buys the node.
+
 ## Environment
 
 Everything site-specific reaches the scripts through the environment; nothing in
@@ -168,9 +223,10 @@ never touched by the wrong renderer.
 
 ## If you have no cluster
 
-`eksctl-cluster.example.yaml` creates a minimal one: three `m6i.xlarge` amd64
-nodes in private subnets, the Pod Identity agent, and its own VPC across three
-zones, where `setup.sh` also puts the MSK brokers. Replace both placeholders.
+`eksctl-cluster.example.yaml` creates a minimal one: four `m6i.xlarge` amd64
+nodes in private subnets — a smoke spec's peak, by the count above — the Pod
+Identity agent, and its own VPC across three zones, where `setup.sh` also puts
+the MSK brokers. Replace both placeholders.
 
 ```bash
 eksctl create cluster -f deploy/aws/eksctl-cluster.example.yaml   # about 20 minutes

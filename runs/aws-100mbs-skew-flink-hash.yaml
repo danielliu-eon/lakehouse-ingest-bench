@@ -17,6 +17,9 @@
 # because an hour at 100 MB/s is what crosses the link, and it is the cheapest
 # codec that still halves it. Measure on the machine that will offer rather
 # than trusting the figure; that section says why.
+#
+# Fourteen four-vCPU nodes, this fleet plus the harness's own pods: see
+# "Sizing the cluster" in deploy/aws/README.md.
 name: aws-100mbs-skew-flink-hash
 engine: flink
 corpus: events-100mbs-skew
