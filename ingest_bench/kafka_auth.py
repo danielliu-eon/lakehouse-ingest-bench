@@ -37,7 +37,7 @@ def msk_token_provider() -> TokenProvider:
         from aws_msk_iam_sasl_signer import MSKAuthTokenProvider
     except ImportError as error:
         raise ValueError(
-            f"{MECHANISM_KEY}={_OAUTHBEARER} signs an Amazon MSK token, and the signer is not installed; "
+            f"{MECHANISM_KEY}={_OAUTHBEARER} requires the Amazon MSK IAM signer, which is not installed; "
             "install this harness with its 'aws' extra"
         ) from error
 
@@ -62,10 +62,7 @@ def _oauth_callback(region: str, token_provider: TokenProvider, on_token: Callab
 def refuse_mechanism_alias(security: Mapping[str, object], where: str) -> None:
     """Reject ``sasl.mechanisms``; harness readers require ``sasl.mechanism``."""
     if MECHANISM_ALIAS in security:
-        raise ValueError(
-            f"{where} sets {MECHANISM_ALIAS!r}, which a client accepts and nothing here reads; "
-            f"write it as {MECHANISM_KEY!r}"
-        )
+        raise ValueError(f"{where} sets unsupported alias {MECHANISM_ALIAS!r}; write it as {MECHANISM_KEY!r}")
 
 
 def librdkafka_config(
@@ -88,8 +85,8 @@ def librdkafka_config(
         return config
     if REGION_KEY not in security:
         raise ValueError(
-            f"{MECHANISM_KEY}={_OAUTHBEARER} signs a token per connection, so the client properties must also "
-            f"set {REGION_KEY!r}: the region to sign it in"
+            f"{MECHANISM_KEY}={_OAUTHBEARER} requires {REGION_KEY!r} in the client properties "
+            "to sign Amazon MSK IAM tokens"
         )
     region = security[REGION_KEY]
     if not isinstance(region, str):

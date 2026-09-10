@@ -22,12 +22,12 @@ usage() {
 usage: scripts/stage.sh <spec> [options]
 
   <spec>             a run spec on this machine, copied into the Job's ConfigMap
-  --site PATH        the site config naming the cluster, the broker and the catalog (default: ./site.yaml)
+  --site PATH        site config for the cluster, the broker and the catalog (default: ./site.yaml)
   --image-tag TAG    the harness and engine image tag to run (default: this checkout's commit)
 
 Environment: STAGE_WAIT_S, ENGINE_RUNNING_WAIT_S, ENGINE_POLL_S, RUNS_DIR.
 
-It prints `run_id: <id>` as its last stdout line, which launch.sh takes.
+Prints `run_id: <id>` as its final stdout line. Pass this ID to launch.sh.
 USAGE
 }
 
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $SPEC ]] || die "this stages one spec, and was given both '$SPEC' and '$1'"
+		[[ -z $SPEC ]] || die "expected one run spec; got '$SPEC' and '$1'"
 		SPEC="$1"
 		shift
 		;;
@@ -75,7 +75,7 @@ IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 
 # Use the spec name to address the staging Job before a run ID exists.
 SPEC_NAME="$(yq '.name' "$SPEC")"
-[[ -n $SPEC_NAME && $SPEC_NAME != null ]] || die "$SPEC sets no name, so this run has nothing to be called"
+[[ -n $SPEC_NAME && $SPEC_NAME != null ]] || die "$SPEC has no run name"
 ENGINE="$(yq '.engine' "$SPEC")"
 
 STAGE_JOB="stage-$SPEC_NAME"
@@ -128,7 +128,7 @@ RUN_OBJECT="$(k8s_object_name "$RUN_ID")"
 mkdir -p "$RUN_DIR"
 log "fetching the run directory into $RUN_DIR"
 aws s3 sync "$RUNS_ROOT/$RUN_ID/stage/" "$RUN_DIR/" --only-show-errors >&2 ||
-	die "could not fetch $RUNS_ROOT/$RUN_ID/stage/; job/$STAGE_JOB published it, so check your own credentials"
+	die "could not fetch $RUNS_ROOT/$RUN_ID/stage/; check your local storage credentials"
 [[ -f $RUN_DIR/facts.json ]] || die "$RUNS_ROOT/$RUN_ID/stage/ holds no facts.json"
 
 k8s_delete job "$STAGE_JOB"
@@ -179,10 +179,10 @@ else
 				# Tail logs only if pods exist; rejected submissions may have none.
 				[[ -z "$(k8s_pods_present "$ENGINE_PROVENANCE_SELECTOR")" ]] ||
 					k8s_engine_tail "$ENGINE_LOG_TARGET"
-				die "the operator gave up on $ENGINE_KIND/$RUN_OBJECT ($lifecycle): $error"
+				die "the operator failed to start $ENGINE_KIND/$RUN_OBJECT ($lifecycle): $error"
 			fi
 			if [[ $error != "$reported_error" ]]; then
-				log "$ENGINE_KIND/$RUN_OBJECT reports an error the operator has not given up over: $error"
+				log "$ENGINE_KIND/$RUN_OBJECT reports an error; the operator has not reported a terminal failure: $error"
 				reported_error="$error"
 			fi
 		fi
@@ -211,7 +211,7 @@ else
 	VERIFY_PODS=""
 	if [[ -n $ENGINE_PODS_SELECTOR ]]; then
 		VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
-			die "could not make a temporary file to read the run's pods into"
+			die "could not create a temporary file for the run's pod details"
 	fi
 
 	# Install cleanup before opening the tunnel so failures leave no process behind.
@@ -235,21 +235,21 @@ else
 			break
 		fi
 		if ((verify_status == VERIFY_DRIFT_STATUS)); then
-			die "$ENGINE_KIND/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the engine can be read before it is torn down"
+			die "$ENGINE_KIND/$RUN_OBJECT does not match $SPEC; see the setting mismatches above. It is left running for inspection"
 		fi
 		# Pending pods get the full placement timeout; endpoint read failures get a limited
 		# retry count.
 		if ((verify_status == VERIFY_PENDING_STATUS)); then
 			placement_waited=$((placement_waited + ENGINE_POLL_S))
 			if ((placement_waited > ENGINE_RUNNING_WAIT_S)); then
-				die "$ENGINE_KIND/$RUN_OBJECT's fleet was not fully placed within ${ENGINE_RUNNING_WAIT_S}s; the lines above name what is still missing. It is left running, so the pods can be read before it is torn down"
+				die "$ENGINE_KIND/$RUN_OBJECT's resources were not fully scheduled within ${ENGINE_RUNNING_WAIT_S}s; see the missing resources above. It is left running for inspection"
 			fi
 			sleep "$ENGINE_POLL_S"
 			continue
 		fi
 		verify_tries=$((verify_tries + 1))
 		if ((verify_tries >= VERIFY_TRIES)); then
-			die "could not read $ENGINE_KIND/$RUN_OBJECT's own endpoint in $VERIFY_TRIES tries (last exit $verify_status), so nothing this run measures could be attributed to the spec it was staged from"
+			die "could not verify $ENGINE_KIND/$RUN_OBJECT through its endpoint after $VERIFY_TRIES attempts (last exit $verify_status); cannot confirm that the engine matches the staged spec"
 		fi
 		sleep "$ENGINE_POLL_S"
 	done

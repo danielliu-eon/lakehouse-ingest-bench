@@ -24,23 +24,23 @@ usage() {
 usage: scripts/run.sh <spec> [options]
 
   <spec>                      a run spec on this machine, staged as it stands
-  --site PATH                 the site config every driver below reads (default: ./site.yaml)
+  --site PATH                 site config shared by all drivers (default: ./site.yaml)
   --image-tag TAG             the harness and engine image tag to run (default: this checkout's commit)
   --publish DIR               passed to finish.sh: also write the result under DIR/<engine>/
-  --variant NAME              passed to finish.sh: the tuning this run stands for
+  --variant NAME              passed to finish.sh: tuning variant for this run
   --external-ready-file PATH  for `engine: external`, wait for PATH to appear once the run is staged
                               instead of reading a newline from stdin
-  --gate-interval-s N         how often the run is judged while it goes (default: 60)
+  --gate-interval-s N         seconds between gate checks (default: 60)
   --breaches N                passed to gate.sh: consecutive non-PASS verdicts before it tears down
 
-Environment: RUN_MAX_S, EXTERNAL_READY_WAIT_S, RUNS_DIR, and every wait the
-drivers below take — each is in that driver's own --help.
+Environment: RUN_MAX_S, EXTERNAL_READY_WAIT_S, RUNS_DIR, and the timeout
+settings listed in each driver's --help.
 
 It prints `run_id: <id>` as soon as staging returns.
 
-Exit codes: finish.sh's own, 0 only on `run_valid: true`; 6 when the teardown
-did not converge, so the fleet may still be running; 2 for an argument error;
-1 for a refusal, an overrun among them.
+Exit codes: finish.sh's status (0 only when `run_valid: true`);
+6 for incomplete teardown (resources may still be running);
+2 for invalid arguments; 1 for other failures, including timeouts.
 USAGE
 }
 
@@ -92,7 +92,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $SPEC ]] || die "this runs one spec, and was given both '$SPEC' and '$1'"
+		[[ -z $SPEC ]] || die "expected one run spec; got '$SPEC' and '$1'"
 		SPEC="$1"
 		shift
 		;;
@@ -107,9 +107,9 @@ done
 
 # Validate polling arguments before starting a fleet.
 [[ $GATE_INTERVAL_S =~ ^[1-9][0-9]*$ ]] ||
-	die "--gate-interval-s takes a number of seconds, and was given '$GATE_INTERVAL_S'"
+	die "--gate-interval-s requires a positive integer; got '$GATE_INTERVAL_S'"
 [[ -z $BREACHES || $BREACHES =~ ^[1-9][0-9]*$ ]] ||
-	die "--breaches takes a count of consecutive verdicts, and was given '$BREACHES'"
+	die "--breaches requires a positive integer; got '$BREACHES'"
 # Pass one breach threshold to the gate and use it below. Tests check it matches gate.sh's
 # default.
 BREACHES="${BREACHES:-3}"
@@ -123,7 +123,7 @@ RUNS_ROOT="$(site_root '.runs_root')"
 # Validate external-only options before staging can start a managed engine.
 ENGINE="$(yq '.engine' "$SPEC")"
 [[ $ENGINE == external || -z $READY_FILE ]] ||
-	die "--external-ready-file applies to an external run, and $SPEC asks for engine '$ENGINE'"
+	die "--external-ready-file requires engine: external; $SPEC specifies '$ENGINE'"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ingest-bench-run.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -160,7 +160,7 @@ if [[ $ENGINE == external ]]; then
 	else
 		log "press enter once it is consuming $RUN_ID"
 		read -r ||
-			die "nothing answered, and $RUN_ID is staged but not launched; --external-ready-file is the unattended form"
+			die "no input received; $RUN_ID is staged but not launched. Use --external-ready-file for unattended runs"
 	fi
 fi
 
@@ -172,7 +172,7 @@ LAUNCH_STATUS=0
 "$REPO_ROOT/scripts/launch.sh" "$RUN_ID" "${COMMON[@]}" || LAUNCH_STATUS=$?
 if ((LAUNCH_STATUS != 0)); then
 	# Leave pods available for inspecting launch failures; print the teardown command.
-	log "$RUN_ID is staged and its fleet is billing; stop it with scripts/teardown.sh $RUN_ID once the lines above have been read"
+	log "$RUN_ID is staged and its resources are still running. Review the output above, then stop it with scripts/teardown.sh $RUN_ID"
 	exit "$LAUNCH_STATUS"
 fi
 

@@ -35,9 +35,7 @@ def render_template(path: Path, variables: Mapping[str, str]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="render-k8s", description="Render a Kubernetes manifest template, for a driver to apply."
-    )
+    parser = argparse.ArgumentParser(prog="render-k8s", description="Render a Kubernetes manifest template.")
     parser.add_argument("template", metavar="PATH", help="the template to render")
     parser.add_argument(
         "--set",
@@ -45,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME=VALUE",
-        help="a value for the __NAME__ marker, repeatable. Every marker needs one, and every one must match a marker",
+        help="value for a __NAME__ marker; repeat for each marker. Missing or unused values are errors",
     )
     return parser
 

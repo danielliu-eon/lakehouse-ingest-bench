@@ -51,27 +51,26 @@ def _out_path(out: str | None, run_dir: Path, *, name: str) -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="collect",
-        description="Assemble a run's publishable result document, with the operator's site redacted out of it.",
+        description="Assemble a publishable run result with private site details redacted.",
     )
     parser.add_argument("--run-dir", required=True, metavar="DIR", help="the run directory to collect")
     parser.add_argument(
         "--site",
         required=True,
         metavar="PATH",
-        help="the site config the run was staged with; its roots are what the embedded paths are redacted against",
+        help="site configuration used for staging; its storage roots identify paths to redact",
     )
     parser.add_argument(
         "--out",
         metavar="PATH",
-        help="where to write the document (default: <run dir>/run.json). A directory is filled with "
-        "<date>-<engine>-<corpus>-<variant>.json, which is the name a published result takes",
+        help="output file or directory (default: <run dir>/run.json). For a directory, use the filename "
+        "<date>-<engine>-<corpus>-<variant>.json",
     )
     parser.add_argument(
         "--variant",
         default=DEFAULT_VARIANT,
         metavar="NAME",
-        help=f"the tuning this run stands for, recorded in the document and in its published name "
-        f"(default: {DEFAULT_VARIANT})",
+        help=f"tuning variant recorded in the result and its filename (default: {DEFAULT_VARIANT})",
     )
     return parser
 

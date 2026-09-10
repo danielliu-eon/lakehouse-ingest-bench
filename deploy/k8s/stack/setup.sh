@@ -16,13 +16,14 @@ usage() {
 	cat <<'USAGE'
 usage: deploy/k8s/stack/setup.sh
 
-  It takes no arguments; every parameter is an environment variable. CLOUD
-  (aws) chooses the account-side hook, KUBE_CONTEXT the cluster, NAMESPACE
-  where the stack and every run live, BUCKET the one bucket. The broker's
-  size and placement are KAFKA_BROKERS, KAFKA_VOLUME_GI, KAFKA_CPU,
-  KAFKA_MEM_GI, KAFKA_NODE_SELECTOR and KAFKA_TOLERATIONS; the catalog's
-  placement is CATALOG_NODE_SELECTOR and CATALOG_TOLERATIONS.
-  deploy/k8s/stack/README.md lists every variable and its default.
+  This script takes no arguments. Configure it through environment variables:
+  CLOUD=aws selects AWS; KUBE_CONTEXT selects the cluster; NAMESPACE selects
+  the stack and run namespace; BUCKET selects the storage bucket.
+
+  Set broker capacity with KAFKA_BROKERS, KAFKA_VOLUME_GI, KAFKA_CPU, and
+  KAFKA_MEM_GI. Set placement with KAFKA_NODE_SELECTOR, KAFKA_TOLERATIONS,
+  CATALOG_NODE_SELECTOR, and CATALOG_TOLERATIONS.
+  See deploy/k8s/stack/README.md for all variables and defaults.
 USAGE
 }
 
@@ -48,9 +49,9 @@ done
 CLOUD="${CLOUD:-}"
 case "$CLOUD" in
 aws) ;;
-gcp) die "CLOUD=gcp is not supported yet: the cloud seam is one sourced file, deploy/aws/_stack_hooks.sh, and a GCP hook is the next cloud — see $PREREQ_DOC" ;;
-"") die "CLOUD must be set; aws is the one value this supports — see $PREREQ_DOC" ;;
-*) die "CLOUD is '$CLOUD'; aws is the one value this supports — see $PREREQ_DOC" ;;
+gcp) die "CLOUD=gcp is not supported yet; use CLOUD=aws. See $PREREQ_DOC" ;;
+"") die "CLOUD must be set; only aws is supported. See $PREREQ_DOC" ;;
+*) die "CLOUD is '$CLOUD'; only aws is supported. See $PREREQ_DOC" ;;
 esac
 
 KAFKA_BROKERS="${KAFKA_BROKERS:-3}"
@@ -77,7 +78,7 @@ for knob in KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_CPU KAFKA_MEM_GI KAFKA_READY_WAI
 done
 [[ $KAFKA_JVM_HEAP =~ ^[0-9]+[gG]$ ]] || die "KAFKA_JVM_HEAP must be an integer number of gigabytes with a g suffix (e.g. 6g), got '$KAFKA_JVM_HEAP'"
 [[ ${KAFKA_JVM_HEAP%[gG]} -lt $KAFKA_MEM_GI ]] ||
-	die "KAFKA_JVM_HEAP $KAFKA_JVM_HEAP must be below KAFKA_MEM_GI ${KAFKA_MEM_GI}Gi; the rest of the pod's memory is page cache"
+	die "KAFKA_JVM_HEAP $KAFKA_JVM_HEAP must be below KAFKA_MEM_GI ${KAFKA_MEM_GI}Gi to leave memory for page cache and JVM overhead"
 
 NAMESPACE="${NAMESPACE:-ingest-bench}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-${CLUSTER_NAME:-}}"
@@ -185,7 +186,7 @@ helmfile --file "$STACK_DIR/helmfile.yaml.gotmpl" --kube-context "$KUBE_CONTEXT"
 log "waiting up to ${KAFKA_READY_WAIT_S}s for kafka/$KAFKA_NAME to be Ready"
 kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" wait "kafka/$KAFKA_NAME" \
 	--for=condition=Ready --timeout="${KAFKA_READY_WAIT_S}s" ||
-	die "kafka/$KAFKA_NAME is not Ready after ${KAFKA_READY_WAIT_S}s. A broker pod that is Pending usually has no volume (the StorageClass and the CSI driver) or no node (KAFKA_NODE_SELECTOR / KAFKA_TOLERATIONS against the node group); try: kubectl --context $KUBE_CONTEXT -n $NAMESPACE describe kafka $KAFKA_NAME"
+	die "kafka/$KAFKA_NAME is not Ready after ${KAFKA_READY_WAIT_S}s. For Pending broker pods, check volume provisioning (StorageClass and CSI driver) and scheduling (KAFKA_NODE_SELECTOR and KAFKA_TOLERATIONS). Inspect the cluster with: kubectl --context $KUBE_CONTEXT -n $NAMESPACE describe kafka $KAFKA_NAME"
 kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" rollout status deployment/lakekeeper --timeout "${CATALOG_READY_WAIT_S}s"
 
 # ---------------------------------------------------------------------------
@@ -196,11 +197,11 @@ kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" rollout status deploy
 # Retain error response bodies; curl -f would hide the catalog's explanation.
 mgmt_post() {
 	local status body
-	body="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-mgmt.XXXXXX")" || die "could not make a temporary file for the catalog's answer"
+	body="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-mgmt.XXXXXX")" || die "could not create a temporary file for the catalog response"
 	status="$(curl -s -o "$body" -w '%{http_code}' -X POST "$MGMT$1" -H 'content-type: application/json' -d "$2")" ||
 		die "could not reach the catalog through the tunnel for POST $1"
 	if [[ $status != 2* ]]; then
-		log "POST $1 answered $status: $(cat "$body")"
+		log "POST $1 returned HTTP $status: $(cat "$body")"
 		rm -f "$body"
 		return 1
 	fi
@@ -215,7 +216,7 @@ if [[ "$(curl -sf "$MGMT/info" | jq -r .bootstrapped)" == true ]]; then
 	log "the catalog is bootstrapped"
 else
 	log "bootstrapping the catalog"
-	mgmt_post /bootstrap '{"accept-terms-of-use": true}' || die "the catalog refused its bootstrap; the line above is its answer"
+	mgmt_post /bootstrap '{"accept-terms-of-use": true}' || die "the catalog bootstrap failed; see the response above"
 fi
 
 if curl -sf "$MGMT/warehouse" | jq -e --arg name "$WAREHOUSE_NAME" '.warehouses[] | select(.name == $name)' >/dev/null; then
@@ -231,9 +232,9 @@ else
 		"storage-credential": $credential,
 		"delete-profile": {type: "hard"}
 	}')"
-	log "creating warehouse $WAREHOUSE_NAME over s3://$BUCKET/warehouse"
+	log "creating warehouse $WAREHOUSE_NAME at s3://$BUCKET/warehouse"
 	mgmt_post /warehouse "$REQUEST" ||
-		die "the catalog refused the warehouse; the line above is its answer. A denied bucket read or write means the catalog pod started before its identity was bound — kubectl --context $KUBE_CONTEXT -n $NAMESPACE rollout restart deployment/lakekeeper, then re-run"
+		die "the catalog rejected warehouse creation; see the response above. If bucket access was denied, check the catalog Pod Identity association. If it was bound after the pod started, run kubectl --context $KUBE_CONTEXT -n $NAMESPACE rollout restart deployment/lakekeeper, then rerun setup"
 fi
 k8s_port_forward_stop
 
@@ -250,14 +251,14 @@ if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 		kubectl --context "$KUBE_CONTEXT" apply --namespace "$NAMESPACE" -f -
 	kubectl --context "$KUBE_CONTEXT" rollout status deployment/schema-registry --namespace "$NAMESPACE" --timeout 300s
 else
-	log "no schema registry (WITH_SCHEMA_REGISTRY is '$WITH_SCHEMA_REGISTRY')"
+	log "skipping schema registry setup (WITH_SCHEMA_REGISTRY is '$WITH_SCHEMA_REGISTRY')"
 fi
 
 # ---------------------------------------------------------------------------
 # What to put in site.yaml
 # ---------------------------------------------------------------------------
 
-log "setup complete. Copy site.k8s.example.yaml to site.yaml and fill it in with:"
+log "setup complete. Copy site.k8s.example.yaml to site.yaml and set:"
 # Printed roots and region are AWS-specific, matching the supported cloud hook.
 cat <<SITE
   kafka.bootstrap_servers:        $KAFKA_NAME-kafka-bootstrap.$NAMESPACE.svc:9092
@@ -275,4 +276,4 @@ if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
   kafka.schema_registry.url:      http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7
 SITE
 fi
-log "the brokers' nodes and volumes bill whether or not a run is using them — deploy/k8s/stack/teardown.sh when you are done"
+log "broker nodes and volumes incur charges while idle. Run deploy/k8s/stack/teardown.sh when finished; delete the node group separately"

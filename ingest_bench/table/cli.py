@@ -37,34 +37,33 @@ def add_catalog_arguments(parser: argparse.ArgumentParser, *, table_required: bo
         action="append",
         default=[],
         metavar="FILE",
-        help="a file of catalog property KEY=VALUE lines. Preferred over --catalog-prop for a credential: "
-        "on argv a token lands in every process listing and in the caller's own log",
+        help="file containing one catalog KEY=VALUE property per line; repeat for multiple files. "
+        "Use files for credentials to avoid exposing them in command-line arguments",
     )
 
 
 def build_create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="create-table", description="Create the Iceberg table a corpus is fed into.")
+    parser = argparse.ArgumentParser(prog="create-table", description="Create an Iceberg table from a corpus schema.")
     add_catalog_arguments(parser)
     parser.add_argument(
         "--corpus",
         required=True,
         metavar="URI",
-        help="the corpus the table will be fed from; its published schema is the table's column set and types",
+        help="source corpus whose schema defines the table's columns and types",
     )
     parser.add_argument(
         "--partition",
         required=True,
         metavar="SPEC",
-        help="identity(<column>), bucket(<N>, <column>) or unpartitioned. The engines read the scheme back "
-        "from this table, so it is the one place a run sets it",
+        help="partition scheme: identity(<column>), bucket(<N>, <column>), or unpartitioned",
     )
     parser.add_argument(
         "--table-prop",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="an Iceberg table property, applied at CREATE. Compression codec and tier, row-group sizing and "
-        "dictionary switches all go here: an engine writing into a table it did not create applies none of its own",
+        help="Iceberg table property applied at creation; repeat for multiple properties. "
+        "Use for compression, row-group size, and dictionary settings",
     )
     parser.add_argument(
         "--location",
@@ -80,7 +79,7 @@ def build_create_parser() -> argparse.ArgumentParser:
 
 
 def build_drop_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="drop-table", description="Drop a run's table, or accept that it is gone.")
+    parser = argparse.ArgumentParser(prog="drop-table", description="Drop a run's table if it exists.")
     add_catalog_arguments(parser)
     return parser
 
@@ -92,7 +91,7 @@ TABLE_ABSENT = 3
 
 def build_metadata_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="table-metadata", description="Print where a table's current metadata document is."
+        prog="table-metadata", description="Print the location of a table's current metadata file."
     )
     add_catalog_arguments(parser)
     return parser
@@ -137,7 +136,7 @@ def metadata_location(argv: Sequence[str] | None = None) -> int:
     try:
         loaded = open_catalog(props).load_table(identifier)
     except NoSuchTableError:
-        print(f"no table {table} in this catalog, so it has no metadata document", file=sys.stderr)
+        print(f"table {table} does not exist in this catalog; no metadata is available", file=sys.stderr)
         return TABLE_ABSENT
     print(loaded.metadata_location)
     return 0

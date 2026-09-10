@@ -259,7 +259,7 @@ def read(block: dict[str, object]) -> Knobs:
     """Validate the knob block and apply explicit defaults."""
     unknown = sorted(set(block) - set(KNOBS))
     if unknown:
-        raise ValueError(f"spec.flink has unknown keys {unknown}; the ones it takes are {sorted(KNOBS)}")
+        raise ValueError(f"spec.flink has unknown keys {unknown}; supported keys are {sorted(KNOBS)}")
     missing = sorted(REQUIRED_KNOBS - set(block))
     if missing:
         raise ValueError(f"spec.flink must set {missing}")
@@ -330,12 +330,12 @@ def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> N
     if knobs.source_parallelism > spec.kafka.partitions:
         raise ValueError(
             f"spec.flink.source_parallelism {knobs.source_parallelism} exceeds the topic's "
-            f"{spec.kafka.partitions} partitions, and a Kafka reader with no partition to read never reads"
+            f"{spec.kafka.partitions} partitions; each source reader needs a partition"
         )
     if knobs.slots_total() < knobs.source_parallelism:
         raise ValueError(
-            f"spec.flink.source_parallelism {knobs.source_parallelism} needs that many task slots, and "
-            f"{knobs.taskmanagers} taskmanagers of {knobs.slots} slots give {knobs.slots_total()}"
+            f"spec.flink.source_parallelism {knobs.source_parallelism} exceeds available task slots: "
+            f"{knobs.taskmanagers} taskmanagers with {knobs.slots} slots each provide {knobs.slots_total()}"
         )
     if knobs.max_parallelism < knobs.slots_total():
         raise ValueError(
@@ -413,9 +413,8 @@ def _format_options(spec: RunSpec, site: SiteConfig) -> list[tuple[str, str]]:
     registry = site.schema_registry
     if registry is None:
         raise ValueError(
-            f"spec.kafka.value_encoding is {VALUE_ENCODING_CONFLUENT!r}, which resolves each value's writer "
-            "schema by the id in its header, and the site declares no kafka.schema_registry.url to resolve it "
-            "against"
+            f"spec.kafka.value_encoding {VALUE_ENCODING_CONFLUENT!r} requires kafka.schema_registry.url "
+            "in the site configuration to resolve schema IDs"
         )
     options.append((_REGISTRY_URL_KEY, registry.url))
     # Keep environment placeholders intact for substitution inside the container.
@@ -463,8 +462,7 @@ def _catalog_ddl(site: SiteConfig) -> str:
     props = site.catalog_props
     if _PYICEBERG_TYPE in props and props[_PYICEBERG_TYPE] != REST:
         raise ValueError(
-            f"a Flink run reads its table through an Iceberg REST catalog, and site.catalog.props names catalog "
-            f"type {props[_PYICEBERG_TYPE]!r}"
+            f"Flink requires an Iceberg REST catalog; site.catalog.props specifies type {props[_PYICEBERG_TYPE]!r}"
         )
     options: list[tuple[str, str]] = [
         ("type", "iceberg"),
@@ -549,7 +547,7 @@ def _conf_yaml(spec: RunSpec, derived: Derived) -> str:
 
 def _cluster(site: SiteConfig) -> KubernetesConfig:
     if site.kubernetes is None:
-        raise ValueError("a Flink run on Kubernetes is placed by site.kubernetes, and the site declares no cluster")
+        raise ValueError("Flink on Kubernetes requires site.kubernetes; no cluster is configured")
     return site.kubernetes
 
 
@@ -681,7 +679,7 @@ def render(
     if site.kubernetes is None:
         return files
     if image_tag is None:
-        raise ValueError("a run on a cluster starts an image, so render needs image_tag: the tag that was pushed")
+        raise ValueError("render requires image_tag for Kubernetes runs; use the tag of the published image")
     files[FLINKDEPLOYMENT_FILE] = render_flinkdeployment(spec, site, derived, meta, image_tag)
     files[CONFIGMAP_FILE] = render_job_configmap(spec, site, derived, meta)
     return files

@@ -27,13 +27,13 @@ wait_for_flink_slots() {
 	while ((waited < FLINK_SLOT_WAIT_S)); do
 		total="$(_rest_number "$FLINK_REST/overview" '."slots-total" // 0')"
 		if ((total >= wanted)); then
-			log "flink fleet has $total slot(s)"
+			log "Flink slots registered: $total"
 			return 0
 		fi
 		sleep 2
 		waited=$((waited + 2))
 	done
-	die "flink reported $total of $wanted slot(s) after ${FLINK_SLOT_WAIT_S}s; check: compose logs flink-taskmanager"
+	die "Flink registered $total of $wanted required slots after ${FLINK_SLOT_WAIT_S}s; check: compose logs flink-taskmanager"
 }
 
 # Match pipeline.name to the run ID so an unrelated job cannot satisfy readiness.
@@ -44,17 +44,17 @@ wait_for_flink_job_running() {
 			jq -r --arg name "$name" '.jobs[]? | select(.name == $name) | .state' 2>/dev/null || true)"
 		case "$state" in
 		RUNNING)
-			log "flink job $name is RUNNING"
+			log "Flink job $name is RUNNING"
 			return 0
 			;;
 		FAILED | CANCELED | FINISHED)
-			die "flink job $name went to $state before it ran; check: compose logs flink-jobmanager"
+			die "Flink job $name reached $state before RUNNING was observed; check: compose logs flink-jobmanager"
 			;;
 		esac
 		sleep 2
 		waited=$((waited + 2))
 	done
-	die "flink job $name did not reach RUNNING within ${FLINK_JOB_WAIT_S}s (last state: ${state:-none reported})"
+	die "Flink job $name did not reach RUNNING within ${FLINK_JOB_WAIT_S}s (last state: ${state:-none reported})"
 }
 
 engine_compose_build() {
@@ -68,7 +68,7 @@ engine_compose_start() {
 	# shellcheck source=/dev/null
 	source "$RUN_DIR/flink.env"
 	set +a
-	log "starting flink: $TASKMANAGERS taskmanager(s) of $SLOTS slot(s)"
+	log "starting Flink: $TASKMANAGERS TaskManagers, $SLOTS slots each"
 	compose up -d --scale "flink-taskmanager=$TASKMANAGERS" flink-jobmanager flink-taskmanager
 	wait_for_flink_slots "$((TASKMANAGERS * SLOTS))"
 	log "submitting the job"
@@ -79,9 +79,9 @@ engine_compose_ready() {
 	wait_for_flink_job_running "$RUN_ID"
 	# Verify effective settings after RUNNING. Use the service name because the
 	# check runs inside the Compose network.
-	log "checking the job against the spec it was staged from"
+	log "checking the running job against its staged spec"
 	harness "verify-flink --spec /runs/$RUN_ID/spec.yaml --run-id $RUN_ID --rest http://flink-jobmanager:8081" ||
-		die "the flink job is not running what $(basename "$SPEC_FILE") asked for; the lines above name every setting it dropped"
+		die "Flink settings do not match $(basename "$SPEC_FILE"); see the verification errors above"
 }
 
 engine_compose_logs() {

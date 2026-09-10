@@ -31,9 +31,8 @@ usage: scripts/smoke.sh [options]
   --external-ready-file PATH  with --engine external, wait for PATH to appear
                               instead of reading a newline from stdin
 
-Environment: EPOCH_LEAD_S, IDLE_STOP_S, EXTERNAL_READY_WAIT_S, and whatever
-the engine's own engines/<engine>/compose.sh declares — its readiness waits and
-the endpoints they poll.
+Environment: EPOCH_LEAD_S, IDLE_STOP_S, EXTERNAL_READY_WAIT_S, plus readiness
+timeouts and endpoints defined in engines/<engine>/compose.sh.
 USAGE
 }
 
@@ -120,7 +119,7 @@ cleanup() {
 	[[ -z $STAGE_OUT ]] || rm -f "$STAGE_OUT"
 	if ((KEEP == 1)); then
 		log "--keep: the stack is still up. Tear it down with:"
-		log "  scripts/smoke.sh --help is not it; run: RUN_DIR=/tmp docker compose -f $COMPOSE_FILE --profile '*' down -v"
+		log "  RUN_DIR=/tmp docker compose -f $COMPOSE_FILE --profile '*' down -v"
 	else
 		log "tearing the stack down"
 		compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -196,7 +195,7 @@ SCHEMA_ID="$(jq -r '.schema_id // empty' "$RUN_DIR/facts.json")"
 
 SHARDS="$(yq '.producer.shards' "$SPEC_FILE")"
 [[ $SHARDS == null || $SHARDS == 1 ]] ||
-	die "this script offers one producer shard and $(basename "$SPEC_FILE") asks for $SHARDS"
+	die "this script supports one producer shard; $(basename "$SPEC_FILE") requests $SHARDS"
 
 # Pass configured options and preserve command defaults for omitted ones.
 SPEED="$(yq '.producer.speed' "$SPEC_FILE")"

@@ -13,13 +13,12 @@ usage() {
 	cat <<'USAGE'
 usage: deploy/aws/setup.sh [--write-site PATH]
 
-  --write-site PATH   also write a complete site.yaml at PATH, from the same
-                      values this prints at the end. Refuses rather than
-                      overwrite a file that is already there
+  --write-site PATH   write site.yaml to PATH using the printed settings;
+                      fail if PATH already exists
 
-Environment: AWS_REGION and CLUSTER_NAME are required, and every other
-parameter is an environment variable as well — deploy/aws/README.md, under
-Environment, lists them all with their defaults.
+Configure this script through environment variables. AWS_REGION and
+CLUSTER_NAME are required. See Environment in deploy/aws/README.md for
+all variables and defaults.
 USAGE
 }
 
@@ -102,7 +101,7 @@ ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink la
 [[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
 # Reject an existing output path before the potentially long MSK wait.
 [[ -z $WRITE_SITE || ! -e $WRITE_SITE ]] ||
-	die "$WRITE_SITE already exists, and --write-site never overwrites a site config; name another path or move that file"
+	die "$WRITE_SITE already exists; --write-site cannot overwrite it. Choose another path or move the existing file"
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -141,7 +140,7 @@ ARCHITECTURES="$(jq -r '[.items[].status.nodeInfo.architecture] | unique | join(
 # Warn if Flink's required amd64 nodes are absent. Spark-only campaigns can
 # use an arm64 cluster with matching harness and Spark images.
 grep -qw amd64 <<<"$ARCHITECTURES" ||
-	log "warning: no node in $CLUSTER_NAME reports architecture amd64 (found: ${ARCHITECTURES:-none}); the Flink image is amd64-only, so no Flink run will be placed here. A Spark-only campaign may proceed.
+	log "warning: $CLUSTER_NAME has no amd64 nodes (found: ${ARCHITECTURES:-none}); Flink requires amd64. Spark runs can proceed.
      Add an amd64 node group — deploy/aws/eksctl-cluster.example.yaml has one."
 log "node architectures: $ARCHITECTURES"
 
@@ -193,9 +192,9 @@ bucket_is_ours() {
 create_bucket() {
 	if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 		bucket_is_ours "$BUCKET" ||
-			die "s3://$BUCKET already exists and carries no $TAG_KEY tag, so this script did not create it;
-     tagging and versioning are set below and neither call is additive, so it will not adopt one.
-     Name a bucket of your own with BUCKET, or tag that one $TAG_KEY=true if it is meant to be this benchmark's."
+			die "s3://$BUCKET already exists, but its $TAG_KEY=true tag could not be verified.
+     Refusing to change its tags or versioning. Set BUCKET to a new bucket name,
+     or verify access and tag this bucket $TAG_KEY=true if it is dedicated to the benchmark."
 		log "s3://$BUCKET exists"
 	else
 		log "creating s3://$BUCKET"
@@ -308,15 +307,15 @@ grow_broker_volume() {
 	IFS=$'\t' read -r state version current <<<"$reported"
 	# Reject missing numeric fields instead of interpreting AWS CLI's None as zero.
 	if [[ -z $current || $current == None ]]; then
-		die "$MSK_NAME reports no broker volume size, so this cannot tell whether it holds ${MSK_VOLUME_GIB} GiB"
+		die "$MSK_NAME reports no broker volume size; cannot verify the requested ${MSK_VOLUME_GIB} GiB capacity"
 	fi
 	if ((current >= MSK_VOLUME_GIB)); then
-		log "msk broker volumes are ${current} GiB, at or above the ${MSK_VOLUME_GIB} GiB asked for"
+		log "MSK broker volumes are ${current} GiB, meeting the requested ${MSK_VOLUME_GIB} GiB minimum"
 		return 0
 	fi
 	# An in-progress update may still report the old size; do not request it twice.
 	if [[ $state != ACTIVE ]]; then
-		log "msk broker volumes are ${current} GiB and $MSK_NAME is $state, so the growth to ${MSK_VOLUME_GIB} GiB is left to the update already running"
+		log "MSK broker volumes are ${current} GiB and $MSK_NAME is $state; rerun setup after it becomes ACTIVE to verify the requested ${MSK_VOLUME_GIB} GiB capacity"
 		return 0
 	fi
 	log "growing the msk broker volumes from ${current} to ${MSK_VOLUME_GIB} GiB"
@@ -328,7 +327,7 @@ grow_broker_volume() {
 	case "$update_error" in
 	# Cooldowns and concurrent updates are retryable on a later setup invocation.
 	*ACTIVE* | *UPDATING* | *ooldown* | *"6 hour"* | *"6-hour"*)
-		log "$MSK_NAME will not take the growth to ${MSK_VOLUME_GIB} GiB yet: $update_error"
+		log "$MSK_NAME cannot increase broker storage to ${MSK_VOLUME_GIB} GiB yet: $update_error"
 		;;
 	*)
 		die "could not grow $MSK_NAME's broker volumes to ${MSK_VOLUME_GIB} GiB: $update_error"
@@ -480,7 +479,7 @@ if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	kubectl --context "$KUBE_CONTEXT" rollout status deployment/schema-registry \
 		--namespace "$NAMESPACE" --timeout 300s
 else
-	log "no schema registry (WITH_SCHEMA_REGISTRY is '$WITH_SCHEMA_REGISTRY')"
+	log "skipping schema registry setup (WITH_SCHEMA_REGISTRY is '$WITH_SCHEMA_REGISTRY')"
 fi
 
 # ---------------------------------------------------------------------------
@@ -493,7 +492,7 @@ fi
 write_site() {
 	local path=$1 parsed read_back=""
 	[[ ! -e $path ]] ||
-		die "$path already exists, and --write-site never overwrites a site config; name another path or move that file"
+		die "$path already exists; --write-site cannot overwrite it. Choose another path or move the existing file"
 	{
 		cat <<-SITE
 			# Generated by setup.sh --write-site; see site.aws.example.yaml for field details.
@@ -549,7 +548,7 @@ write_site() {
 	fi
 	if [[ -n $read_back ]]; then
 		rm -f "$path"
-		die "wrote $path and removed it again: $read_back"
+		die "removed $path because the generated site configuration failed validation: $read_back"
 	fi
 	log "wrote $path"
 }
@@ -560,7 +559,7 @@ waited=0
 while [[ $MSK_STATE != ACTIVE ]]; do
 	case "$MSK_STATE" in
 	CREATING | UPDATING | MAINTENANCE) ;;
-	*) die "MSK cluster $MSK_NAME is $MSK_STATE, which it will not leave on its own; look at it in the MSK console" ;;
+	*) die "MSK cluster $MSK_NAME is $MSK_STATE; inspect the cluster in the MSK console before retrying" ;;
 	esac
 	if ((waited >= MSK_ACTIVE_WAIT_S)); then
 		die "$MSK_NAME is still $MSK_STATE after ${waited}s; re-run this script to keep waiting, or raise MSK_ACTIVE_WAIT_S"
@@ -577,9 +576,9 @@ BOOTSTRAP="$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \
 	--query BootstrapBrokerStringSaslIam --output text)"
 
 if [[ -n $WRITE_SITE ]]; then
-	log "setup complete. $WRITE_SITE is being written with these values:"
+	log "resources are ready. Writing $WRITE_SITE with these values:"
 else
-	log "setup complete. Copy site.aws.example.yaml to site.yaml and fill it in with:"
+	log "setup complete. Copy site.aws.example.yaml to site.yaml and set:"
 fi
 cat <<SITE
   kafka.bootstrap_servers:        $BOOTSTRAP
@@ -601,6 +600,6 @@ SITE
 fi
 if [[ -n $WRITE_SITE ]]; then
 	write_site "$WRITE_SITE"
-	log "fill in $WRITE_SITE's pricing block before publishing a result from it; docs/methodology.md, under Cost, is the rule."
+	log "fill in the pricing block in $WRITE_SITE before publishing results. See Cost in docs/methodology.md."
 fi
-log "MSK bills by the hour whether or not a run is using it — deploy/aws/teardown.sh when you are done."
+log "MSK incurs hourly charges while idle. Run deploy/aws/teardown.sh when finished."

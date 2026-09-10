@@ -222,7 +222,7 @@ def read(block: dict[str, object]) -> Knobs:
     """Validate the knob block and apply explicit defaults."""
     unknown = sorted(set(block) - set(KNOBS))
     if unknown:
-        raise ValueError(f"spec.spark has unknown keys {unknown}; the ones it takes are {sorted(KNOBS)}")
+        raise ValueError(f"spec.spark has unknown keys {unknown}; supported keys are {sorted(KNOBS)}")
     missing = sorted(REQUIRED_KNOBS - set(block))
     if missing:
         raise ValueError(f"spec.spark must set {missing}")
@@ -318,8 +318,7 @@ def _catalog_conf(site: SiteConfig) -> dict[str, str]:
     props = site.catalog_props
     if _PYICEBERG_TYPE in props and props[_PYICEBERG_TYPE] != REST:
         raise ValueError(
-            f"a Spark run reads its table through an Iceberg REST catalog, and site.catalog.props names catalog "
-            f"type {props[_PYICEBERG_TYPE]!r}"
+            f"Spark requires an Iceberg REST catalog; site.catalog.props specifies type {props[_PYICEBERG_TYPE]!r}"
         )
     prefix = f"spark.sql.catalog.{CATALOG_NAME}"
     conf = {
@@ -486,7 +485,7 @@ def render_job(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMe
 
 def _cluster(site: SiteConfig) -> KubernetesConfig:
     if site.kubernetes is None:
-        raise ValueError("a Spark run on Kubernetes is placed by site.kubernetes, and the site declares no cluster")
+        raise ValueError("Spark on Kubernetes requires site.kubernetes; no cluster is configured")
     return site.kubernetes
 
 
@@ -637,7 +636,7 @@ def render(
     if site.kubernetes is None:
         return files
     if image_tag is None:
-        raise ValueError("a run on a cluster starts an image, so render needs image_tag: the tag that was pushed")
+        raise ValueError("render requires image_tag for Kubernetes runs; use the tag of the published image")
     files[SPARKAPPLICATION_FILE] = render_sparkapplication(spec, site, derived, meta, image_tag)
     files[CONFIGMAP_FILE] = render_job_configmap(spec, site, derived, meta)
     return files

@@ -19,17 +19,15 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/finish.sh <run_id> [options]
 
-  <run_id>            a run whose scorer has published under the runs prefix
-  --site PATH         the site config naming the runs prefix and the catalog (default: ./site.yaml)
-  --variant NAME      the tuning this run stands for, recorded in the document and in its published
-                      name (default: collect's own, which is `hash`)
-  --publish DIR       also write the document under DIR/<engine>/ as a published result, and
-                      re-render DIR/RESULTS.md
+  <run_id>            run with scorer output under the runs prefix
+  --site PATH         site config for the runs prefix and the catalog (default: ./site.yaml)
+  --variant NAME      tuning variant recorded in the report and result filename (default: hash)
+  --publish DIR       publish the report under DIR/<engine>/ and refresh DIR/RESULTS.md
   --publish-invalid   publish even though `run_valid` is false, as a result labelled by its state
 
 Environment: RUNS_DIR.
 
-It prints the verdict block and exits 0 only on `run_valid: true`.
+Prints the verdict and exits 0 only when `run_valid: true`.
 USAGE
 }
 
@@ -65,7 +63,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $RUN_ID ]] || die "this reads one run, and was given both '$RUN_ID' and '$1'"
+		[[ -z $RUN_ID ]] || die "expected one run ID; got '$RUN_ID' and '$1'"
 		RUN_ID="$1"
 		shift
 		;;
@@ -73,12 +71,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $RUN_ID ]] || {
-	printf 'a run id is required\n\n' >&2
+	printf 'a run ID is required\n\n' >&2
 	usage >&2
 	exit 2
 }
 [[ $PUBLISH_INVALID == no || -n $PUBLISH_DIR ]] ||
-	die "--publish-invalid says how to publish, so it needs --publish <dir> to say where"
+	die "--publish-invalid requires --publish <dir>"
 
 require_host_tools aws jq yq kubectl
 require_site_file
@@ -106,7 +104,7 @@ PRODUCER="$RUN_DIR/producer"
 mkdir -p "$PRODUCER"
 log "fetching $RUNS_ROOT/$RUN_ID/producer/ into $PRODUCER"
 aws s3 sync "$RUNS_ROOT/$RUN_ID/producer/" "$PRODUCER/" --only-show-errors >&2 ||
-	log "could not fetch $RUNS_ROOT/$RUN_ID/producer/; the document will name the publish logs as missing"
+	log "could not fetch $RUNS_ROOT/$RUN_ID/producer/; the report will list publish logs as missing"
 
 # ---------------------------------------------------------------------------
 # 2. The geometry
@@ -126,9 +124,9 @@ if [[ -f $METADATA_FINAL ]]; then
 	[[ -z $OFFSETS ]] || OFFSET_FLAGS=(--offsets "$OFFSETS")
 	# Geometry offsets are relative to the launch epoch.
 	EPOCH="$(jq -r '.epoch // empty' "$RUN_DIR/facts.json")"
-	[[ -n $EPOCH ]] || die "$RUN_DIR/facts.json records no epoch, so the ladder has no origin; was this run launched?"
+	[[ -n $EPOCH ]] || die "$RUN_DIR/facts.json has no epoch for geometry offsets; was this run launched?"
 
-	log "measuring the geometry $RUN_ID left behind"
+	log "measuring file geometry for $RUN_ID"
 	GEOMETRY_STATUS=0
 	harness_local --extra aws file-sizes \
 		--metadata "$(abs_path "$METADATA_FINAL")" \
@@ -139,10 +137,10 @@ if [[ -f $METADATA_FINAL ]]; then
 	if ((GEOMETRY_STATUS == NO_GEOMETRY)); then
 		log "no geometry: the table never committed"
 	elif ((GEOMETRY_STATUS != 0)); then
-		die "could not measure the geometry: file-sizes exited $GEOMETRY_STATUS; the lines above are its own error"
+		die "could not measure the geometry: file-sizes exited $GEOMETRY_STATUS; see the error above"
 	fi
 else
-	log "no $METADATA_FINAL, so this run has no geometry; scripts/teardown.sh is what copies it"
+	log "$METADATA_FINAL is missing; run scripts/teardown.sh to save metadata before measuring geometry"
 fi
 
 # ---------------------------------------------------------------------------
@@ -173,7 +171,7 @@ if [[ -n $PUBLISH_DIR ]]; then
 	# Reject a missing engine instead of publishing into a literal null directory.
 	ENGINE="$(jq -r '.run.engine // empty' "$RUN_DIR/run.json")" ||
 		die "could not read $RUN_DIR/run.json; the line above is jq's own error"
-	[[ -n $ENGINE ]] || die "$RUN_DIR/run.json names no engine, so there is no results directory to file it under"
+	[[ -n $ENGINE ]] || die "$RUN_DIR/run.json has no engine; cannot choose the results directory"
 	# Create the directory before resolving its absolute path.
 	mkdir -p "$PUBLISH_DIR"
 	PUBLISH_ABS="$(abs_path "$PUBLISH_DIR")"

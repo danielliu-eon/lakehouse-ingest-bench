@@ -188,7 +188,7 @@ def test_table_metadata_answers_an_absent_table_with_a_code(
     assert cli.metadata_location(["--table", "bench.absent", *flags]) == cli.TABLE_ABSENT
     captured = capsys.readouterr()
     assert captured.out == "", "the location is the only thing this prints on stdout"
-    assert "no table bench.absent" in captured.err
+    assert "table bench.absent does not exist" in captured.err
 
 
 def test_type_maps_cover_the_same_published_types() -> None:

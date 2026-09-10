@@ -19,12 +19,11 @@ usage: deploy/aws/teardown.sh [--all] [--yes]
 
   --all   also delete the bucket and everything in it, the three ECR
           repositories and both engine operators' releases
-  --yes   do not ask before emptying the bucket; for a teardown run from a
-          script
+  --yes   skip confirmation before emptying the bucket
 
 Environment: AWS_REGION and CLUSTER_NAME are required. BUCKET, MSK_NAME,
-NAMESPACE and KUBE_CONTEXT mean what they mean to setup.sh and must match the
-run of it that created these; MSK_DELETED_WAIT_S bounds the wait below.
+NAMESPACE and KUBE_CONTEXT must match the values used by setup.sh.
+MSK_DELETED_WAIT_S sets the timeout for MSK deletion.
 USAGE
 }
 
@@ -161,7 +160,7 @@ if [[ -n $MSK_ARN && $MSK_ARN != None ]]; then
 	waited=0
 	while aws kafka describe-cluster --cluster-arn "$MSK_ARN" >/dev/null 2>&1; do
 		if ((waited >= MSK_DELETED_WAIT_S)); then
-			die "$MSK_NAME is still there after ${waited}s; re-run this script once it has gone"
+			die "$MSK_NAME still exists after ${waited}s; rerun this script after deletion completes"
 		fi
 		if ((waited % 300 == 0)); then
 			log "  ... still deleting (${waited}s)"
@@ -183,8 +182,8 @@ if [[ -n $MSK_SG_ID && $MSK_SG_ID != None ]]; then
 	if ! DELETE_ERROR="$(aws ec2 delete-security-group --group-id "$MSK_SG_ID" 2>&1)"; then
 		case "$DELETE_ERROR" in
 		*DependencyViolation*)
-			die "$MSK_SG_ID is still attached to something: $DELETE_ERROR
-     MSK releases its network interfaces a few minutes after the cluster goes; re-run this script then."
+			die "$MSK_SG_ID is still in use: $DELETE_ERROR
+     MSK may retain network interfaces for a few minutes after cluster deletion. Wait, then rerun this script."
 			;;
 		*) die "could not delete $MSK_SG_ID: $DELETE_ERROR" ;;
 		esac
@@ -253,14 +252,14 @@ remove_bucket() {
 		return 0
 	fi
 	bucket_is_ours "$BUCKET" ||
-		die "s3://$BUCKET carries no $TAG_KEY tag, so this benchmark did not create it and will not empty it;
-     name the right one with BUCKET, or remove that one yourself"
-	printf 'emptying and deleting %s removes, permanently:\n' "s3://$BUCKET"
+		die "cannot verify the $TAG_KEY=true tag on s3://$BUCKET; refusing to empty it.
+     Check bucket access and BUCKET, or delete the bucket manually"
+	printf 'deleting %s permanently removes:\n' "s3://$BUCKET"
 	printf '  every corpus generated into it\n'
 	printf '  every run%s artifacts, scores and publish logs\n' "'s"
 	printf '  the warehouse, and every table any run has written\n'
 	if [[ $ASSUME_YES == no ]]; then
-		confirm "remove all of the above?"
+		confirm "delete the resources listed above?"
 	fi
 	log "emptying and deleting s3://$BUCKET"
 	aws s3 rm "s3://$BUCKET" --recursive >/dev/null

@@ -136,7 +136,7 @@ def test_dropping_a_topic_that_does_not_exist_still_succeeds(
     _, deleted = fake_admin(monkeypatch, set())
     assert kafka_admin.main(["--bootstrap", "b:9092", "--topic", "a-run"]) == 0
     assert deleted == ["a-run"]
-    assert "no topic 'a-run'" in capsys.readouterr().out
+    assert "topic 'a-run' does not exist" in capsys.readouterr().out
 
 
 def test_the_client_properties_reach_the_client(monkeypatch: pytest.MonkeyPatch) -> None:

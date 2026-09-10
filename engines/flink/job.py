@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wait",
         action="store_true",
-        help="block until the job ends; needs an attached submission, and never returns for a streaming insert",
+        help="wait for completion; requires an attached submission and waits indefinitely for a streaming insert",
     )
     return parser
 

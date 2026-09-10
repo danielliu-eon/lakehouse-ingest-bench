@@ -86,7 +86,7 @@ def broker_count(bootstrap: str, client: dict[str, str]) -> int:
     """Read the broker count from cluster metadata to size topic replication."""
     brokers = _client(bootstrap, client).list_topics(timeout=REQUEST_TIMEOUT_S).brokers
     if not brokers:
-        raise ValueError(f"the cluster at {bootstrap} names no brokers in its metadata")
+        raise ValueError(f"cluster metadata from {bootstrap} contains no brokers")
     return len(brokers)
 
 
@@ -126,18 +126,16 @@ def delete_topic(bootstrap: str, name: str, client: dict[str, str]) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="drop-topic", description="Drop a run's topic, whether or not it is there to drop."
-    )
+    parser = argparse.ArgumentParser(prog="drop-topic", description="Delete a run's Kafka topic if it exists.")
     parser.add_argument("--bootstrap", required=True, metavar="HOST:PORT", help="Kafka bootstrap servers")
-    parser.add_argument("--topic", required=True, help="the topic to drop, which is the run id")
+    parser.add_argument("--topic", required=True, help="topic to delete (the run ID)")
     parser.add_argument(
         "--kafka-prop",
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="a librdkafka client property, repeatable, as the site declares them. A ${env:NAME} value is read "
-        "from this process's environment; aws.region is taken here too, to sign an Amazon MSK IAM token with",
+        help="librdkafka client property; repeat for multiple properties. Values of the form ${env:NAME} use "
+        "environment variables. Set aws.region for Amazon MSK IAM authentication",
     )
     return parser
 
@@ -149,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if delete_topic(bootstrap, topic, client):
         print(f"dropped topic {topic!r} on {bootstrap}")
     else:
-        print(f"no topic {topic!r} on {bootstrap}, so nothing to drop")
+        print(f"topic {topic!r} does not exist on {bootstrap}; nothing to delete")
     return 0
 
 

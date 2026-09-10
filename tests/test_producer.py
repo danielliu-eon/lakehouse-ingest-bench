@@ -238,7 +238,7 @@ def test_the_cli_builds_the_header_and_refuses_a_pair_that_cannot_mean_anything(
     assert producer_cli.main([*base, "--value-encoding", "confluent", "--schema-id", "7"]) == 0
     assert seen[-1].value_prefix == b"\x00\x00\x00\x00\x07"
 
-    with pytest.raises(ValueError, match="needs --schema-id"):
+    with pytest.raises(ValueError, match="requires --schema-id"):
         producer_cli.main([*base, "--value-encoding", "confluent"])
     with pytest.raises(ValueError, match="only sent in the Confluent wire format"):
         producer_cli.main([*base, "--schema-id", "7"])

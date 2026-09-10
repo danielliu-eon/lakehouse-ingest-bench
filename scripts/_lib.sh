@@ -57,19 +57,19 @@ print_verdict() {
     + "small (<32 MiB) \((.small_file_share_32mib * 1000 | round) / 10)%, \(.files) files"' "$geometry"
 	fi
 	[[ "$(jq -r .run_valid "$summary")" == true ]] ||
-		die "run_valid is false; the block above says why, in full in $summary"
+		die "run_valid is false; see the verdict above and details in $summary"
 }
 
 # Ask for confirmation before deleting measured data. Require an interactive stdin;
 # unattended callers must use their --yes option.
 confirm() {
-	[[ -t 0 ]] || die "nothing is attached to answer, and this does not assume one; pass --yes to run unattended"
+	[[ -t 0 ]] || die "confirmation requires an interactive terminal; pass --yes to run unattended"
 	printf '%s [y/N] ' "$1"
 	local answer=""
 	read -r answer || true
 	case "$answer" in
 	y | Y) return 0 ;;
-	*) die "answered '${answer:-nothing}', so nothing was removed" ;;
+	*) die "operation cancelled (response: '${answer:-none}')" ;;
 	esac
 }
 
@@ -79,5 +79,5 @@ require_host_tools() {
 	for tool in "$@"; do
 		command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 	done
-	[[ -z $missing ]] || die "missing host tool(s):$missing — see $PREREQ_DOC for what this needs"
+	[[ -z $missing ]] || die "missing host tool(s):$missing — see $PREREQ_DOC for prerequisites"
 }

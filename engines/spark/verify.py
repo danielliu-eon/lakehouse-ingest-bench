@@ -208,14 +208,14 @@ def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object], pods: obj
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verify-spark",
-        description="Check a running Spark query's effective settings against the spec that asked for them.",
+        description="Compare a running Spark query's effective settings with its run spec.",
     )
     parser.add_argument("--spec", required=True, metavar="PATH", help="the run spec the query was staged from")
     parser.add_argument(
         "--run-id",
         required=True,
         metavar="ID",
-        help="the run, which is also the application's name — so this is what says the one read is the one started",
+        help="run ID used as the Spark application name to identify the application to verify",
     )
     parser.add_argument(
         "--rest",
@@ -251,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if drift:
         return DRIFT_EXIT
     # Keep diagnostics on stderr so stdout contains only drift findings.
-    print(f"verified: {run_id} is running the settings its spec asked for", file=sys.stderr)
+    print(f"verified: {run_id} matches its run spec", file=sys.stderr)
     return 0
 
 

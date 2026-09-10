@@ -40,20 +40,20 @@ wait_for_spark_query() {
 		waited=$((waited + 2))
 	done
 	[[ $running == 1 ]] ||
-		die "no spark application named $name on $SPARK_UI after ${SPARK_APP_WAIT_S}s; check: compose logs spark-job"
-	log "spark application $name is up"
+		die "no Spark application named $name on $SPARK_UI after ${SPARK_APP_WAIT_S}s; check: compose logs spark-job"
+	log "Spark application $name is available"
 	waited=0
 	while ((waited < SPARK_QUERY_WAIT_S)); do
 		queries="$(_spark_active_queries)"
 		if ((queries >= 1)); then
-			log "spark has $queries active streaming query(ies)"
+			log "Spark active streaming queries: $queries"
 			return 0
 		fi
 		_die_if_the_spark_driver_exited
 		sleep 2
 		waited=$((waited + 2))
 	done
-	die "spark started no streaming query within ${SPARK_QUERY_WAIT_S}s; check: compose logs spark-job"
+	die "Spark did not start a streaming query within ${SPARK_QUERY_WAIT_S}s; check: compose logs spark-job"
 }
 
 engine_compose_build() {
@@ -68,7 +68,7 @@ engine_compose_start() {
 	# shellcheck source=/dev/null
 	source "$RUN_DIR/job.env"
 	set +a
-	log "starting spark: local[$LOCAL_CORES], ${DRIVER_MEM_MB}m driver"
+	log "starting Spark: local[$LOCAL_CORES], ${DRIVER_MEM_MB}m driver"
 	compose up -d spark-job
 }
 

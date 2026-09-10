@@ -12,9 +12,9 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/measure-producer.sh
 
-It takes no arguments: the corpus, the topic and the speed are fixed so that
-two measurements are comparable. It prints wall seconds, encoded MB, MB/s,
-rows and rows/s, and needs Docker and this checkout's local stack.
+Measures producer throughput using a fixed corpus, topic, and speed.
+Prints elapsed seconds, encoded MB, MB/s, rows, and rows/s.
+Requires Docker and this checkout's local stack. Takes no arguments.
 USAGE
 }
 

@@ -437,7 +437,7 @@ def test_an_unknown_argument_is_refused() -> None:
 def test_measure_producer_answers_before_it_starts_a_stack() -> None:
     out = subprocess.run([str(MEASURE_PRODUCER), "--help"], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert "takes no arguments" in out.stdout
+    assert "Takes no arguments" in out.stdout
 
     refused = subprocess.run([str(MEASURE_PRODUCER), "--warmup"], capture_output=True, text=True)
     assert refused.returncode == 2, refused.stdout
@@ -464,7 +464,7 @@ def test_gen_corpus_refuses_bad_arguments_before_it_needs_a_cluster() -> None:
 
     both = subprocess.run([str(GEN_CORPUS), "smoke", "events-100mbs-skew"], capture_output=True, text=True)
     assert both.returncode == 1, both.stdout
-    assert "takes one preset" in both.stderr
+    assert "expected one preset" in both.stderr
 
 
 def test_gen_corpus_shards_each_shard_into_its_own_prefix() -> None:
@@ -612,7 +612,7 @@ def test_an_existing_broker_volume_is_grown_once_and_never_shrunk(state: str, cu
         # Use the reported version token for the update.
         assert f"--current-version {_CLUSTER_VERSION}" in grown_run.calls, grown_run.calls
     else:
-        assert "log msk broker volumes are" in grown_run.result.stdout, grown_run.result.stdout
+        assert "log MSK broker volumes are" in grown_run.result.stdout, grown_run.result.stdout
 
 
 @needs_bash
@@ -627,7 +627,7 @@ def test_an_existing_broker_volume_is_grown_once_and_never_shrunk(state: str, cu
 def test_a_growth_msk_will_not_take_yet_leaves_the_setup_converging(refusal: str) -> None:
     refused = _volume_growth(described=f"ACTIVE\t{_CLUSTER_VERSION}\t100", refusal=refusal).result
     assert refused.returncode == 0, refused.stdout + refused.stderr
-    assert "log a-cluster will not take the growth to 1000 GiB yet" in refused.stdout, refused.stdout
+    assert "log a-cluster cannot increase broker storage to 1000 GiB yet" in refused.stdout, refused.stdout
 
 
 @needs_bash
@@ -703,7 +703,7 @@ def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
     """
     refused = _bucket_step(AWS_SETUP, "create_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
-    assert "carries no lakehouse-ingest-bench tag" in refused.result.stdout, refused.result.stdout
+    assert "lakehouse-ingest-bench=true tag could not be verified" in refused.result.stdout, refused.result.stdout
     for mutation in ("put-bucket-tagging", "put-bucket-versioning", "put-public-access-block"):
         assert mutation not in refused.calls, refused.calls
 
@@ -725,7 +725,7 @@ def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
 def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
     refused = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
-    assert "carries no lakehouse-ingest-bench tag" in refused.result.stdout, refused.result.stdout
+    assert "cannot verify the lakehouse-ingest-bench=true tag" in refused.result.stdout, refused.result.stdout
     assert "s3 rm" not in refused.calls and "delete-bucket" not in refused.calls, refused.calls
     assert refused.asked == "", "a bucket it will not empty is not one to ask about"
 
@@ -734,7 +734,7 @@ def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
 def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> None:
     asked = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="no")
     assert asked.result.returncode == 3, asked.result.stdout
-    assert "remove all of the above?" in asked.asked, asked.asked
+    assert "delete the resources listed above?" in asked.asked, asked.asked
     assert "every corpus generated into it" in asked.result.stdout, asked.result.stdout
     assert "s3 rm" not in asked.calls and "delete-bucket" not in asked.calls, asked.calls
 
@@ -844,7 +844,7 @@ def test_a_site_that_did_not_read_back_is_removed(tmp_path: Path, yq_stub: str) 
     target = tmp_path / "site.yaml"
     refused = _write_site(target, yq_stub=yq_stub)
     assert refused.returncode == 3, refused.stdout + refused.stderr
-    assert "removed it again" in refused.stdout, refused.stdout
+    assert "generated site configuration failed validation" in refused.stdout, refused.stdout
     assert not target.exists()
 
 
@@ -1371,7 +1371,7 @@ def test_a_property_a_quote_cannot_carry_is_refused_by_name(tmp_path: Path, quot
     site_file.write_text(_filled_site().replace("    aws.region:", property_line))
     refused = _site_reader(site_file, "site_flags '.kafka.security' --kafka-prop")
     assert refused.returncode != 0
-    assert "holding a quote" in refused.stderr, refused.stderr
+    assert "containing a quote" in refused.stderr, refused.stderr
 
 
 @needs_shell_tools
@@ -1402,7 +1402,7 @@ def test_a_root_these_drivers_cannot_reach_is_refused_by_name(tmp_path: Path, pa
     )
     refused = _site_reader(site_file, f"site_root '{path}'")
     assert refused.returncode != 0
-    assert "AWS-only today" in refused.stderr, refused.stderr
+    assert "must be an s3:// URI" in refused.stderr, refused.stderr
     assert key in refused.stderr, refused.stderr
     # And an S3 root is answered with itself.
     (tmp_path / "aws.yaml").write_text(_filled_site())
@@ -1950,7 +1950,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
 
 
 @needs_shell_tools
-@pytest.mark.parametrize(("status", "refusal"), [(3, "name every setting it dropped"), (2, "in 3 tries")])
+@pytest.mark.parametrize(("status", "refusal"), [(3, "setting mismatches above"), (2, "after 3 attempts")])
 def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
     tmp_path: Path, status: int, refusal: str
 ) -> None:
@@ -2030,7 +2030,7 @@ def test_stage_waits_out_a_fleet_that_is_still_being_placed(
     if succeeds:
         assert run.result.stdout.splitlines()[-1] == f"run_id: {RUN_ID}"
     else:
-        assert "was not fully placed within 0s" in run.result.stderr, run.result.stderr
+        assert "were not fully scheduled within 0s" in run.result.stderr, run.result.stderr
 
 
 @needs_shell_tools
@@ -2178,7 +2178,7 @@ def test_an_https_service_uri_is_refused_by_name(tmp_path: Path) -> None:
         programs={"table-metadata": TABLE_METADATA_STUB},
     )
     assert run.result.returncode == 1, run.result.stdout
-    assert "plain http" in run.result.stderr
+    assert "plain HTTP" in run.result.stderr
 
 
 @needs_shell_tools
@@ -2829,7 +2829,7 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path, 
     )
     assert run.result.returncode != 0
     assert rejection in run.result.stderr
-    assert "gave up" in run.result.stderr and "FAILED" in run.result.stderr
+    assert "failed to start" in run.result.stderr and "FAILED" in run.result.stderr
     assert "did not reach" not in run.result.stderr, "the error is the refusal, not the timeout"
     assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.error}}" in run.calls
     assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.lifecycleState}}" in run.calls
@@ -2869,9 +2869,9 @@ def test_an_error_the_operator_has_not_given_up_over_does_not_end_the_wait(tmp_p
     # rather than being the refusal.
     assert "did not reach" in run.result.stderr
     assert f"last error: {transient}" in run.result.stderr
-    assert "gave up" not in run.result.stderr
+    assert "failed to start" not in run.result.stderr
     # Reported when it appeared and not once per poll.
-    assert run.result.stderr.count("has not given up over") == 1
+    assert run.result.stderr.count("has not reported a terminal failure") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -3034,7 +3034,7 @@ def test_finish_publishes_an_invalid_run_when_told_to_and_still_refuses_it(tmp_p
         programs=FINISH_PROGRAMS,
     )
     assert run.result.returncode != 0, "an invalid run is still an invalid run"
-    assert "run_valid is false; the block above says why" in run.result.stderr
+    assert "run_valid is false; see the verdict above" in run.result.stderr
 
     collected = (tmp_path / "collect.log").read_text().splitlines()
     assert len(collected) == 2, "one document for the run directory and one for the results tree"
@@ -3059,7 +3059,7 @@ def test_finish_refuses_to_publish_a_document_that_names_no_engine(tmp_path: Pat
         programs=FINISH_PROGRAMS,
     )
     assert run.result.returncode != 0
-    assert "names no engine" in run.result.stderr
+    assert "has no engine" in run.result.stderr
     assert not (tmp_path / "work" / "results" / "null").exists()
     assert len((tmp_path / "collect.log").read_text().splitlines()) == 1
 
@@ -3307,7 +3307,7 @@ def test_purge_reclaims_the_artifacts_of_a_run_the_catalog_holds_no_table_for(tm
     # The prefix it names is the one printed under it, which is the only line
     # in that block naming something that goes.
     listed = run.result.stdout.splitlines()
-    assert "only the prefix below goes" in listed[1] and f"runs/{RUN_ID}/" in listed[2]
+    assert "only the run artifacts below will be removed" in listed[1] and f"runs/{RUN_ID}/" in listed[2]
 
     removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
     assert removals == [f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/"]
@@ -3329,9 +3329,9 @@ def test_purge_claims_no_purge_when_there_is_nothing_to_remove(tmp_path: Path) -
         programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
-    assert "removes nothing" in run.result.stdout and "--artifacts" in run.result.stdout
+    assert "nothing to purge" in run.result.stdout and "--artifacts" in run.result.stdout
     assert "purged" not in run.result.stderr, "nothing was removed, so nothing is reported as purged"
-    assert "remove all of the above?" not in run.result.stdout
+    assert "delete the resources listed above?" not in run.result.stdout
     assert "s3 rm" not in run.aws_calls
     assert (tmp_path / "drop-table.log").read_text() == ""
 
@@ -3674,7 +3674,7 @@ def test_an_external_chained_run_waits_before_it_launches(tmp_path: Path) -> Non
     asked = _run_chained(tmp_path / "on-stdin", [], ["drained"], engine="external")
     assert asked.result.returncode == 1, asked.result.stdout + asked.result.stderr
     assert asked.drivers() == ["stage"], asked.calls
-    assert "--external-ready-file is the unattended form" in asked.result.stderr, asked.result.stderr
+    assert "Use --external-ready-file for unattended runs" in asked.result.stderr, asked.result.stderr
 
 
 @needs_shell_tools
@@ -3683,7 +3683,7 @@ def test_external_ready_file_is_refused_before_a_managed_run_is_staged(tmp_path:
     run = _run_chained(tmp_path, ["--external-ready-file", str(tmp_path / "never")], ["drained"])
     assert run.result.returncode == 1, run.result.stdout + run.result.stderr
     assert run.calls == [], "a fleet was started for a run that was refused"
-    assert "applies to an external run" in run.result.stderr, run.result.stderr
+    assert "requires engine: external" in run.result.stderr, run.result.stderr
 
 
 def test_the_breach_count_run_defaults_to_is_the_one_the_gate_defaults_to() -> None:

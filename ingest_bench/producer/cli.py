@@ -38,7 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="UNIX_SECONDS",
         help="the run's time origin, shared by every shard and by the scorer",
     )
-    parser.add_argument("--speed", type=float, default=1.0, help="replay the corpus's timeline this many times faster")
+    parser.add_argument(
+        "--speed", type=float, default=1.0, help="replay speed multiplier (1.0 preserves the corpus timeline)"
+    )
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--seconds", type=int, help="send only the batches due in the first SECONDS of the corpus")
@@ -47,15 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--value-encoding",
         choices=sorted(VALUE_ENCODINGS),
         default=VALUE_ENCODING_AVRO,
-        help="how each value is framed: the corpus's Avro binary as it stands, or the Confluent wire format, "
-        "which prepends the magic byte and a schema id. The run's facts.json says which the run offers",
+        help="value format: raw Avro binary or Confluent framing with a magic byte and schema ID. "
+        "Use the encoding recorded in the run's facts.json",
     )
     parser.add_argument(
         "--schema-id",
         type=int,
         metavar="N",
-        help=f"the registry id the Confluent header names, from the run's facts.json. Required with, and only "
-        f"with, --value-encoding {VALUE_ENCODING_CONFLUENT}",
+        help=f"schema registry ID from the run's facts.json. Required and allowed only with "
+        f"--value-encoding {VALUE_ENCODING_CONFLUENT}",
     )
     parser.add_argument("--publish-log", required=True, metavar="PATH", help="where to write this shard's publish log")
     parser.add_argument(
@@ -65,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--compression",
         choices=sorted(COMPRESSIONS),
         default=COMPRESSION_DEFAULT,
-        help="the codec every batch is compressed with, as librdkafka's compression.type. The run's facts.json "
-        "says which the run offers, and a consumer that cannot decode it reads no records",
+        help="batch compression codec (librdkafka compression.type). Use the codec in the run's facts.json; "
+        "the consumer must support it",
     )
     parser.add_argument(
         "--upload-prefix", metavar="URI", help="copy the publish log under this prefix as it is written"
@@ -76,10 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="a librdkafka client property (security.protocol=..., sasl.username=...), repeatable. Applied over "
-        "the producer's own defaults; a ${env:NAME} value is read from the environment of this process. "
-        "aws.region is taken here too, to sign an Amazon MSK IAM token with. A compression.* property is "
-        "refused: the wire codec is --compression's, which the run's facts.json publishes",
+        help="librdkafka client property overriding producer defaults; repeat for multiple properties. "
+        "Values of the form ${env:NAME} use environment variables. Set aws.region for Amazon MSK IAM "
+        "authentication. Use --compression instead of compression.* properties",
     )
     return parser
 
@@ -89,8 +90,8 @@ def _value_prefix(encoding: str, schema_id: int | None) -> bytes:
     if encoding == VALUE_ENCODING_CONFLUENT:
         if schema_id is None:
             raise ValueError(
-                f"--value-encoding {VALUE_ENCODING_CONFLUENT} needs --schema-id: the id the run's facts.json "
-                "carries as schema_id, which every record's header names"
+                f"--value-encoding {VALUE_ENCODING_CONFLUENT} requires --schema-id; "
+                "use schema_id from the run's facts.json"
             )
         return confluent_header(schema_id)
     if schema_id is not None:

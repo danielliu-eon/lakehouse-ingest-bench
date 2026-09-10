@@ -14,14 +14,13 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/push-images.sh [options]
 
-  --site PATH        the site config naming the registry (default: ./site.yaml)
-  --platform PLAT    what to build the harness and Spark images for (default:
-                     linux/amd64). Two, comma-separated, builds a manifest list
-                     with buildx. The Flink image is amd64 whatever this says
-  --allow-dirty      push from a tree with uncommitted changes, whose tag then
-                     names a commit that is not what is in the image
+  --site PATH        site config for the registry (default: ./site.yaml)
+  --platform PLAT    target platforms for harness and Spark images (default: linux/amd64).
+                     Use comma-separated values for a buildx manifest list.
+                     The Flink image always targets amd64
+  --allow-dirty      include uncommitted changes in images tagged with the current commit
 
-It prints the image references it pushed, and nothing else, on stdout.
+Prints only the pushed image references to stdout.
 USAGE
 }
 
@@ -61,10 +60,10 @@ REGISTRY="$(site_required '.kubernetes.registry')"
 REGION="$(site_required '.kubernetes.aws_region')"
 
 TAG="$(git -C "$REPO_ROOT" rev-parse --short HEAD)" ||
-	die "could not read this checkout's commit to tag the images with"
+	die "could not read the current commit for the image tags"
 if ((ALLOW_DIRTY == 0)); then
 	[[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]] ||
-		die "the working tree has uncommitted changes, so tag $TAG would not name what is in the image; commit them, or pass --allow-dirty"
+		die "uncommitted changes would make image tag $TAG differ from its commit; commit the changes or pass --allow-dirty"
 fi
 
 HARNESS_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
@@ -75,7 +74,7 @@ log "signing in to $REGISTRY"
 # Report login pipeline failures explicitly under pipefail.
 if ! aws ecr get-login-password --region "$REGION" |
 	docker login --username AWS --password-stdin "$REGISTRY" >&2; then
-	die "could not sign in to $REGISTRY; check that your credentials reach that account in $REGION"
+	die "could not sign in to $REGISTRY; check your credentials for that account in $REGION"
 fi
 
 # build_and_push <dockerfile> <reference> <platform>
@@ -96,5 +95,5 @@ build_and_push "$REPO_ROOT/engines/flink/Dockerfile" "$FLINK_REF" linux/amd64
 # Build Spark for the same target platform as the harness.
 build_and_push "$REPO_ROOT/engines/spark/Dockerfile" "$SPARK_REF" "$PLATFORM"
 
-log "pushed every image at tag $TAG"
+log "pushed all images with tag $TAG"
 printf '%s\n%s\n%s\n' "$HARNESS_REF" "$FLINK_REF" "$SPARK_REF"

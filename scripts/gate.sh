@@ -15,10 +15,10 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/gate.sh <run_id> [options]
 
-  <run_id>           a launched run, whose scorer is publishing under the runs prefix
-  --site PATH        the site config naming the runs prefix (default: ./site.yaml)
+  <run_id>           launched run with scorer output under the runs prefix
+  --site PATH        site config for the runs prefix (default: ./site.yaml)
   --image-tag TAG    passed to teardown.sh, which runs one harness Job (default: this checkout's commit)
-  --teardown         tear the run down once the verdict has not been PASS this many ticks running
+  --teardown         stop the run after --breaches consecutive non-PASS verdicts
   --breaches N       how many consecutive non-PASS verdicts --teardown waits for (default 3; 1 acts at once)
 
 Environment: RUNS_DIR.
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 	--breaches)
 		BREACHES_REQUIRED="${2:?--breaches needs a count}"
 		[[ $BREACHES_REQUIRED =~ ^[1-9][0-9]*$ ]] ||
-			die "--breaches takes a count of consecutive verdicts, and was given '$BREACHES_REQUIRED'"
+			die "--breaches requires a positive integer; got '$BREACHES_REQUIRED'"
 		shift 2
 		;;
 	-h | --help)
@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $RUN_ID ]] || die "this judges one run, and was given both '$RUN_ID' and '$1'"
+		[[ -z $RUN_ID ]] || die "expected one run ID; got '$RUN_ID' and '$1'"
 		RUN_ID="$1"
 		shift
 		;;
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $RUN_ID ]] || {
-	printf 'a run id is required\n\n' >&2
+	printf 'a run ID is required\n\n' >&2
 	usage >&2
 	exit 2
 }
@@ -93,7 +93,7 @@ GATE=(gate --out "$SCRATCH")
 # An unreadable spec is an error, not permission to substitute defaults.
 SPEC="$SCRATCH/spec.yaml"
 aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/spec.yaml" "$SPEC" --only-show-errors >&2 ||
-	die "could not read $RUNS_ROOT/$RUN_ID/stage/spec.yaml, and the run's own gate windows are in it"
+	die "could not read gate windows from $RUNS_ROOT/$RUN_ID/stage/spec.yaml"
 ADAPTATION_S="$(yq '.scoring.gate_adaptation_s' "$SPEC")"
 [[ $ADAPTATION_S == null ]] || GATE+=(--adaptation-s "$ADAPTATION_S")
 WINDOW_S="$(yq '.scoring.gate_window_s' "$SPEC")"

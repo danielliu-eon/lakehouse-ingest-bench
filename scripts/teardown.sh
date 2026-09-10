@@ -18,10 +18,10 @@ usage() {
 usage: scripts/teardown.sh <run_id> [options]
 
   <run_id>           a run whose directory is under $RUNS_DIR
-  --site PATH        the site config naming the cluster and the broker (default: ./site.yaml)
+  --site PATH        site config for the cluster and the broker (default: ./site.yaml)
   --image-tag TAG    the harness image tag the drop-topic Job runs (default: this checkout's commit)
-  --keep-table       accepted, and already what happens: the table and the warehouse data
-                     are never deleted here. `purge.sh <run_id>` is what reclaims them
+  --keep-table       accepted for compatibility; teardown always preserves table data.
+                     Use `purge.sh <run_id>` to delete it
 
 Environment: DROP_WAIT_S, RUNS_DIR.
 USAGE
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $RUN_ID ]] || die "this tears one run down, and was given both '$RUN_ID' and '$1'"
+		[[ -z $RUN_ID ]] || die "expected one run ID; got '$RUN_ID' and '$1'"
 		RUN_ID="$1"
 		shift
 		;;
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $RUN_ID ]] || {
-	printf 'a run id is required\n\n' >&2
+	printf 'a run ID is required\n\n' >&2
 	usage >&2
 	exit 2
 }
@@ -70,7 +70,7 @@ require_host_tools kubectl aws yq jq git gzip
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 FACTS="$RUN_DIR/facts.json"
-[[ -f $FACTS ]] || die "no staged run at $RUN_DIR; run this where stage.sh fetched it, or set RUNS_DIR"
+[[ -f $FACTS ]] || die "no staged run at $RUN_DIR; use the checkout where stage.sh saved it, or set RUNS_DIR"
 
 k8s_read_site
 TAG="$(k8s_image_tag "$IMAGE_TAG")"
@@ -80,20 +80,20 @@ BOOTSTRAP="$(jq -r .bootstrap "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
 # Use the staged topic name instead of deriving it from the run ID.
 TOPIC="$(jq -r .topic "$FACTS")"
-[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS names no topic, so nothing here knows which topic $RUN_ID published to"
+[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS has no topic; cannot determine which topic to delete for $RUN_ID"
 
 # Read the staged spec to identify the engine to stop.
 SPEC="$RUN_DIR/spec.yaml"
-[[ -f $SPEC ]] || die "no spec at $SPEC, so nothing here knows which engine $RUN_ID started"
+[[ -f $SPEC ]] || die "no spec at $SPEC; cannot determine which engine to stop for $RUN_ID"
 ENGINE="$(yq '.engine' "$SPEC")"
-[[ -n $ENGINE && $ENGINE != null ]] || die "$SPEC sets no engine, so nothing here knows what to stop"
+[[ -n $ENGINE && $ENGINE != null ]] || die "$SPEC has no engine; cannot determine what to stop"
 
 # ---------------------------------------------------------------------------
 # 1. The engine
 # ---------------------------------------------------------------------------
 
 if [[ $ENGINE == external ]]; then
-	log "an external run's engine is yours, so there is none of ours to delete"
+	log "external engine: stop it manually"
 else
 	k8s_read_engine "$ENGINE" "$(k8s_object_name "$RUN_ID")"
 
@@ -106,7 +106,7 @@ else
 	# Delete engine resources before the ConfigMap their pods mount.
 	for document in "$ENGINE_DOCUMENT_FILE" "$ENGINE_CONFIGMAP_FILE"; do
 		if [[ -f $RUN_DIR/$document ]]; then
-			log "deleting what $document declares"
+			log "deleting resources declared in $document"
 			k8s_delete_file "$RUN_DIR/$document"
 		fi
 	done
@@ -150,7 +150,7 @@ SCORES="$RUN_DIR/scores"
 mkdir -p "$SCORES"
 log "fetching $RUNS_ROOT/$RUN_ID/scores/ into $SCORES"
 aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" --only-show-errors >&2 ||
-	log "could not fetch $RUNS_ROOT/$RUN_ID/scores/; the document below will say which artifacts are missing"
+	log "could not fetch $RUNS_ROOT/$RUN_ID/scores/; the report below will list missing artifacts"
 
 # ---------------------------------------------------------------------------
 # 5. The table's last metadata document
@@ -173,14 +173,14 @@ if ((METADATA_STATUS == 0)); then
 	# Save locally for finish and purge, then upload the same document for durable storage.
 	log "copying $TABLE's metadata document to $LOCAL_FINAL and $FINAL"
 	if k8s_fetch_metadata_document "$METADATA" "$LOCAL_FINAL"; then
-		aws s3 cp "$LOCAL_FINAL" "$FINAL" --only-show-errors >&2 || log "could not copy $LOCAL_FINAL to $FINAL; it is still on this machine"
+		aws s3 cp "$LOCAL_FINAL" "$FINAL" --only-show-errors >&2 || log "could not copy $LOCAL_FINAL to $FINAL; the local copy is available"
 	else
-		log "could not copy $METADATA to $LOCAL_FINAL; the table still holds it"
+		log "could not copy $METADATA to $LOCAL_FINAL; the source metadata is unchanged"
 	fi
 elif ((METADATA_STATUS == TABLE_ABSENT)); then
 	log "no table $TABLE in the catalog, so there is no metadata document to copy"
 else
-	die "could not read $TABLE's metadata document: table-metadata exited $METADATA_STATUS; the lines above are its own error"
+	die "could not read $TABLE's metadata document: table-metadata exited $METADATA_STATUS; see the error above"
 fi
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ fi
 # Collect a result even if finish is never called. Geometry and producer logs may still be
 # missing. Report collection failures without treating completed resource teardown as a
 # failure; collect can be retried separately.
-log "collect will report scores/geometry.json and the publish logs missing until finish.sh fetches and measures them, so the missing: lines below are expected"
+log "collect will report scores/geometry.json and publish logs as missing until finish.sh fetches the logs and measures geometry"
 log "collecting $RUN_ID"
 harness_local --extra aws collect --run-dir "$(abs_path "$RUN_DIR")" --site "$(abs_path "$SITE_FILE")" ||
 	log "could not collect $RUN_ID; rerun: collect --run-dir $RUN_DIR --site $SITE_FILE"

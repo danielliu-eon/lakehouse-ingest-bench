@@ -14,12 +14,10 @@ usage() {
 usage: deploy/k8s/stack/teardown.sh [--all] [--yes]
 
   --all   also remove the Strimzi operator and the brokers' StorageClass
-  --yes   do not ask before deleting the namespace; for a teardown run from a
-          script
+  --yes   skip confirmation before deleting the stack
 
-Environment: CLOUD, KUBE_CONTEXT, NAMESPACE and the cloud's own variables
-(for aws: AWS_REGION, CLUSTER_NAME) mean what they mean to setup.sh and must
-match the run of it that created the stack.
+Environment: CLOUD, KUBE_CONTEXT, NAMESPACE, AWS_REGION, and CLUSTER_NAME
+must match the values used by setup.sh.
 USAGE
 }
 
@@ -50,8 +48,8 @@ done
 CLOUD="${CLOUD:-}"
 case "$CLOUD" in
 aws) ;;
-"") die "CLOUD must be set; aws is the one value this supports — see $PREREQ_DOC" ;;
-*) die "CLOUD is '$CLOUD'; aws is the one value this supports — see $PREREQ_DOC" ;;
+"") die "CLOUD must be set; only aws is supported. See $PREREQ_DOC" ;;
+*) die "CLOUD is '$CLOUD'; only aws is supported. See $PREREQ_DOC" ;;
 esac
 NAMESPACE="${NAMESPACE:-ingest-bench}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-${CLUSTER_NAME:-}}"
@@ -104,7 +102,7 @@ if ((ALL == 1)); then
 fi
 printf 'The bucket, the node group and the CSI add-on stay.\n'
 if [[ $ASSUME_YES != yes ]]; then
-	confirm "remove all of the above?"
+	confirm "delete the resources listed above?"
 fi
 
 # ---------------------------------------------------------------------------
@@ -115,7 +113,7 @@ if kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1;
 	# Keep Strimzi running while it reconciles Kafka deletion and removes claims.
 	log "destroying the kafka release"
 	helmfile_here destroy --selector name=kafka
-	log "waiting for the brokers to go"
+	log "waiting for broker pods to be deleted"
 	kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" wait pod \
 		-l "strimzi.io/cluster=$KAFKA_NAME" --for=delete --timeout=300s 2>/dev/null || true
 	log "destroying the lakekeeper release"

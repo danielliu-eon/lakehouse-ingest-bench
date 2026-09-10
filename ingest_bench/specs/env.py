@@ -41,9 +41,9 @@ def refuse_literal_secrets(values: Mapping[str, str], where: str) -> None:
     literal = sorted(key for key, value in values.items() if names_a_secret(key) and not has_placeholder(value))
     if literal:
         raise ValueError(
-            f"{where} writes {literal} out in full, and a run on a cluster renders those into a ConfigMap and "
-            f"uploads them to the runs prefix; write {PLACEHOLDER_FORM} instead and put the value in the Secret "
-            "site.kubernetes.secret_name declares"
+            f"{where} contains literal credentials in {literal}, which would be stored in ConfigMaps and "
+            f"uploaded run artifacts; use {PLACEHOLDER_FORM} and store the values in the Secret named by "
+            "site.kubernetes.secret_name"
         )
 
 

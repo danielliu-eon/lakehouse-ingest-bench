@@ -48,13 +48,13 @@ k8s_fetch_metadata_document() {
 	aws s3 cp "$source" "$path" --only-show-errors >&2 || return 1
 	local magic=""
 	magic="$(od -An -tx1 -N2 -- "$path" | tr -d ' \n')" ||
-		die "could not read the first bytes of $path to tell whether it is compressed"
+		die "could not read $path to detect compression"
 	[[ $magic == 1f8b ]] || return 0
 	log "$source is gzip-compressed; storing it decompressed"
 	# Replace only after successful decompression, preserving the fetched file on failure.
 	if ! gzip -dc -- "$path" >"$path.plain"; then
 		rm -f "$path.plain"
-		log "could not decompress $path, so it is stored as it was fetched"
+		log "could not decompress $path; keeping the downloaded file"
 		return 1
 	fi
 	mv "$path.plain" "$path"
@@ -77,7 +77,7 @@ site_value() {
 site_required() {
 	local value
 	value="$(site_value "$1")"
-	[[ -n $value ]] || die "$SITE_FILE sets no ${1#.}; copy site.aws.example.yaml for the whole shape of it"
+	[[ -n $value ]] || die "$SITE_FILE is missing ${1#.}; see site.aws.example.yaml for the required structure"
 	printf '%s' "$value"
 }
 
@@ -96,7 +96,7 @@ site_root() {
 	local root
 	root="$(site_required "$1")"
 	[[ $root == "$S3_SCHEME"* ]] ||
-		die "${1#.} is '$root', and these drivers reach storage through the aws CLI: the cloud path is AWS-only today, so every root has to be an s3:// URI"
+		die "${1#.} must be an s3:// URI; got '$root'. These drivers use the AWS CLI for storage"
 	printf '%s' "$root"
 }
 
@@ -111,7 +111,7 @@ site_json() {
 site_pairs() {
 	local entries
 	entries="$(yq "$1 // {} | to_entries | .[] | .key + \"=\" + .value" "$SITE_FILE")" ||
-		die "could not read ${1#.} out of $SITE_FILE; every value under it must be a quoted string"
+		die "could not read ${1#.} from $SITE_FILE; every value under it must be a quoted string"
 	printf '%s' "$entries"
 }
 
@@ -125,12 +125,12 @@ site_flags() {
 	# trigger the caller's set -e.
 	local pairs
 	pairs="$(site_pairs "$1")" ||
-		die "cannot build the $2 flags a Job's command line needs; the line above says why"
+		die "cannot build $2 flags for the Job command; see the error above"
 	local flags="" pair
 	while IFS= read -r pair; do
 		[[ -n $pair ]] || continue
 		[[ $pair != *"'"* && $pair != *'"'* ]] ||
-			die "$SITE_FILE sets a ${1#.} entry holding a quote, which cannot survive a Job's command line"
+			die "$SITE_FILE has a ${1#.} entry containing a quote, which cannot be passed safely to a Job command"
 		flags="$flags $2 '$pair'"
 	done <<<"$pairs"
 	printf '%s' "$flags"
@@ -143,7 +143,7 @@ site_flags() {
 read_catalog_prop_flags() {
 	local pairs
 	pairs="$(site_pairs '.catalog.props')" ||
-		die "cannot build the catalog flags a harness command needs; the line above says why"
+		die "cannot build catalog flags for the harness command; see the error above"
 	CATALOG_PROP_FLAGS=()
 	local pair
 	while IFS= read -r pair; do
@@ -177,7 +177,7 @@ k8s_reach_catalog() {
 	parts="$(k8s_service_host "$host")" || return 0
 	read -r service namespace <<<"$parts"
 	[[ $uri == http://* ]] ||
-		die "catalog.props.uri is $uri: a Service name is reached through a tunnel, and the tunnel carries plain http only"
+		die "catalog.props.uri is $uri; this catalog tunnel requires plain HTTP"
 	if [[ $hostport == *:* ]]; then
 		port="${hostport##*:}"
 	else
@@ -233,7 +233,7 @@ k8s_image_tag() {
 		return 0
 	fi
 	git -C "$REPO_ROOT" rev-parse --short HEAD ||
-		die "could not read this checkout's commit to tag the image with; pass --image-tag"
+		die "could not read the current commit for the image tag; pass --image-tag"
 }
 
 # ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ k8s_wait_job() {
 		case "$conditions" in
 		*Failed*)
 			k8s_job_tail "$name"
-			die "job/$name failed; its log and its pods' events are above"
+			die "job/$name failed; see the logs and pod events above"
 			;;
 		*Complete*)
 			log "job/$name completed"
@@ -365,7 +365,7 @@ k8s_wait_job() {
 		waited=$((waited + K8S_JOB_POLL_S))
 	done
 	k8s_job_tail "$name"
-	die "job/$name did not complete within ${timeout_s}s; its log and its pods' events are above"
+	die "job/$name did not complete within ${timeout_s}s; see the logs and pod events above"
 }
 
 # Keep logs on stdout so drivers can parse the harness's reported output URI.
@@ -385,7 +385,7 @@ k8s_object_present() {
 	local name
 	name="$(kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "$1" "$2" \
 		--ignore-not-found -o 'jsonpath={.metadata.name}')" ||
-		die "could not read $1/$2 out of $SITE_NAMESPACE; try: kubectl get $1/$2"
+		die "could not read $1/$2 in namespace $SITE_NAMESPACE; try: kubectl get $1/$2"
 	printf '%s' "$name"
 }
 
@@ -410,16 +410,16 @@ k8s_write_engine_image() {
 		waited=$((waited + ENGINE_IMAGE_POLL_S))
 	done
 	if [[ -z $image ]]; then
-		log "no pod matching '$selector' names an image, so $path is not written"
+		log "no pod matching '$selector' reports an image; skipping $path"
 		return 0
 	fi
-	[[ -n $digest ]] || log "no pod matching '$selector' reported an image digest, so $path records none"
+	[[ -n $digest ]] || log "no pod matching '$selector' reports an image digest; $path will record no digest"
 	# Do not fail staging over missing provenance after the engine has started.
 	if jq -n --arg image "$image" --arg digest "$digest" \
 		'{image: $image, digest: (if $digest == "" then null else $digest end)}' >"$path"; then
-		log "the engine ran $image (digest ${digest:-none reported})"
+		log "engine image: $image (digest ${digest:-none reported})"
 	else
-		log "could not write $path, so this run records no engine image"
+		log "could not write $path; engine image information was not saved"
 	fi
 }
 
@@ -495,12 +495,12 @@ k8s_port_forward() {
 	K8S_PORT_FORWARD_PID=$!
 	while ((waited < K8S_PORT_FORWARD_WAIT_S)); do
 		if curl -sf --max-time 5 -o /dev/null "http://localhost:$local_port$probe"; then
-			log "port-forward to $resource answers on localhost:$local_port"
+			log "port-forward to $resource is ready on localhost:$local_port"
 			return 0
 		fi
 		# Report an exited tunnel immediately instead of waiting for the timeout.
 		if ! kill -0 "$K8S_PORT_FORWARD_PID" 2>/dev/null; then
-			die "kubectl port-forward $resource $ports exited; the lines above are its own output"
+			die "kubectl port-forward $resource $ports exited; see its output above"
 		fi
 		sleep 2
 		waited=$((waited + 2))
@@ -535,7 +535,7 @@ ENGINE_NAME_MARKER='<name>'
 k8s_read_engine() {
 	local engine=$1 name=$2 fields="" key="" value="" required=""
 	fields="$(harness_local engine-k8s "$engine")" ||
-		die "could not read how a '$engine' run is addressed on a cluster; the line above says why"
+		die "could not read Kubernetes resource details for engine '$engine'; see the error above"
 	ENGINE_KIND=""
 	ENGINE_RUNNING_STATE=""
 	ENGINE_FAILED_STATES=""
@@ -568,14 +568,14 @@ k8s_read_engine() {
 		pods_selector) ENGINE_PODS_SELECTOR="$value" ;;
 		document_file) ENGINE_DOCUMENT_FILE="$value" ;;
 		configmap_file) ENGINE_CONFIGMAP_FILE="$value" ;;
-		*) die "engine-k8s $engine names a field '$key' that no driver here reads; update scripts/_k8s.sh" ;;
+		*) die "engine-k8s $engine returned unsupported field '$key'; update scripts/_k8s.sh" ;;
 		esac
 	done <<<"$fields"
 	# Only pods_selector may be empty: some verifiers do not inspect pods.
 	for required in ENGINE_KIND ENGINE_RUNNING_STATE ENGINE_FAILED_STATES ENGINE_STATE_JSONPATH \
 		ENGINE_ERROR_JSONPATH ENGINE_LIFECYCLE_JSONPATH ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT \
 		ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
-		[[ -n ${!required} ]] || die "engine-k8s $engine printed no ${required#ENGINE_}, so this run cannot be addressed"
+		[[ -n ${!required} ]] || die "engine-k8s $engine returned no ${required#ENGINE_}; cannot identify this run's resources"
 	done
 }
 

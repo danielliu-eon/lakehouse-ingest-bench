@@ -28,33 +28,33 @@ NOT_REPORTED = "not reported"
 
 def document(value: object, where: str) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError(f"{where} answered {type(value).__name__} rather than a JSON object")
+        raise ValueError(f"{where} returned {type(value).__name__}; expected a JSON object")
     return {str(key): entry for key, entry in cast(dict[object, object], value).items()}
 
 
 def documents(value: object, where: str) -> list[dict[str, object]]:
     if not isinstance(value, list):
-        raise ValueError(f"{where} answered {type(value).__name__} rather than a JSON array")
+        raise ValueError(f"{where} returned {type(value).__name__}; expected a JSON array")
     return [document(entry, f"{where}[{index}]") for index, entry in enumerate(cast(list[object], value))]
 
 
 def field(holder: dict[str, object], key: str, where: str) -> object:
     if key not in holder:
-        raise ValueError(f"{where} answered no {key!r}; it holds {sorted(holder)}")
+        raise ValueError(f"{where} is missing {key!r}; available fields: {sorted(holder)}")
     return holder[key]
 
 
 def int_field(holder: dict[str, object], key: str, where: str) -> int:
     value = field(holder, key, where)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{where} answered {key} {value!r}, which is not a whole number")
+        raise ValueError(f"{where} returned {key}={value!r}; expected an integer")
     return value
 
 
 def str_field(holder: dict[str, object], key: str, where: str) -> str:
     value = field(holder, key, where)
     if not isinstance(value, str):
-        raise ValueError(f"{where} answered {key} {value!r}, which is not a string")
+        raise ValueError(f"{where} returned {key}={value!r}; expected a string")
     return value
 
 

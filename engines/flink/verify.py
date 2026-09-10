@@ -179,14 +179,14 @@ def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object]) -> list[s
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verify-flink",
-        description="Check a running Flink job's effective settings against the spec that asked for them.",
+        description="Compare a running Flink job's effective settings with its run spec.",
     )
     parser.add_argument("--spec", required=True, metavar="PATH", help="the run spec the job was staged from")
     parser.add_argument(
         "--run-id",
         required=True,
         metavar="ID",
-        help="the run, which is also the job's name — so this is what says the job read is the job just started",
+        help="run ID used as the Flink job name to identify the job to verify",
     )
     parser.add_argument(
         "--rest", required=True, metavar="URL", help="the jobmanager's REST endpoint, e.g. http://localhost:8081"
@@ -208,7 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if drift:
         return DRIFT_EXIT
     # Keep diagnostics on stderr so stdout contains only drift findings.
-    print(f"verified: {run_id} is running the settings its spec asked for", file=sys.stderr)
+    print(f"verified: {run_id} matches its run spec", file=sys.stderr)
     return 0
 
 

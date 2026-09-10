@@ -193,7 +193,7 @@ def test_a_duration_this_cannot_read_is_refused_by_name(written: str) -> None:
 def test_an_answer_that_is_not_the_document_it_should_be_names_the_endpoint() -> None:
     answers = _answers()
     answers[f"/jobs/{JID}"] = {"jid": JID, "name": RUN_ID, "state": "RUNNING"}
-    with pytest.raises(ValueError, match=f"/jobs/{JID} answered no 'vertices'"):
+    with pytest.raises(ValueError, match=f"/jobs/{JID} is missing 'vertices'"):
         verify(_spec(), RUN_ID, _fetch(answers))
 
 

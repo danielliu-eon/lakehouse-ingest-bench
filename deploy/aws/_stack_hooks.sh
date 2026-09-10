@@ -19,9 +19,9 @@ KAFKA_VOLUME_IOPS="${KAFKA_VOLUME_IOPS:-6000}"
 # separate so teardown works after the bucket or CSI add-on is removed.
 stack_preflight() {
 	require_host_tools aws envsubst
-	[[ -n ${AWS_REGION:-} ]] || die "AWS_REGION must name the region the cluster and the bucket are in"
+	[[ -n ${AWS_REGION:-} ]] || die "AWS_REGION must specify the region containing the cluster and bucket"
 	export AWS_REGION
-	[[ -n ${CLUSTER_NAME:-} ]] || die "CLUSTER_NAME must name the EKS cluster, for its pod identity associations"
+	[[ -n ${CLUSTER_NAME:-} ]] || die "CLUSTER_NAME must specify the EKS cluster used for Pod Identity associations"
 
 	if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"; then
 		die "aws sts get-caller-identity failed: $ACCOUNT — sign in first (aws configure, or aws sso login --profile ...)"
@@ -32,7 +32,7 @@ stack_preflight() {
 # Validate setup-only storage prerequisites: bucket access, volume settings,
 # and the EBS CSI driver.
 stack_preflight_storage() {
-	[[ -n ${BUCKET:-} ]] || die "BUCKET must name the bucket whose corpus/, runs/ and warehouse/ prefixes a run uses"
+	[[ -n ${BUCKET:-} ]] || die "BUCKET must specify the bucket containing the corpus/, runs/, and warehouse/ prefixes"
 	[[ $KAFKA_VOLUME_THROUGHPUT_MIBS =~ ^[1-9][0-9]*$ ]] ||
 		die "KAFKA_VOLUME_THROUGHPUT_MIBS must be a positive integer, got '$KAFKA_VOLUME_THROUGHPUT_MIBS'"
 	[[ $KAFKA_VOLUME_IOPS =~ ^[1-9][0-9]*$ ]] || die "KAFKA_VOLUME_IOPS must be a positive integer, got '$KAFKA_VOLUME_IOPS'"

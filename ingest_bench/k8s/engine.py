@@ -33,7 +33,7 @@ def render(engine: str, requested: Sequence[str]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="engine-k8s",
-        description="Print how a managed engine's run is addressed on a cluster, for a driver to read.",
+        description="Print a managed engine's Kubernetes descriptor for shell drivers.",
     )
     parser.add_argument("engine", metavar="ENGINE", help=f"a managed engine: {', '.join(sorted(MANAGED))}")
     parser.add_argument(
@@ -41,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FIELD",
         nargs="*",
         help=(
-            "a field of the descriptor. One prints its value alone; several, or none, print `field=value` per line. "
+            "descriptor fields to print. One field prints only its value; "
+            "multiple or no fields print field=value lines. "
             f"The fields are: {', '.join(FIELDS)}"
         ),
     )

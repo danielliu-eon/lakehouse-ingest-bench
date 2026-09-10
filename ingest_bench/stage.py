@@ -358,7 +358,7 @@ def stage(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="stage", description="Create a run's topic and table and write its facts.")
+    parser = argparse.ArgumentParser(prog="stage", description="Prepare a run's topic, table, and configuration files.")
     parser.add_argument("--spec", required=True, metavar="PATH", help="the run spec to stage")
     parser.add_argument(
         "--site", required=True, metavar="PATH", help="the site config naming storage, broker and catalog"
@@ -367,19 +367,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stamp",
         metavar="YYYYmmddTHHMMSSZ",
-        help="the run's time stamp, for re-staging a run under its original identifier",
+        help="timestamp to reuse when staging a run with its original ID",
     )
     parser.add_argument(
         "--image-tag",
         metavar="TAG",
-        help="the tag of the images push-images.sh pushed, which a managed engine's cluster documents start. "
-        "Required when the site declares a cluster",
+        help="image tag published by push-images.sh. Required when the site declares a Kubernetes cluster",
     )
     parser.add_argument(
         "--upload-prefix",
         metavar="URI",
-        help="publish the run directory under <URI>/<run id>/stage/, for a staging that ran as a Job and whose "
-        "filesystem went with its pod",
+        help="upload the run directory to <URI>/<run id>/stage/ so it survives the staging pod's deletion",
     )
     return parser
 

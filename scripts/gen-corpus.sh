@@ -24,13 +24,13 @@ usage: scripts/gen-corpus.sh <preset> [options]
 
   <preset>           a shipped preset name, or a path to one inside the image
   --shards N         generate in N pods, then merge them (default: 1)
-  --seed S           the generator's seed, which is part of the corpus's name (default: 1)
-  --site PATH        the site config naming the cluster and the corpus root (default: ./site.yaml)
+  --seed S           generator seed, included in the corpus name (default: 1)
+  --site PATH        site config for the cluster and the corpus root (default: ./site.yaml)
   --image-tag TAG    the harness image tag to run (default: this checkout's commit)
 
 Environment: GEN_WAIT_S, MERGE_WAIT_S, GEN_MEMORY.
 
-It prints the corpus URI, and nothing else, on stdout.
+Prints only the corpus URI to stdout.
 USAGE
 }
 
@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $PRESET ]] || die "this takes one preset, and was given both '$PRESET' and '$1'"
+		[[ -z $PRESET ]] || die "expected one preset; got '$PRESET' and '$1'"
 		PRESET="$1"
 		shift
 		;;
@@ -160,7 +160,7 @@ shard=0
 while ((shard < SHARDS)); do
 	SHARD_CORPUS="$CORPUS_ROOT/shards/$shard/$SHARD_DIR"
 	aws s3 ls "$SHARD_CORPUS/corpus.json" >/dev/null ||
-		die "$SHARD_CORPUS holds no corpus.json, so shard $shard of $SHARDS published none of its batches; read job/$GEN_JOB's log with: kubectl logs job/$GEN_JOB"
+		die "could not find corpus.json at $SHARD_CORPUS for shard $shard of $SHARDS; check storage access and read the job log: kubectl logs job/$GEN_JOB"
 	MERGE_COMMAND="$MERGE_COMMAND $SHARD_CORPUS"
 	shard=$((shard + 1))
 done

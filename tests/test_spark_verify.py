@@ -269,10 +269,10 @@ def test_a_pod_the_selector_matched_and_the_operator_did_not_label_is_named() ->
 @pytest.mark.parametrize(
     ("pods", "message"),
     [
-        ({"apiVersion": "v1"}, "answered no 'items'"),
-        ({"items": {"a": 1}}, "rather than a JSON array"),
-        ({"items": [{"metadata": {"name": "p"}}]}, "answered no 'status'"),
-        ({"items": [{"metadata": {}, "status": {}}]}, "answered no 'name'"),
+        ({"apiVersion": "v1"}, "is missing 'items'"),
+        ({"items": {"a": 1}}, "expected a JSON array"),
+        ({"items": [{"metadata": {"name": "p"}}]}, "is missing 'status'"),
+        ({"items": [{"metadata": {}, "status": {}}]}, "is missing 'name'"),
     ],
 )
 def test_a_pod_list_that_is_not_one_is_refused_rather_than_read_as_a_clean_fleet(
@@ -285,9 +285,12 @@ def test_a_pod_list_that_is_not_one_is_refused_rather_than_read_as_a_clean_fleet
 @pytest.mark.parametrize(
     ("answers", "message"),
     [
-        ({APPLICATIONS: {"id": APPLICATION}}, "rather than a JSON array"),
-        ({APPLICATIONS: [{"id": APPLICATION}]}, "answered no 'name'"),
-        ({APPLICATIONS: [{"id": APPLICATION, "name": RUN_ID}], ENVIRONMENT: {"runtime": {}}}, "no 'sparkProperties'"),
+        ({APPLICATIONS: {"id": APPLICATION}}, "expected a JSON array"),
+        ({APPLICATIONS: [{"id": APPLICATION}]}, "is missing 'name'"),
+        (
+            {APPLICATIONS: [{"id": APPLICATION, "name": RUN_ID}], ENVIRONMENT: {"runtime": {}}},
+            "missing 'sparkProperties'",
+        ),
         (
             {APPLICATIONS: [{"id": APPLICATION, "name": RUN_ID}], ENVIRONMENT: {"sparkProperties": [["only"]]}},
             "rather than a key and a value",

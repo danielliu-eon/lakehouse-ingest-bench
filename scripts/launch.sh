@@ -28,8 +28,8 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/launch.sh <run_id> [options]
 
-  <run_id>           a run stage.sh has staged, whose directory is under $RUNS_DIR
-  --site PATH        the site config naming the cluster and the runs prefix (default: ./site.yaml)
+  <run_id>           staged run with a directory under $RUNS_DIR
+  --site PATH        site config for the cluster and the runs prefix (default: ./site.yaml)
   --image-tag TAG    the harness image tag the producer and the scorer run (default: this checkout's commit)
 
 Environment: EPOCH_LEAD_S, IDLE_STOP_S, FIRST_POLL_WAIT_S, FIRST_POLL_S,
@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
 		exit 2
 		;;
 	*)
-		[[ -z $RUN_ID ]] || die "this launches one run, and was given both '$RUN_ID' and '$1'"
+		[[ -z $RUN_ID ]] || die "expected one run ID; got '$RUN_ID' and '$1'"
 		RUN_ID="$1"
 		shift
 		;;
@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $RUN_ID ]] || {
-	printf 'a run id is required\n\n' >&2
+	printf 'a run ID is required\n\n' >&2
 	usage >&2
 	exit 2
 }
@@ -78,7 +78,7 @@ RUN_DIR="$RUNS_DIR/$RUN_ID"
 FACTS="$RUN_DIR/facts.json"
 SPEC="$RUN_DIR/spec.yaml"
 [[ -f $FACTS ]] || die "no staged run at $RUN_DIR; run scripts/stage.sh first, or set RUNS_DIR"
-[[ -f $SPEC ]] || die "$RUN_DIR holds no spec.yaml, so the run it asks for cannot be read"
+[[ -f $SPEC ]] || die "$RUN_DIR has no spec.yaml; cannot read the run configuration"
 
 k8s_read_site
 TAG="$(k8s_image_tag "$IMAGE_TAG")"
@@ -89,7 +89,7 @@ CORPUS_URI="$(jq -r .corpus_uri "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
 # Use the staged topic name instead of deriving it from the run ID.
 TOPIC="$(jq -r .topic "$FACTS")"
-[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS names no topic, so there is nothing for the producer to publish to"
+[[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS has no topic for the producer"
 # Omit --key-column for unkeyed records.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$FACTS")"
 # Use the encoding and schema ID resolved at staging. Raw Avro has no schema ID.
@@ -101,7 +101,7 @@ SHARDS="$(yq '.producer.shards' "$SPEC")"
 if [[ $SHARDS == null ]]; then
 	SHARDS=1
 fi
-[[ $SHARDS =~ ^[1-9][0-9]*$ ]] || die "$SPEC asks for producer.shards '$SHARDS', which is not a pod count"
+[[ $SHARDS =~ ^[1-9][0-9]*$ ]] || die "$SPEC producer.shards must be a positive integer; got '$SHARDS'"
 SPEED="$(yq '.producer.speed' "$SPEC")"
 REPLAY_SECONDS="$(yq '.producer.seconds' "$SPEC")"
 BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC")"
@@ -188,7 +188,7 @@ while :; do
 	fi
 	if ((waited >= FIRST_POLL_WAIT_S)); then
 		k8s_job_tail "$SCORER_JOB"
-		die "job/$SCORER_JOB published no reading within ${FIRST_POLL_WAIT_S}s; its log and its pods' events are above"
+		die "job/$SCORER_JOB published no reading within ${FIRST_POLL_WAIT_S}s; see the logs and pod events above"
 	fi
 	sleep "$FIRST_POLL_S"
 	waited=$((waited + FIRST_POLL_S))
