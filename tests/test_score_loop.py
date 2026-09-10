@@ -9,8 +9,10 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 from pyiceberg.exceptions import NamespaceAlreadyExistsError
+from pyiceberg.io import FileIO
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
+from pyiceberg.table.metadata import TableMetadata
 from pyiceberg.types import LongType, NestedField
 
 from ingest_bench import uri
@@ -18,7 +20,7 @@ from ingest_bench.catalog import open_catalog
 from ingest_bench.clock import Clock, now_ms
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.producer import publish_log
-from ingest_bench.scorer import cli, score, snapshots, tally
+from ingest_bench.scorer import cli, score, snapshots
 from ingest_bench.table import create
 from tests.test_tally import _rows_of
 
@@ -520,20 +522,25 @@ def test_a_commit_of_many_files_is_tallied_once_at_any_worker_count(
     reading complete is every file applied exactly once.
     """
     records = metadata.read_manifest(corpus.uri)
+    file_count = 64
     figures: list[tuple[int, int, int, int]] = []
     for workers in (1, 16):
         name = f"fanout{workers}"
-        _many_file_commit(tmp_path, corpus, name, files=64)
+        _many_file_commit(tmp_path, corpus, name, files=file_count)
         args = _many_file_args(tmp_path, corpus, name, read_workers=workers)
         clock = StepClock(now_ms())
-        state = score._load_inputs(args, clock, io.StringIO())
-        assert score._poll_once(state, clock, io.StringIO()) is True
+        log = io.StringIO()
+        state = score._load_inputs(args, clock, log)
+        assert score._poll_once(state, clock, log) is True
         assert state.tally.complete(0), "a file read twice, or not at all"
+        # What the poll reports it read, which at either width is every file of
+        # the commit: the manifest's own count is the line below.
+        assert f"files={file_count}" in log.getvalue().rsplit("POLL t=", 1)[1], log.getvalue()
         line = json.loads((args.out_dir / score.SNAPSHOTS_FILE).read_text().splitlines()[-1])
         figures.append(
             (state.tally.prefix(), state.tally.committed_rows(), int(line["added_files"]), len(state.observations))
         )
-    assert figures[0] == figures[1] == (0, records[0].rows, 64, 1)
+    assert figures[0] == figures[1] == (0, records[0].rows, file_count, 1)
 
 
 def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
@@ -582,15 +589,18 @@ def test_a_read_phase_past_the_poll_interval_says_so(
     table = _many_file_commit(tmp_path, corpus, "slow", files=64)
     args = _many_file_args(tmp_path, corpus, "slow", read_workers=1, poll_interval_s=5.0)
     clock = StepClock(now_ms())
-    unwrapped = tally.read_id_column
 
-    def slowly(path: str, file_format: str) -> np.ndarray:
-        clock.sleep(0.1)
-        return unwrapped(path, file_format)
+    def slowly(document: TableMetadata, snapshot_id: int, io_for_table: FileIO) -> list[snapshots.AddedFile]:
+        added = snapshots.added_files(document, snapshot_id, io_for_table)
+        # One reader, so the poll pays for each of these files in turn. The
+        # clock is charged here rather than inside the reader because a
+        # StepClock is not thread-safe and the reads run in the pool.
+        clock.sleep(0.1 * len(added))
+        return added
 
     # The loop reaches it through the same module object, so this is the
     # function it will call.
-    monkeypatch.setattr(score, "read_id_column", slowly)
+    monkeypatch.setattr(score, "added_files", slowly)
     log = io.StringIO()
     state = score._load_inputs(args, clock, log)
     assert score._poll_once(state, clock, log) is True
@@ -599,7 +609,7 @@ def test_a_read_phase_past_the_poll_interval_says_so(
     assert "poll_ms=6400 files=64" in printed.rsplit("POLL t=", 1)[1], printed
 
     # The same loop, reading a commit of one file at the speed of the disk.
-    monkeypatch.setattr(score, "read_id_column", unwrapped)
+    monkeypatch.setattr(score, "added_files", snapshots.added_files)
     table.append(_rows_of(metadata.read_manifest(corpus.uri)[1], corpus))
     clock.sleep(5.0)
     assert score._poll_once(state, clock, log) is True

@@ -98,7 +98,8 @@ class ScoreArgs:
     # How many of a commit's data files are read at once. Each id column is one
     # request whose cost is latency rather than bytes, so the count is set by
     # how many of those a poll must overlap to stay inside its interval, not by
-    # the cores it has.
+    # the cores it has. What the reads hold follows this width rather than the
+    # commit's file count, because an array is released once it is tallied.
     read_workers: int = 32
     # Who ran the DDL, in the run spec's own vocabulary. `engine` is the only
     # value under which a table that is not there yet is a phase of the run
@@ -417,7 +418,7 @@ def _load_table(state: ScoreState, log: TextIO) -> Table | None:
 
 @dataclass(frozen=True)
 class PollRead:
-    """What one poll's read of the table found, beside what it cost to find it."""
+    """What one poll's read of the table found: a new commit, and the files it read."""
 
     seen_new: bool
     files: int
@@ -447,13 +448,18 @@ def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> int:
         reads = {pool.submit(read_id_column, file.path, file.file_format): file.path for file in pending}
         for read in as_completed(reads):
             state.tally.add_ids(read.result())
-            state.applied_files.add(reads[read])
+            # Dropped from the map as it is consumed, which is safe because
+            # `as_completed` snapshotted its argument on entry. A future holds
+            # its result for as long as something holds the future, so keeping
+            # the whole map would keep every id column of the commit resident
+            # until the commit was applied.
+            state.applied_files.add(reads.pop(read))
     finally:
-        # A read that raised leaves the rest of the queue abandoned rather than
-        # drained: the poll is already failing, and waiting for the reads it no
-        # longer needs would hold it open for the whole commit — which is the
-        # delay the failure is being reported instead of.
-        pool.shutdown(wait=False, cancel_futures=True)
+        # The queue is cancelled and the reads already running are waited for.
+        # A read that raised has failed the poll, so the rest of the queue is
+        # work nobody will use; the handful still executing are left to finish
+        # rather than race the pool the retry builds a moment later.
+        pool.shutdown(wait=True, cancel_futures=True)
     return len(pending)
 
 

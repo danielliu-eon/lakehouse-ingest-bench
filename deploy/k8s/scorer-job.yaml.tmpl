@@ -38,8 +38,8 @@ spec:
           # Two cores because a poll reads a whole commit's id columns at once,
           # and each of those reads decodes a Parquet footer and a column chunk
           # through a bridge that holds the interpreter for every request it
-          # makes. Memory is not what the width costs: only the id column of a
-          # file is read, and at most `--read-workers` of them are in flight.
+          # makes. Memory is not what the width costs: only a file's id column
+          # is read, and each one is released as soon as it has been tallied.
           resources:
             requests:
               cpu: "2"
