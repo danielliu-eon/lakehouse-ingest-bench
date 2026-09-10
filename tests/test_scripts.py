@@ -3934,6 +3934,47 @@ def test_a_teardown_that_did_not_converge_is_a_code_of_its_own(tmp_path: Path) -
 
 
 @needs_shell_tools
+def test_a_breach_file_that_holds_no_count_does_not_abort_the_loop(tmp_path: Path) -> None:
+    """Because the alternative loses the run and leaves the fleet billing.
+
+    In arithmetic a bareword is a variable name, so comparing the file's bytes
+    directly aborts the shell under `set -u` — mid-loop, so nothing tears the
+    fleet down and the only output is `abc: unbound variable`. `gate.sh` dies
+    over the same content, so this is the state run.sh reaches the read in.
+    """
+    run = _run_chained(
+        tmp_path,
+        [],
+        ["running", "drained"],
+        {"STUB_GATE_STATUS": "1", "STUB_GATE_BREACHES": "abc", "RUN_MAX_S": "5"},
+    )
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert run.drivers() == ["stage", "launch", "gate", "gate", "teardown", "finish"], run.calls
+    assert "unbound variable" not in run.result.stderr, run.result.stderr
+    # Once, not once a tick: the file says the same thing every time.
+    assert run.result.stderr.count("rather than a count of verdicts") == 1, run.result.stderr
+
+
+@needs_shell_tools
+def test_an_external_run_that_was_never_started_is_not_launched(tmp_path: Path) -> None:
+    """The wait is bounded, and its end is a refusal rather than a launch.
+
+    Launching into an engine that never started would offer the corpus to
+    nothing and score the run as having lost every row.
+    """
+    run = _run_chained(
+        tmp_path,
+        ["--external-ready-file", str(tmp_path / "never")],
+        ["drained"],
+        {"EXTERNAL_READY_WAIT_S": "1"},
+        engine="external",
+    )
+    assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+    assert run.drivers() == ["stage"], run.calls
+    assert "did not appear within 1s" in run.result.stderr, run.result.stderr
+
+
+@needs_shell_tools
 def test_an_external_chained_run_waits_before_it_launches(tmp_path: Path) -> None:
     """Both forms of the wait, on the tier that is the primary contract.
 

@@ -212,6 +212,9 @@ BREACH_FILE="$RUN_DIR/gate-breaches"
 TORN_DOWN=0
 OVERRAN=0
 waited=0
+# Whether the breach file has already been reported as unreadable, since it is
+# read once a tick for the rest of the run.
+BREACH_FILE_REPORTED=""
 while :; do
 	# At the top of the loop, so a tick that could read no summary is still
 	# bounded by it.
@@ -244,9 +247,21 @@ while :; do
 	# the threshold leaves the loop without claiming the teardown converged, and
 	# teardown.sh runs again below — its deletes ignore what is absent and
 	# drop-topic is idempotent, so a second one converges.
-	if ((GATE_STATUS != 0)) && [[ -f $BREACH_FILE ]] && (($(cat "$BREACH_FILE") >= BREACHES)); then
-		log "the gate has not passed $RUN_ID for $BREACHES ticks, so it has torn it down"
-		break
+	if ((GATE_STATUS != 0)) && [[ -f $BREACH_FILE ]]; then
+		# Matched as text before it is ever compared: in arithmetic a bareword
+		# is a variable name, so `set -u` would abort the loop on a file holding
+		# anything else — after the fleet was started and before anything would
+		# tear it down. gate.sh dies over the same content, which is why this
+		# tick reaches the read at all.
+		BREACH_COUNT="$(cat "$BREACH_FILE")"
+		if [[ ! $BREACH_COUNT =~ ^[0-9]+$ ]]; then
+			[[ -n $BREACH_FILE_REPORTED ]] ||
+				log "$BREACH_FILE holds '$BREACH_COUNT' rather than a count of verdicts, so whether the gate tore $RUN_ID down cannot be read from it; remove it"
+			BREACH_FILE_REPORTED=yes
+		elif ((BREACH_COUNT >= BREACHES)); then
+			log "the gate has not passed $RUN_ID for $BREACHES ticks, so it has torn it down"
+			break
+		fi
 	fi
 
 	if ! aws s3 cp "$SUMMARY_URI" "$SCRATCH/summary.json" --only-show-errors; then
