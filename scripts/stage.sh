@@ -206,6 +206,12 @@ else
 		if [[ -n $error ]]; then
 			lifecycle="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_LIFECYCLE_JSONPATH")"
 			if [[ -n $lifecycle && ",$ENGINE_FAILED_STATES," == *",$lifecycle,"* ]]; then
+				# A document rejected outright has no pods to have written a
+				# log; one the operator gave up on after starting them does,
+				# and that log is the whole of why it gave up. So the tail is
+				# on the pods existing rather than on the kind of failure.
+				[[ -z "$(k8s_pods_present "$ENGINE_PROVENANCE_SELECTOR")" ]] ||
+					k8s_engine_tail "$ENGINE_LOG_TARGET"
 				die "the operator gave up on $ENGINE_KIND/$RUN_OBJECT ($lifecycle): $error"
 			fi
 			if [[ $error != "$reported_error" ]]; then

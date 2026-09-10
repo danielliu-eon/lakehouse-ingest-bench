@@ -105,6 +105,10 @@ read_catalog_prop_flags
 # not ask" and "there is nothing there" are different answers and only one of
 # them makes removing the run's artifacts safe.
 METADATA_FINAL="$RUN_DIR/$METADATA_FINAL_FILE"
+# The document this script actually reads the location out of: the copy beside
+# the run where a teardown left one, and a temporary file where the catalog
+# answered instead.
+METADATA_DOCUMENT="$METADATA_FINAL"
 HAVE_TABLE=yes
 if [[ ! -f $METADATA_FINAL ]]; then
 	log "no $METADATA_FINAL, so the catalog is asked whether it still holds $TABLE"
@@ -112,9 +116,16 @@ if [[ ! -f $METADATA_FINAL ]]; then
 	CURRENT="$(harness_local --extra aws table-metadata --table "$TABLE" \
 		${CATALOG_PROP_FLAGS[@]+"${CATALOG_PROP_FLAGS[@]}"})" || CURRENT_STATUS=$?
 	if ((CURRENT_STATUS == 0)); then
+		log "the catalog puts $TABLE's metadata at $CURRENT"
+		# Into a temporary file rather than into the run directory: nothing is
+		# confirmed at this point, and a purge that is declined has to leave
+		# that directory as it found it — which is what the closing line says.
+		METADATA_DOCUMENT="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-metadata.XXXXXX")" ||
+			die "could not make a temporary file to fetch $TABLE's metadata document into"
+		trap 'rm -f "$METADATA_DOCUMENT"' EXIT
 		# Fetched through the same reader a teardown uses, so a compressed
 		# document reaches the `jq` below as the JSON it parses.
-		k8s_fetch_metadata_document "$CURRENT" "$METADATA_FINAL" ||
+		k8s_fetch_metadata_document "$CURRENT" "$METADATA_DOCUMENT" ||
 			die "could not fetch $CURRENT, which is where the catalog says $TABLE's metadata is; nothing is removed"
 	elif ((CURRENT_STATUS == TABLE_ABSENT)); then
 		HAVE_TABLE=no
@@ -127,8 +138,8 @@ LOCATION=""
 if [[ $HAVE_TABLE == yes ]]; then
 	# The document's own statement of where its table lives, which is what makes
 	# this a deletion of that table's files and not of a prefix that reads like it.
-	LOCATION="$(jq -r '.location // empty' "$METADATA_FINAL")"
-	[[ -n $LOCATION ]] || die "$METADATA_FINAL carries no location, so it does not say which prefix holds $TABLE's files"
+	LOCATION="$(jq -r '.location // empty' "$METADATA_DOCUMENT")"
+	[[ -n $LOCATION ]] || die "$METADATA_DOCUMENT carries no location, so it does not say which prefix holds $TABLE's files"
 
 	# A table's location has to look like one: under the site's warehouse root,
 	# and naming something below it. `aws s3 rm --recursive` takes a prefix and
@@ -139,11 +150,11 @@ if [[ $HAVE_TABLE == yes ]]; then
 	WAREHOUSE="$(site_root '.warehouse')"
 	WAREHOUSE="${WAREHOUSE%/}"
 	[[ $LOCATION == "$WAREHOUSE"/* ]] ||
-		die "$METADATA_FINAL puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"
+		die "$METADATA_DOCUMENT puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"
 	# Every trailing separator, so neither the root itself nor the root with a
 	# separator or two after it reads as a prefix of its own.
 	[[ ${LOCATION#"$WAREHOUSE"/} == *[!/]* ]] ||
-		die "$METADATA_FINAL puts $TABLE at the warehouse root $WAREHOUSE itself, which holds every table this site has; nothing is removed"
+		die "$METADATA_DOCUMENT puts $TABLE at the warehouse root $WAREHOUSE itself, which holds every table this site has; nothing is removed"
 fi
 
 # ---------------------------------------------------------------------------
@@ -164,12 +175,22 @@ STILL_RUNNING="$(k8s_object_present job "$SCORER")" ||
 # Say what goes, then ask
 # ---------------------------------------------------------------------------
 
+# Nothing to reclaim and nothing asked for: no table in the catalog and no
+# `--artifacts`. Said and left, rather than prompting over an empty list and
+# then reporting a purge — this is the one script that deletes measured data,
+# and a success line it did not earn is worse than a refusal.
+if [[ $HAVE_TABLE == no && $ARTIFACTS == no ]]; then
+	printf 'purging %s removes nothing: this catalog holds no %s, and its own prefix goes only with --artifacts.\n' \
+		"$RUN_ID" "$TABLE"
+	exit 0
+fi
+
 printf 'purging %s removes, permanently:\n' "$RUN_ID"
 if [[ $HAVE_TABLE == yes ]]; then
 	printf '  the table    %s\n' "$TABLE"
 	printf '  its files    %s\n' "$LOCATION"
 else
-	printf '  no table:    this catalog holds no %s, so only the prefix above goes\n' "$TABLE"
+	printf '  no table:    this catalog holds no %s, so only the prefix below goes\n' "$TABLE"
 fi
 if [[ $ARTIFACTS == yes ]]; then
 	printf '  its run      %s/%s/\n' "$RUNS_ROOT" "$RUN_ID"

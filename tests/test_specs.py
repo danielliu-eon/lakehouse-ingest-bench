@@ -291,10 +291,11 @@ def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
     assert set(scale) == set(engines.MANAGED), f"{preset_name} has no shipped spec for every managed engine"
     for engine, spec in scale.items():
         assert spec.kafka.partitions == 32, engine
-        # The same offer for both, so the two runs differ only in the engine:
-        # one shard cannot carry this corpus's rate on its own, and a spec that
-        # under-shards it measures the producer rather than the engine.
-        assert spec.producer.shards == 4, engine
+        # The same offer for both, so the two runs differ only in the engine.
+        # Five is what docs/corpus.md's own sizing rule gives for this corpus's
+        # rate, and a spec that under-shards it measures the producer rather
+        # than the engine — which voids the run.
+        assert spec.producer.shards == 5, engine
         assert spec.producer.compression == "lz4", engine
         assert spec.scoring.freshness_bound_s == 180.0 and spec.scoring.warmup_s == 120, engine
 

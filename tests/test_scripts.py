@@ -2760,13 +2760,19 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
 
 
 @needs_shell_tools
-def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pods", [False, True])
+def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path, pods: bool) -> None:
     """A rejected document reports no state at all, so the state wait never ends.
 
     The state belongs to a job the operator never created; the rejection sits
     in the error field instead. Without reading it a driver would spend the
     whole running wait on a document that will never run — and the text there
     is the only statement of why it was rejected.
+
+    A document rejected outright has no pods to have written a log, and one the
+    operator gave up on after starting them does — so the tail is on the pods
+    existing rather than on the kind of failure. `get pod -l` is what the stub
+    answers, so a named image there stands for a fleet that was started.
     """
     staged = tmp_path / "staged"
     staged.mkdir()
@@ -2791,6 +2797,7 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path) 
             "STUB_ENGINE_LIFECYCLE": "FAILED",
             "ENGINE_RUNNING_WAIT_S": "30",
             "ENGINE_POLL_S": "1",
+            **({"STUB_ENGINE_IMAGE": f"a-registry/flink:abc1234 sha256:{'a' * 64}"} if pods else {}),
         },
     )
     assert run.result.returncode != 0
@@ -2799,6 +2806,9 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path) 
     assert "did not reach" not in run.result.stderr, "the error is the refusal, not the timeout"
     assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.error}}" in run.calls
     assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.lifecycleState}}" in run.calls
+
+    tailed = f"logs deploy/{RUN_OBJECT} --tail=40" in run.calls
+    assert tailed is pods, "the log is read exactly when there are pods to have written one"
 
 
 @needs_shell_tools
@@ -3225,7 +3235,8 @@ PURGE_PROGRAMS = {"drop-table": DROP_TABLE_STUB}
 
 
 @needs_shell_tools
-def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["00003-abc.gz.metadata.json", "00003-abc.metadata.json"])
+def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(tmp_path: Path, name: str) -> None:
     """Iceberg allows a gzip-compressed metadata document, and `jq` cannot read one.
 
     The codec is a table property, so which of the two a run ends up with is
@@ -3233,6 +3244,10 @@ def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(
     document parse it as JSON, and a gzip body reaches them as a syntax error
     against a table nothing can then reclaim — so it is decompressed on the way
     in and the file is JSON whichever way the table wrote it.
+
+    Both names, because the body is what decides: `*.gz.metadata.json` is the
+    convention the codec usually travels under, and a table that compressed its
+    metadata without taking that name has to be read the same way.
     """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     (run_dir / "scores").mkdir(parents=True)
@@ -3240,12 +3255,10 @@ def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(
     (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
 
-    # The `.gz.metadata.json` name Iceberg's convention gives one, holding what
-    # the codec actually produces. The body is what decides, not the name.
     published = tmp_path / "published"
     published.mkdir()
     document = {"location": TABLE_LOCATION, "format-version": 2}
-    (published / "00003-abc.gz.metadata.json").write_bytes(gzip.compress(json.dumps(document).encode()))
+    (published / name).write_bytes(gzip.compress(json.dumps(document).encode()))
 
     torn = _run_driver(
         TEARDOWN,
@@ -3254,7 +3267,7 @@ def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(
         {
             "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
             "STUB_METADATA_STATUS": "0",
-            "STUB_METADATA_OUT": f"{TABLE_LOCATION}/metadata/00003-abc.gz.metadata.json",
+            "STUB_METADATA_OUT": f"{TABLE_LOCATION}/metadata/{name}",
             "STUB_S3_CP_DIR": str(published),
             "STUB_COLLECT_LOG": str(tmp_path / "collect.log"),
         },
@@ -3379,10 +3392,44 @@ def test_purge_reclaims_the_artifacts_of_a_run_the_catalog_holds_no_table_for(tm
     )
     assert run.result.returncode == 0, run.result.stderr
     assert "holds no" in run.result.stdout and str(FACTS["table"]) in run.result.stdout
+    # The prefix it names is the one printed under it, which is the only line
+    # in that block naming something that goes.
+    listed = run.result.stdout.splitlines()
+    assert "only the prefix below goes" in listed[1] and f"runs/{RUN_ID}/" in listed[2]
 
     removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
     assert removals == [f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/"]
     assert (tmp_path / "drop-table.log").read_text() == "", "there is no table to drop"
+
+
+@needs_shell_tools
+def test_purge_claims_no_purge_when_there_is_nothing_to_remove(tmp_path: Path) -> None:
+    """No table in the catalog and no `--artifacts`: nothing goes, and it says so.
+
+    Prompting over an empty list and then logging a purge would put a success
+    line behind a script that removed nothing — and this is the one script that
+    deletes measured data, so its report of what it did has to be worth
+    trusting. It returns before the prompt, which is why no `--yes` is needed
+    here.
+    """
+    _torn_down_run(tmp_path, metadata=False)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID],
+        tmp_path,
+        {
+            **_purge_environment(tmp_path),
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "3",
+        },
+        programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "removes nothing" in run.result.stdout and "--artifacts" in run.result.stdout
+    assert "purged" not in run.result.stderr, "nothing was removed, so nothing is reported as purged"
+    assert "remove all of the above?" not in run.result.stdout
+    assert "s3 rm" not in run.aws_calls
+    assert (tmp_path / "drop-table.log").read_text() == ""
 
 
 @needs_shell_tools

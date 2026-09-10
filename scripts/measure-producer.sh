@@ -8,7 +8,8 @@
 #
 # Local only: the broker is a single container sharing this machine's cores
 # with everything else in the stack, so the figure is a per-process ceiling,
-# not a cluster's. See "Sizing the producer" in docs/running.md.
+# not a cluster's. See "Sizing the offer" in docs/corpus.md, which is where the
+# figure it prints is turned into a shard count.
 set -euo pipefail
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

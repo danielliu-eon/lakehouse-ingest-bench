@@ -527,6 +527,17 @@ k8s_engine_tail() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "$1" --tail=40 >&2 || true
 }
 
+# k8s_pods_present <label selector> — the first matching pod's name, empty when
+# the namespace holds none.
+#
+# For a caller deciding whether there is an engine log to read before it
+# refuses. A failed read is empty rather than fatal: the caller is on its way to
+# a refusal either way, and not being able to ask costs it only the tail.
+k8s_pods_present() {
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pod -l "$1" \
+		-o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | head -n 1 || true
+}
+
 # k8s_engine_field <kind> <name> <jsonpath> — one field of what an operator
 # reports about a run, empty until it reports one.
 #

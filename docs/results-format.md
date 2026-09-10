@@ -44,7 +44,7 @@ result was measured against, and the prices.
 
 | Field | What it holds |
 |---|---|
-| `schema_version` | `2` |
+| `schema_version` | `2`. An additive key in the `run` block does not bump it, so a version-2 document may predate one: read an absent key as a run collected before it existed, never as a null value |
 | `collected_at` | when `collect` ran, `YYYY-MM-DDTHH:MM:SSZ` |
 | `harness_version` | the installed `lakehouse-ingest-bench` version |
 | `run` | what the run was |
