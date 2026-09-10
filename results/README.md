@@ -1,10 +1,5 @@
 # Publishing a result
 
-**This directory holds no result yet.** `RESULTS.md` renders its
-"(none published yet)" header until the first `finish.sh --publish` lands one
-here, so an empty `results/` is the expected state of a fresh clone rather than
-a file that failed to arrive.
-
 A result is one `run.json` (`schema_version: 2`) under `results/<engine>/`,
 plus `RESULTS.md` regenerated from every file here. Both arrive together, from
 `scripts/finish.sh <run_id> --publish results/` — never by hand-editing either.
@@ -13,6 +8,11 @@ plus `RESULTS.md` regenerated from every file here. Both arrive together, from
 
 The document's own schema is in
 [`../docs/results-format.md`](../docs/results-format.md).
+
+**This directory holds no result yet.** `RESULTS.md` renders its
+"(none published yet)" header until the first `--publish` lands one here, so an
+empty `results/` is a fresh clone's expected state rather than a file that
+failed to arrive.
 
 ## Checked by `scripts/validate-results.py`
 
@@ -25,13 +25,17 @@ CI runs this over the whole directory, so these fail a pull request:
 - **The corpus is a shipped preset**, and `run.corpus_hash` matches that
   preset's own hash. So a corpus generated from an overridden preset, or from a
   shape that lives only on one machine, is refused.
-- **`spec.producer.seconds` is unset.** A shortened offer is a probe, not a
-  result.
-- **The fleet is disclosed**: at least one role, each with a `machine_type` and a
-  positive `vcpu` and `gib`. And `run.site_pricing` carries both rates, so the
-  cost column can be re-derived.
+- **`spec.producer.seconds` names no limit** — absent, or written `null` to say
+  the whole corpus was offered. A shortened offer is a probe, not a result.
+- **The fleet is disclosed**: at least one role, each with a `machine_type` that
+  is neither empty nor the `unspecified` a run whose knobs named none reports,
+  and a positive `vcpu` and `gib`. And `run.site_pricing` carries both rates and
+  both are above zero, so the cost column can be re-derived — a run priced at
+  zero renders as `n/a` and discloses nothing.
 - **The scorer's summary and the derived keep-up and `producer_bound` are
   present**, not null.
+- **Every run measured a fresh table and topic.** No two documents here name
+  either, since reusing one lets a run measure the one before it.
 - **`RESULTS.md` is a fresh render** of the documents beside it. Re-render with
   `results-table results/ --out results/RESULTS.md` in the same change.
 
@@ -41,8 +45,6 @@ The checker does not see these. They are what a reader of `RESULTS.md` is
 entitled to assume, and a result that breaks one is misleading rather than
 invalid:
 
-- Every run measured a **fresh table and topic**. Reusing either lets one run
-  measure the one before it.
 - **`run_valid: true`** — `finish.sh` gates this at publish time, but the checker
   does not, so a `--publish-invalid` result must show its validity state
   (`producer_bound`, `void`, `undersized`, `not drained`) and never appear as a

@@ -68,8 +68,10 @@ version is printed either way). Then:
 - **S3** — the bucket, with public access blocked, the `lakehouse-ingest-bench`
   tag, and versioning **suspended if it was on** — a corpus is regenerated
   rather than restored, and every deleted object of a hundred-gigabyte corpus
-  would otherwise keep being billed. That is a change to a bucket you may
-  already own.
+  would otherwise keep being billed. Neither call is additive, so a bucket that
+  already exists and carries no tag of ours is refused rather than
+  reconfigured: name one of your own with `BUCKET`, or tag that one
+  `lakehouse-ingest-bench=true` if it is meant to be this benchmark's.
 - **ECR** — `lakehouse-ingest-bench/harness`, `lakehouse-ingest-bench/flink` and
   `lakehouse-ingest-bench/spark`.
 - **MSK** — a provisioned cluster, IAM its only client authentication and no
@@ -134,7 +136,8 @@ the per-run driver sequence.
 
 ```bash
 deploy/aws/teardown.sh          # the namespace, every association, the role, MSK and its security group
-deploy/aws/teardown.sh --all    # also the bucket and its contents, the ECR repositories and both operators
+deploy/aws/teardown.sh --all    # also the ECR repositories, both operators and the bucket
+deploy/aws/teardown.sh --all --yes   # the same, unattended
 ```
 
 In that order, because each deletion needs the one before it: the namespace
@@ -143,6 +146,13 @@ because MSK's network interfaces hold it for a few minutes after the cluster
 goes. Without `--all` the bucket, the images and the operators stay — a corpus
 is expensive to rebuild, images are slow to push, and an operator may be
 shared.
+
+Under `--all` the bucket goes **last, and only after it is asked about**: it is
+every corpus, every run's artifacts and the warehouse, so it is matched on the
+tag the way the security group is — a bucket of that name this benchmark did not
+create is refused — and named before it is emptied. `--yes` answers the prompt
+for a teardown run from a script. A refusal there leaves the images and the
+operators already gone rather than a teardown to run again.
 The `eks-pod-identity-agent` add-on is always left installed: it is free, and it
 is a property of the cluster rather than of this benchmark.
 

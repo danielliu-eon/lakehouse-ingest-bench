@@ -157,15 +157,18 @@ a manifest walk off the poll loop that is timing commits.
 `run_valid` is the only field that decides whether a result may be published. It
 is true when all of these hold:
 
-1. the table held the corpus's columns, with their types and their
+1. the loop reached a verdict rather than abandoning the run;
+2. the table held the corpus's columns, with their types and their
    required-ness;
-2. the freshness verdict above — drained, no gap, p95 inside the bound, max
+3. the freshness verdict above — drained, no gap, p95 inside the bound, max
    inside twice it;
-3. exactness found no loss, no duplication and no corruption;
-4. the producer kept to its schedule.
+4. exactness found no loss, no duplication and no corruption;
+5. the producer kept to its schedule.
 
 It is false for a run still going: a partial run's lag is a lower bound and its
-exactness an upper one.
+exactness an upper one. And false for one the loop abandoned even where the
+figures beneath it are clean, since an idle stop with every batch landed reads
+as exact and fresh.
 
 `state` says how the run ended.
 

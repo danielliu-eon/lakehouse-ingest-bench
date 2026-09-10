@@ -63,7 +63,7 @@ result was measured against, and the prices.
 | `spec` | `spec.yaml` copied verbatim, so defaults are not printed as choices |
 | `engine` | `spec.engine` |
 | `engine_versions` | `{image, digest}` from `engine-image.json` for a managed engine; the spec's `external` block otherwise; `null` when neither was recorded |
-| `fleet` | `[{role, count, vcpu, gib, machine_type}]` — the engine's own `fleet(spec)` for a managed run, `spec.fleet` for an external one. What the run asked for; see [`methodology.md`](methodology.md) §Cost |
+| `fleet` | `[{role, count, vcpu, gib, machine_type}]` — the engine's own `fleet(spec)` for a managed run, `spec.fleet` for an external one. What the run asked for; see [`methodology.md`](methodology.md) §Cost. A managed run whose knobs named no machine type reports `unspecified`, which is not publishable |
 | `site_pricing` | `{vcpu_hour_usd, gib_hour_usd}` from the site |
 | `catalog_props` | `facts.catalog_props`, redacted |
 | `epoch_ms` | the run's time origin; `null` for a run that was staged but never launched |

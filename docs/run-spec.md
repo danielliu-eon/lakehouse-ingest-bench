@@ -15,7 +15,7 @@ Terms below are defined in [`methodology.md`](methodology.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `name` | *required* | the run's base name. It becomes a topic, a table and a Kubernetes object, so it must match `^[a-z0-9][a-z0-9-]{2,60}$` |
+| `name` | *required* | the run's base name. It becomes a topic, a table and a Kubernetes object, so it must match `^[a-z0-9][a-z0-9-]{2,34}$` — 35 characters is what survives a run id's stamp and a driver's longest prefix inside the 63-character label a Job stamps on its pods |
 | `engine` | *required* | `external`, or a managed engine — `flink` or `spark` |
 | `corpus` | *required* | a shipped preset name, or a path to a preset file. See [`corpus.md`](corpus.md) |
 | `<engine>:` | *required* for a managed engine | that engine's knobs; see `engines/<name>/README.md`. Refused for `engine: external` |
@@ -26,7 +26,7 @@ Terms below are defined in [`methodology.md`](methodology.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `managed_by` | `harness` | `harness` creates the table, so the run's properties are the ones the writer sees. `engine` hands your engine the equivalent `CREATE TABLE` in `facts.ddl` and creates nothing |
+| `managed_by` | `harness` | `harness` creates the table, so the run's properties are the ones the writer sees. `engine` hands your engine the equivalent `CREATE TABLE` in `facts.ddl` and creates nothing — the scorer then reads a table that does not exist yet as empty and keeps polling, since such an engine creates it from its first record |
 | `partition` | `identity(partition_key)` | `identity(col)`, `bucket(N, col)` or `unpartitioned` |
 | `properties` | `{}` | Iceberg table properties, set at creation. See [`pitfalls.md`](pitfalls.md) |
 
@@ -65,12 +65,12 @@ own defaults rather than having them restated in every spec.
 
 | Key | Effect |
 |---|---|
-| `corpus_root`, `runs_root`, `warehouse` | *required*. Where corpora, run artifacts and table data live. All three are substituted out of a published result |
+| `corpus_root`, `runs_root`, `warehouse` | *required*. Where corpora, run artifacts and table data live. All three are substituted out of a published result. The drivers reach storage through the `aws` CLI, so each must be an `s3://` URI and anything else is refused by name |
 | `kafka.bootstrap_servers` | *required* |
 | `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim. Never read into a result |
 | `kafka.schema_registry` | `{url, basic_auth_user_info?}`. Absent is the answer for a site whose runs are all raw Avro; a `confluent` run against such a site is refused at staging |
 | `catalog.props` | *required*. pyiceberg catalog properties. An Iceberg **REST** catalog: any other `type` is refused at stage time |
-| `kubernetes` | empty means no cluster and everything runs where it is started. A cluster sets `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `service_account_annotations`, `node_selector` and `tolerations` |
+| `kubernetes` | empty means no cluster and everything runs where it is started. A cluster sets `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
 | `pricing` | *required*. `{vcpu_hour_usd, gib_hour_usd}`, the two rates a run's cost is computed from |
 
 `site.example.yaml` and `site.aws.example.yaml` are annotated copies to fill in.
@@ -108,13 +108,41 @@ not scanned, because nothing there reaches a Kafka client.
 ### Secrets
 
 Write `${env:NAME}` for a credential in `site.kafka.security`, `site.catalog.props`,
-a `--catalog-prop` or a `--kafka-prop`. Nothing resolves at load: the variable is
-read inside the process that uses it, at the call that needs it, and an unset one
-is refused by name rather than substituted empty. The site config, the run's
-`facts.json` and a published result all keep the placeholder, since it names the
-variable a reader has to set. A literal credential is redacted out of
-`facts.json` and out of a result by property name — but see
-[`pitfalls.md`](pitfalls.md) for where a literal one does land.
+`site.kafka.schema_registry.basic_auth_user_info`, a `--catalog-prop` or a
+`--kafka-prop`. Nothing resolves at load: the variable is read inside the process
+that uses it, at the call that needs it, and an unset one is refused by name
+rather than substituted empty. The site config, the run's `facts.json`, an
+engine's rendered files and a published result all keep the placeholder, since it
+names the variable a reader has to set.
+
+On a cluster the variable comes from one Secret in the run's namespace, created
+once and named as `site.kubernetes.secret_name`:
+
+```bash
+kubectl --namespace ingest-bench create secret generic bench-env \
+  --from-literal=IB_KAFKA_PASSWORD=... --from-literal=IB_REGISTRY_AUTH=...
+```
+
+Every key of it becomes an environment variable on every pod a run creates —
+each harness Job, and both halves of the engine's fleet. One Secret rather than
+a key per property, because a `${env:NAME}` names a variable and a Secret's keys
+are already a set of variable names: nothing here holds a list of which of your
+properties are credentials.
+
+Which is why **a site declaring a cluster refuses a credential written out in
+full**, naming the key: those properties are applied as a ConfigMap and uploaded
+to the runs prefix, and no later redaction undoes a value that has been in
+either. A site with no cluster is the local stack, whose credentials are a
+container image's published defaults, and it keeps its literals — redacted out
+of `facts.json` and out of a result by property name.
+
+One limit. A Flink run resolves its whole rendered script and settings inside
+its own submitter, so any option in either may name a variable; a Spark run
+resolves the Kafka source's options and nothing else, because a Spark setting is
+read by the framework and substitutes nothing. A reference among those is
+refused at render time rather than reaching the catalog as six literal
+characters, so a credential a Spark run needs belongs in `site.kafka.security`.
+MSK's IAM authentication needs no secret at all, on either engine.
 
 Object storage and catalogs otherwise use the cloud SDK's default credential
 chain: pod identity or an instance role in a cluster, an ambient profile on a

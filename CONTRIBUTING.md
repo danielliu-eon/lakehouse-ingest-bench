@@ -64,7 +64,7 @@ a byte.
 Read [`docs/adding-an-engine.md`](docs/adding-an-engine.md). The external tier is
 the primary contract and needs no code here: the harness prepares the run, prints
 the facts and waits. Adding a *managed* engine means a new `engines/<name>/`
-carrying the seven files that section lists, and one line registering its knobs
+carrying the eight files that section lists, and one line registering its knobs
 module. The harness holds no engine-specific branch outside `engines/<name>/`.
 
 ## Adding a preset or a knob

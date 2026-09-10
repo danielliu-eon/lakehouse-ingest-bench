@@ -87,11 +87,16 @@ by the run id **lowercased**, while the run id itself — the topic, the table, 
 run directory, the Spark application name — stays as it is. Anything addressing
 a run's objects by hand has to lowercase first.
 
-## A literal credential in a Flink site's catalog properties reaches `job.sql`
+## A credential written out in full lands wherever the properties do
 
-`site.catalog.props` and `site.kafka.security` are rendered into a Flink run's
-SQL verbatim, so a credential written there literally is in that file — and the
-file is uploaded to the runs prefix and mounted as a ConfigMap. Write
-`${env:NAME}` instead; see [`run-spec.md`](run-spec.md) §Secrets. Published
+`site.catalog.props` and `site.kafka.security` reach a pod through a rendered
+script or a command line, and both of those are applied as a ConfigMap and
+uploaded to the runs prefix. So a site declaring a cluster refuses a
+credential-named property whose value is a literal, and `${env:NAME}` plus the
+Secret in [`run-spec.md`](run-spec.md) §Secrets is the shape that works there.
+
+The local stack is the exception, and the trap: it declares no cluster, so its
+literals load — they are a container image's published defaults — and a site
+copied from it onto a cluster meets the refusal rather than the leak. Published
 results are unaffected either way: `collect` redacts credential-named properties
 and never reads `site.kafka.security` at all.

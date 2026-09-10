@@ -105,6 +105,12 @@ scripts/finish.sh "$RUN_ID" --publish results/   # geometry, the verdict, the re
 scripts/purge.sh "$RUN_ID" --artifacts     # once you are done with the table
 ```
 
+`runs/aws-100mbs-skew-flink-hash.yaml` and its Spark sibling are the shipped
+hour-long runs to copy: same corpus, same topic, same offer, so the two differ
+only in the engine. Their fleets are where the probe ladder starts and each file
+says so — raise the fleet and re-run until the gate stops reporting
+`UNDERSIZED`, and publish the one that passed.
+
 The sequence is the same for either managed engine — the drivers read the kind of
 object a run is, where its state sits and which Service carries its API out of
 the engine's own module, and run `verify-<engine>` against the copied spec before
@@ -114,7 +120,7 @@ the run is offered a corpus.
 |---|---|
 | `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state *and for its fleet to be placed* — an operator reports running before every pod has an image to start from — holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
 | `launch.sh <run_id>` | applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
-| `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing |
+| `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing, once the verdict has repeated — three ticks, or `--breaches N` |
 | `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, copies the table's last metadata document beside the run's artifacts, and collects the run |
 | `finish.sh <run_id>` | measures the file geometry, collects the run again, prints the verdict block and the geometry line. `--publish <dir>` also writes the result. Exits 0 only on `run_valid: true` |
 | `purge.sh <run_id>` | drops the table and removes its files, and with `--artifacts` the run's own prefix. Names everything first and asks; `--yes` answers |

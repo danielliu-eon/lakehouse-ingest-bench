@@ -156,13 +156,13 @@ when a result may be published from it.
 ## Tier 2: a managed engine
 
 `engines/<name>/` holds everything engine-specific, and the harness contains no
-engine branches outside it. Both shipped engines carry all seven of its files:
+engine branches outside it. Both shipped engines carry all eight of its files:
 
 | File | Purpose |
 |---|---|
 | `README.md` | what the engine runs, knobs it honours, known traps |
 | `Dockerfile` | stock upstream image plus connector jars, pinned; built locally, and pushed to the operator's own registry by `scripts/push-images.sh` |
-| `compose.yaml` | the engine's services for the local stack |
+| `compose.yaml`, `compose.sh` | the engine's services for the local stack, and the four `engine_compose_*` hooks `smoke.sh` starts, readies and reads them through |
 | job source | the job the engine runs (SQL or Python) |
 | `knobs.py` | run-spec keys the engine accepts, validation, rendering into the template and the DDL |
 | `verify.py` | reads effective state from the running engine and fails staging on drift from the spec |
@@ -196,5 +196,5 @@ For a run on a cluster `knobs.py` owes one more thing: `KUBERNETES`, an
 `EngineKubernetes` naming the kind of object a run is, where its state sits in
 the status, what running is called there, the Service that carries its HTTP API
 and the labels its pods carry. The cluster drivers read those through
-`engine-k8s` and hold no engine's names of their own, so a third engine adds no
-line to `scripts/`.
+`engine-k8s`, and `smoke.sh` reads the local shape through `compose.sh` — so a
+third engine adds no line to `scripts/`, bar the default `--engine` name.

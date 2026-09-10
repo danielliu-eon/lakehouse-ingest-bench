@@ -190,6 +190,12 @@ how a large corpus is generated in parallel. Every shard still builds whole
 batches, so sharding buys throughput and not headroom: either 600 MB/s preset
 needs about 6 GB free per process.
 
+On a cluster the same figure is a pod's memory request, and `gen-corpus.sh` takes
+it as `GEN_MEMORY` — `GEN_MEMORY=8Gi scripts/gen-corpus.sh events-600mbs-skew
+--shards 8`. It defaults to `2Gi`, which fits the smoke preset. A producer shard
+has the same shape, since it reads one whole batch object and decompresses it
+whole, and `launch.sh` takes `PRODUCER_MEMORY` for it.
+
 ### Sharding and the merge
 
 Each shard writes its own directory, and each publishes metadata describing its
