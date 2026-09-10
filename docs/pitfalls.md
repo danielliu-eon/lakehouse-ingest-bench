@@ -22,11 +22,11 @@ hold. A higher offer rate does not change that count, only how often the commit
 happens.
 
 It is the scorer's problem too, since it reads the id column of every one of
-those files; `--read-workers` (32) is how many of those reads overlap, and the
-pod is sized for that width. A run whose `POLL` lines carry a `SLOW_POLL` is a
-reader that cannot finish inside its own poll interval, and it needs more
-readers or a coarser partition before its verdict means anything: the gate voids
-a reading gone stale, and a voided run says nothing about the engine under it.
+those files; `--read-workers` is how many of those reads overlap, and the pod is
+sized for that width. A run whose `POLL` lines carry a `SLOW_POLL` is a reader
+that cannot finish inside its own poll interval, and it needs more readers or a
+coarser partition before its verdict means anything: the gate voids a reading
+gone stale, and a voided run says nothing about the engine under it.
 
 ## A dropped setting fails nothing
 

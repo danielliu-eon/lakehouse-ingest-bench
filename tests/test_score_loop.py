@@ -385,6 +385,41 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert args.read_workers == 8
 
 
+def test_the_score_cli_refuses_a_reader_count_below_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A width below one is refused where it is typed rather than mid-run.
+
+    A pool of no threads raises at the first commit the reader reaches, which
+    is a fleet staged and an offer begun before anything says the argument was
+    what ended the run.
+    """
+
+    def unreachable(args: score.ScoreArgs, clock: Clock, log: TextIO) -> int:
+        raise AssertionError("the loop must not start on a width it cannot read with")
+
+    monkeypatch.setattr(score, "run", unreachable)
+    for width in ("0", "-4"):
+        with pytest.raises(SystemExit):
+            cli.score(
+                [
+                    "--corpus",
+                    "s3://bench/corpus/events",
+                    "--table",
+                    "bench.events",
+                    "--publish-logs",
+                    "s3://bench/runs/events/producer",
+                    "--epoch",
+                    "1700000000",
+                    "--out",
+                    str(tmp_path / "scores"),
+                    "--read-workers",
+                    width,
+                ]
+            )
+        assert "--read-workers" in capsys.readouterr().err
+
+
 def test_shortened_replay_is_scored_on_what_was_offered(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
     props = _props(tmp_path)
     records = metadata.read_manifest(corpus.uri)

@@ -56,6 +56,24 @@ DEFAULT_FLOOR_WINDOW_S = 60
 DEFAULT_STALE_AFTER_S = DEFAULT_FLOOR_WINDOW_S
 
 
+def _read_workers(raw: str) -> int:
+    """At least one reader, refused here rather than at the first commit.
+
+    A pool of no threads raises where it is built, which is inside the poll
+    loop — so a run would stage its fleet, begin its offer and only then end,
+    on its reader's own argument.
+    """
+    try:
+        workers = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"--read-workers must be an integer, got {raw!r}") from error
+    if workers < 1:
+        raise argparse.ArgumentTypeError(
+            f"--read-workers is how many data files are read at once, so it must be at least 1, got {workers}"
+        )
+    return workers
+
+
 def build_score_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="score",
@@ -124,7 +142,7 @@ def build_score_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--read-workers",
-        type=int,
+        type=_read_workers,
         default=32,
         help="how many of a commit's data files have their id column read at once; a commit of a "
         "high-cardinality partition is hundreds of small files, and one request at a time is a poll longer "
