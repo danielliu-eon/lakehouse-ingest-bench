@@ -119,7 +119,10 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
     failures: list[str] = []
 
     producer = cast(dict[str, object], spec["producer"]) if "producer" in spec else {}
-    if "seconds" in producer:
+    # The value and not the key: `seconds: null` is how a spec says the whole
+    # corpus is offered, which is the form the design's own example shows, and
+    # reading the key alone refused exactly that.
+    if "seconds" in producer and producer["seconds"] is not None:
         failures.append(
             f"producer.seconds: spec.producer.seconds is set ({producer['seconds']!r}) — a shortened offer "
             "is not publishable"

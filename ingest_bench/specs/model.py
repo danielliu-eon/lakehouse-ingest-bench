@@ -23,8 +23,16 @@ from ingest_bench.specs import engines
 from ingest_bench.specs.env import refuse_literal_secrets
 
 # A run's name reaches a Kafka topic, an Iceberg table name and a Kubernetes
-# object name, so it is restricted to what all three accept.
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,60}$")
+# object name, so it is restricted to what all three accept — and bounded by
+# the shortest of the three limits.
+#
+# That is the 63-character `job-name` label the Job controller stamps on every
+# pod it creates. A run id is the name plus a 17-character stamp, and the
+# longest prefix a driver puts in front of one is `drop-topic-` at eleven —
+# so 35 characters of name is the most that can survive as a Job. Refused here,
+# because the failure otherwise lands after the topic, the table and the engine
+# already exist.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,34}$")
 
 EXTERNAL = "external"
 HARNESS = "harness"

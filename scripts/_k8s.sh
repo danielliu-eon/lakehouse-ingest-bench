@@ -133,8 +133,10 @@ site_pairs() {
 # the property, and a shell that expanded or rejected the form first would
 # leave that process nothing to resolve.
 #
-# The one thing a single-quoted value cannot carry is a single quote, so that
-# is refused by name.
+# The one thing a single-quoted value cannot carry is a single quote, so that is
+# refused by name — as is a double quote, which would survive the shell and then
+# close the quoted scalar the whole command line is rendered into, leaving
+# `kubectl apply` reporting a parse error rather than the value that caused it.
 site_flags() {
 	# Assigned before the loop reads it, and checked explicitly rather than
 	# through `set -e`. Two reasons, and both end the same way — an empty string
@@ -149,8 +151,8 @@ site_flags() {
 	local flags="" pair
 	while IFS= read -r pair; do
 		[[ -n $pair ]] || continue
-		[[ $pair != *"'"* ]] ||
-			die "$SITE_FILE sets a ${1#.} entry holding a single quote, which cannot survive a Job's command line"
+		[[ $pair != *"'"* && $pair != *'"'* ]] ||
+			die "$SITE_FILE sets a ${1#.} entry holding a quote, which cannot survive a Job's command line"
 		flags="$flags $2 '$pair'"
 	done <<<"$pairs"
 	printf '%s' "$flags"

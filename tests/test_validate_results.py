@@ -180,3 +180,23 @@ def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_pa
         result = _run(_mutated(tmp_path / absent.replace("", "empty"), mutate))
         assert result.returncode != 0, result.stdout
         assert "no machine_type" in result.stdout, result.stdout
+
+
+def test_validate_results_accepts_a_spec_that_states_the_whole_corpus_explicitly(tmp_path: Path) -> None:
+    """`seconds: null` is how a spec says the offer is not shortened.
+
+    It is the form the design's own example shows, and reading the key rather
+    than its value refused exactly that.
+    """
+
+    def mutate(document: dict[str, object]) -> None:
+        run = document["run"]
+        assert isinstance(run, dict)
+        spec = run["spec"]
+        assert isinstance(spec, dict)
+        producer = spec["producer"]
+        assert isinstance(producer, dict)
+        producer["seconds"] = None
+
+    result = _run(_mutated(tmp_path, mutate))
+    assert result.returncode == 0, result.stdout + result.stderr

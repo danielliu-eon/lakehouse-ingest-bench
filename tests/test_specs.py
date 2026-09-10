@@ -42,6 +42,28 @@ def test_spec_refusals(tmp_path: Path) -> None:
             model.load_run_spec(p)
 
 
+def test_a_name_too_long_to_reach_a_job_is_refused_where_it_is_written(tmp_path: Path) -> None:
+    """The Job controller's 63-character `job-name` label is the binding limit.
+
+    A run id is the name plus a 17-character stamp and the longest prefix a
+    driver puts in front of one is `drop-topic-`, so a longer name fails after
+    the topic, the table and the engine already exist.
+    """
+    base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    path = tmp_path / "s.yaml"
+    longest = "a" * 35
+    base["name"] = longest
+    path.write_text(yaml.safe_dump(base))
+    spec = model.load_run_spec(path)
+    run_id = derive.derive(spec, _bare_site(), stamp="20260908T120000Z", corpus_dir="smoke-1a2b3c4d").run_id
+    assert len(f"drop-topic-{run_id}") == 63, run_id
+
+    base["name"] = "a" * 36
+    path.write_text(yaml.safe_dump(base))
+    with pytest.raises(ValueError, match="spec.name names a topic"):
+        model.load_run_spec(path)
+
+
 def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know(tmp_path: Path) -> None:
     """The wire format is the corpus's own unless a run asks for the other one."""
     assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").kafka.value_encoding == "avro"
@@ -393,11 +415,16 @@ def test_a_cluster_site_refuses_a_registry_credential_written_out(tmp_path: Path
     assert loaded.schema_registry.basic_auth_user_info == "${env:IB_REGISTRY_AUTH}"
 
 
-def test_derive_ids() -> None:
-    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
-    site = model.SiteConfig(
+def _bare_site() -> model.SiteConfig:
+    """A site with nothing in it but roots, for deriving a run's names."""
+    return model.SiteConfig(
         "s3://b/corpus", "s3://b/runs", "s3://b/wh", "k:9092", {}, None, {"uri": "u"}, None, 0.0, 0.0
     )
+
+
+def test_derive_ids() -> None:
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    site = _bare_site()
     d = derive.derive(spec, site, stamp="20260908T120000Z", corpus_dir="smoke-1a2b3c4d")
     assert d.run_id == "smoke-flink-20260908T120000Z" and d.topic == d.run_id
     assert d.table == "ingest_bench.t_smoke_flink_20260908T120000Z"

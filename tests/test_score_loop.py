@@ -695,3 +695,41 @@ def test_the_schema_is_checked_on_the_first_load_that_succeeds(tmp_path: Path, c
     _table_of(props, "late_shape", [NestedField(1, "id", LongType(), required=True)])
     assert score._poll_once(state, clock, io.StringIO()) is False
     assert state.schema_mismatches, "the first load that succeeded did not check the shape"
+
+
+def test_a_run_the_loop_abandoned_is_not_publishable(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    """`aborted` and `run_valid` cannot both be true, and readers check the second.
+
+    An idle stop with every batch landed reads as exact and fresh — the shape
+    of it is a shard whose `done` trailer never uploaded — so the two fields
+    would contradict each other in the same document.
+    """
+    props = _props(tmp_path)
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(props, "bench.no_trailer", corpus, create.parse_partition("unpartitioned"), {})
+    epoch = now_ms() - 10_000
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _finished_producer(logs, records, epoch, done=False)
+    for record in records:
+        table.append(_rows_of(record, corpus))
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.no_trailer",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=epoch,
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=5.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["state"] == "idle_stop" and summary["aborted"] is True
+    # Every row landed, so the figures beneath it are clean; the run is still
+    # not one a result may be published from.
+    exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
+    assert exact["exact"] is True
+    assert summary["run_valid"] is False

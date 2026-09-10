@@ -173,9 +173,16 @@ class ScoreState:
         False for a run still going: nothing is valid until the table has
         drained, because the figures a partial run offers are a lower bound on
         its lag and an upper bound on its exactness.
+
+        And false for a run the loop abandoned, whatever the figures say. An
+        idle stop with every batch landed reads as exact and fresh — the shape
+        of it is a shard whose `done` trailer never uploaded — and a document
+        claiming both `aborted` and `run_valid` says two things at once, of
+        which readers only ever check the second.
         """
         return (
-            not self.schema_mismatches
+            not self.aborted
+            and not self.schema_mismatches
             and self.result is not None
             and self.result.verdict
             and self.exactness is not None

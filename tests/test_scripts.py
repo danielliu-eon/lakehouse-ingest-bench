@@ -1203,13 +1203,21 @@ def test_a_sites_reference_reaches_a_pods_python_as_the_site_wrote_it(tmp_path: 
 
 
 @needs_shell_tools
-def test_a_property_a_single_quote_cannot_carry_is_refused_by_name(tmp_path: Path) -> None:
-    """The one value single-quoting cannot make opaque, refused where the file is read."""
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_a_property_a_quote_cannot_carry_is_refused_by_name(tmp_path: Path, quote: str) -> None:
+    """Neither quote survives the round trip, and each fails somewhere else.
+
+    A single quote ends the quoting that makes the value opaque to the pod's
+    shell; a double quote survives that shell and then closes the YAML scalar
+    the whole command line is rendered into, so `kubectl apply` reports a parse
+    error rather than the value that caused it.
+    """
     site_file = tmp_path / "site.yaml"
-    site_file.write_text(_filled_site().replace("    aws.region:", '    sasl.password: "it\'s"\n    aws.region:'))
+    property_line = f"    sasl.password: {json.dumps('a' + quote + 'b')}\n    aws.region:"
+    site_file.write_text(_filled_site().replace("    aws.region:", property_line))
     refused = _site_reader(site_file, "site_flags '.kafka.security' --kafka-prop")
     assert refused.returncode != 0
-    assert "single quote" in refused.stderr, refused.stderr
+    assert "holding a quote" in refused.stderr, refused.stderr
 
 
 @needs_shell_tools
