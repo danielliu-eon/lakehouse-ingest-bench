@@ -121,7 +121,7 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
     producer = cast(dict[str, object], spec["producer"]) if "producer" in spec else {}
     # The value and not the key: `seconds: null` is how a spec says the whole
     # corpus is offered, which is the form the design's own example shows, and
-    # reading the key alone refused exactly that.
+    # a key-based test reads that as a shortened offer.
     if "seconds" in producer and producer["seconds"] is not None:
         failures.append(
             f"producer.seconds: spec.producer.seconds is set ({producer['seconds']!r}) — a shortened offer "
