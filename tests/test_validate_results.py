@@ -200,3 +200,39 @@ def test_validate_results_accepts_a_spec_that_states_the_whole_corpus_explicitly
 
     result = _run(_mutated(tmp_path, mutate))
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validate_results_fails_when_two_results_measured_the_same_table(tmp_path: Path) -> None:
+    """Each result measured a fresh table and a fresh topic, and that is a rule across files.
+
+    A re-run staged under an earlier run's id publishes a second result about
+    the same rows, and the two disagree for a reason neither document records.
+    """
+    results, first = _valid_results_dir(tmp_path)
+    second = first.with_name("2026-09-21-flink-smoke-hash.json")
+    second.write_text(first.read_text())
+    _rerender(results)
+    result = _run(results)
+    assert result.returncode != 0, result.stdout
+    assert "is also the table of" in result.stdout, result.stdout
+    assert "is also the topic of" in result.stdout, result.stdout
+
+
+def test_validate_results_fails_on_a_cost_column_with_no_price_behind_it(tmp_path: Path) -> None:
+    """Present is not disclosed: the shipped site examples price a run at zero.
+
+    `RESULTS.md` renders that honestly as `n/a`, so the consequence was a rule
+    stated more widely than the code enforced it.
+    """
+    for field in ("vcpu_hour_usd", "gib_hour_usd"):
+
+        def mutate(document: dict[str, object], field: str = field) -> None:
+            run = document["run"]
+            assert isinstance(run, dict)
+            pricing = run["site_pricing"]
+            assert isinstance(pricing, dict)
+            pricing[field] = 0.0
+
+        result = _run(_mutated(tmp_path / field, mutate))
+        assert result.returncode != 0, result.stdout
+        assert f"site_pricing.{field}" in result.stdout, result.stdout

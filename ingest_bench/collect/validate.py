@@ -145,7 +145,39 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
     site_pricing = run["site_pricing"]
     if not isinstance(site_pricing, dict) or "vcpu_hour_usd" not in site_pricing or "gib_hour_usd" not in site_pricing:
         failures.append("site_pricing: run.site_pricing is missing or incomplete")
+    else:
+        # Present is not disclosed: the example site configs ship zeros, and a
+        # result costed at zero renders as `n/a` in the table while the rules
+        # say the prices behind the cost column are stated.
+        for field in ("vcpu_hour_usd", "gib_hour_usd"):
+            price = site_pricing[field]
+            if not (isinstance(price, int | float) and not isinstance(price, bool) and price > 0):
+                failures.append(f"site_pricing.{field}: is {price!r}, so the cost column has no price behind it")
 
+    return failures
+
+
+def _freshness_failures(documents: list[tuple[Path, dict[str, object]]]) -> list[str]:
+    """Every table and topic reused across the published results.
+
+    The rule is that each result measured a fresh table and a fresh topic, and
+    it is a cross-document one: a re-run staged under the run id of an earlier
+    one would otherwise publish a second result about the same rows, and the
+    two would disagree for a reason neither document records.
+    """
+    failures: list[str] = []
+    for field in ("table", "topic"):
+        seen: dict[str, Path] = {}
+        for path, document in documents:
+            run = cast(dict[str, object], document["run"])
+            if field not in run or run[field] is None:
+                failures.append(f"{path}: {field}: run.{field} is absent, so its freshness cannot be checked")
+                continue
+            name = str(run[field])
+            if name in seen:
+                failures.append(f"{path}: {field}: {name!r} is also the {field} of {seen[name]}")
+                continue
+            seen[name] = path
     return failures
 
 
@@ -183,6 +215,8 @@ def validate(results_dir: Path, *, workloads: Path) -> list[str]:
     # version 2 cannot be rendered at all, so the freshness check below would
     # compare against a table `results-table` could never actually produce —
     # that failure is reported above instead.
+    failures.extend(_freshness_failures(documents))
+
     if all_schema_version_2:
         results_md_path = results_dir / RESULTS_MD
         rendered = render_results_table(documents)
