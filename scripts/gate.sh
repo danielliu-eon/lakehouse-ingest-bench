@@ -106,13 +106,20 @@ done
 GATE=(gate --out "$SCRATCH")
 # The gate's own windows are its defaults, and a run overrides them only where
 # it said so — see spec.scoring in the copied spec.
-SPEC="$RUNS_DIR/$RUN_ID/spec.yaml"
-if [[ -f $SPEC ]]; then
-	ADAPTATION_S="$(yq '.scoring.gate_adaptation_s' "$SPEC")"
-	[[ $ADAPTATION_S == null ]] || GATE+=(--adaptation-s "$ADAPTATION_S")
-	WINDOW_S="$(yq '.scoring.gate_window_s' "$SPEC")"
-	[[ $WINDOW_S == null ]] || GATE+=(--window-s "$WINDOW_S")
-fi
+#
+# Fetched from the runs prefix like the two artifacts above, rather than read
+# out of a local run directory: staging published it there, and a driver that
+# read the local copy would judge the same run differently depending on whether
+# one existed. A run that asked for a longer adaptation precisely to survive
+# its cold start would then be judged at the default and torn down. So a spec
+# that cannot be read is a refusal, never a fallback to windows nobody chose.
+SPEC="$SCRATCH/spec.yaml"
+aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/spec.yaml" "$SPEC" >&2 ||
+	die "could not read $RUNS_ROOT/$RUN_ID/stage/spec.yaml, and the run's own gate windows are in it"
+ADAPTATION_S="$(yq '.scoring.gate_adaptation_s' "$SPEC")"
+[[ $ADAPTATION_S == null ]] || GATE+=(--adaptation-s "$ADAPTATION_S")
+WINDOW_S="$(yq '.scoring.gate_window_s' "$SPEC")"
+[[ $WINDOW_S == null ]] || GATE+=(--window-s "$WINDOW_S")
 
 VERDICT_STATUS=0
 harness_local "${GATE[@]}" || VERDICT_STATUS=$?

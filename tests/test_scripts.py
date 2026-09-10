@@ -1219,11 +1219,25 @@ esac
 # `s3 ls` answers with the listing a test names, and refuses the one path a
 # test names as absent — which is how a bucket that is missing a shard is
 # expressed, since `aws s3 ls` exits non-zero over a path that matches nothing.
+#
+# `s3 cp` writes its destination, from `STUB_S3_CP_DIR/<basename>` when a test
+# put a file there and empty otherwise: the drivers read what they fetch, and a
+# `cp` that recorded the call and wrote nothing would leave them reading a file
+# that is not there. `STUB_S3_CP_ABSENT` is one object a test names as missing,
+# which is how an artifact the pods never published is expressed.
 AWS_STUB = """
 printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
 if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
 	mkdir -p "$4"
 	cp -R "$STUB_STAGE_DIR/." "$4"
+fi
+if [[ ${1:-} == s3 && ${2:-} == cp ]]; then
+	[[ -z ${STUB_S3_CP_ABSENT:-} || ${3:-} != *"$STUB_S3_CP_ABSENT"* ]] || exit 1
+	if [[ -n ${STUB_S3_CP_DIR:-} && -f "$STUB_S3_CP_DIR/${3##*/}" ]]; then
+		cp "$STUB_S3_CP_DIR/${3##*/}" "$4"
+	else
+		: >"$4"
+	fi
 fi
 if [[ ${1:-} == s3 && ${2:-} == ls ]]; then
 	[[ -z ${STUB_S3_LS_ABSENT:-} || ${3:-} != *"$STUB_S3_LS_ABSENT"* ]] || exit 1
@@ -2052,9 +2066,64 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
 
     assert run.result.returncode == 3, run.result.stdout + run.result.stderr
     assert "so its fleet may still be running" in run.result.stderr, run.result.stderr
-    # The two artifacts the gate reads, and no others: fetching the whole set
-    # every minute would pay for a run's record to answer one question.
-    assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == ["summary.json", "keepup_samples.jsonl"]
+    # The two artifacts the gate reads and the spec whose windows it judges by,
+    # and no others: fetching the whole set every minute would pay for a run's
+    # record to answer one question.
+    assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == [
+        "summary.json",
+        "keepup_samples.jsonl",
+        "spec.yaml",
+    ]
+
+
+@needs_shell_tools
+def test_the_gate_reads_the_runs_own_windows_out_of_the_bucket(tmp_path: Path) -> None:
+    """The windows come from the published spec, so the verdict is the run's own.
+
+    Read from a local run directory instead, the verdict would change with the
+    presence of a file: gating the same run from another machine, or after
+    `RUNS_DIR` moved, would silently fall back to the gate's own defaults — and
+    a run that asked for a longer adaptation precisely to survive its cold
+    start would be judged at the shorter one and torn down.
+    """
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+    published = tmp_path / "published"
+    published.mkdir()
+    spec = yaml.safe_load((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    spec["scoring"] = {**spec["scoring"], "gate_adaptation_s": 300, "gate_window_s": 90}
+    (published / "spec.yaml").write_text(yaml.safe_dump(spec))
+
+    run = _run_driver(
+        GATE,
+        [RUN_ID],
+        tmp_path,
+        {"STUB_GATE_LOG": str(gate_calls), "STUB_S3_CP_DIR": str(published)},
+        programs={"gate": GATE_STUB},
+    )
+
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert "--adaptation-s 300" in gate_calls.read_text(), gate_calls.read_text()
+    assert "--window-s 90" in gate_calls.read_text(), gate_calls.read_text()
+    fetched = [line.split("/")[-1] for line in run.aws_calls.splitlines()]
+    assert fetched == ["summary.json", "keepup_samples.jsonl", "spec.yaml"], run.aws_calls
+
+
+@needs_shell_tools
+def test_a_spec_the_gate_could_not_read_is_a_refusal_and_not_a_default(tmp_path: Path) -> None:
+    """A window the gate guessed is a verdict about a run nobody asked for."""
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+    run = _run_driver(
+        GATE,
+        [RUN_ID],
+        tmp_path,
+        {"STUB_GATE_LOG": str(gate_calls), "STUB_S3_CP_ABSENT": "stage/spec.yaml"},
+        programs={"gate": GATE_STUB},
+    )
+    assert run.result.returncode != 0
+    assert "stage/spec.yaml" in run.result.stderr, run.result.stderr
+    assert gate_calls.read_text() == "", "the gate was asked for a verdict with no windows to judge by"
 
 
 def _gated(tmp_path: Path, arguments: list[str], status: str, gate_calls: Path) -> subprocess.CompletedProcess[str]:
