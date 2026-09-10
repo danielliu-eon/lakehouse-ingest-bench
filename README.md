@@ -16,8 +16,7 @@ published result in [`results/`](results/) — the hour-long 100 MB/s runs fill
 it, and `runs/aws-100mbs-skew-*.yaml` are their specs, sized as a probe ladder's
 start rather than as an answer — the 600 MB/s presets, tuned engine variants,
 and any GCP deployment. The harness reads and writes `gs://` paths, but the
-drivers refuse a root that is not `s3://` and nothing here stands a cluster up
-on GCP.
+drivers refuse any root that is not `s3://`.
 
 ## What makes a result fair
 
@@ -92,8 +91,9 @@ creates, deletes or reconfigures it. Once per account,
 corpus in a bucket — `setup.sh`, a filled-in `site.yaml`, `push-images.sh`,
 `gen-corpus.sh` — and its §Sizing the cluster counts the nodes a spec needs.
 Once per run, [`docs/running.md`](docs/running.md) is the drivers' order:
-`stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` → `finish.sh` → `purge.sh`.
-Amazon MSK bills by the hour, idle or not, so tear it down between campaigns.
+`stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` → `finish.sh` → `purge.sh`,
+of which `scripts/run.sh <spec>` chains all but the last. Amazon MSK bills by
+the hour, idle or not, so tear it down between campaigns.
 
 ## Publishing a result
 

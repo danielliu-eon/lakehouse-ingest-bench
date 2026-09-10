@@ -77,11 +77,10 @@ Staging writes `runs/<run_id>/facts.json`. It is the whole interface:
 | `key_column` | the corpus column sent as the message key, or `null` for unkeyed records |
 | `epoch` | `null` until the run is launched; the time origin is chosen when the producer starts |
 
-Configure your consumer's decompression from `compression` before anything else:
-a client that cannot decode the codec reads no records at all, which looks like
-an engine that never started rather than a wire it cannot read. Catalog
-credentials are redacted because `facts.json` is meant to be publishable; your
-own come from wherever you keep them.
+Configure your consumer's decompression from `compression` first: a client that
+cannot decode the codec reads no records at all, which looks like an engine that
+never started rather than a wire it cannot read. Catalog credentials are
+redacted because `facts.json` is publishable; your own are yours to supply.
 
 ### Confluent values
 
@@ -149,9 +148,10 @@ touch /tmp/engine-ready
 
 The first shell then offers the corpus, scores what lands in the table, and
 prints the verdict. Drop `--external-ready-file` and it waits on a newline from
-stdin instead. `runs/<run_id>/scores/summary.json` is the whole answer, and
-[`methodology.md`](methodology.md) §The verdict says what each field means and
-when a result may be published from it.
+stdin instead — `scripts/run.sh <spec> --external-ready-file <path>` is the same
+contract for a run on a cluster. `runs/<run_id>/scores/summary.json` is the whole
+answer, and [`methodology.md`](methodology.md) §The verdict says what each field
+means and when a result may be published from it.
 
 ## Tier 2: a managed engine
 

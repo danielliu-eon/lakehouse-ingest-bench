@@ -55,6 +55,7 @@ GATE = SCRIPTS / "gate.sh"
 TEARDOWN = SCRIPTS / "teardown.sh"
 FINISH = SCRIPTS / "finish.sh"
 PURGE = SCRIPTS / "purge.sh"
+RUN = SCRIPTS / "run.sh"
 MEASURE_PRODUCER = SCRIPTS / "measure-producer.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
@@ -512,7 +513,7 @@ def test_measure_producer_answers_before_it_starts_a_stack() -> None:
 
 
 @needs_bash
-@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH, PURGE])
+@pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH, PURGE, RUN])
 def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
     """`--help` and an unknown argument, with no site config and no cluster.
 
@@ -3717,3 +3718,183 @@ def test_purge_removes_the_table_then_its_files_then_the_artifacts(tmp_path: Pat
     if artifacts:
         expected.append(f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/")
     assert removals == expected
+
+
+# ---------------------------------------------------------------------------
+# The whole run, chained
+# ---------------------------------------------------------------------------
+
+# `run.sh` calls the other drivers by absolute path out of its own directory, so
+# what stands in for them is a copy of `scripts/` whose five drivers are stubs.
+# The three files copied as they are are the ones under test: the driver, and
+# the two libraries it reads the site and a run's paths through.
+CHAINED_LIBRARIES = ("run.sh", "_lib.sh", "_k8s.sh")
+
+STAGE_STUB = f"""
+printf 'stage %s\\n' "$*" >>"$STUB_LOG"
+printf 'run_id: %s\\n' '{RUN_ID}'
+"""
+
+LAUNCH_STUB = """
+printf 'launch %s\\n' "$*" >>"$STUB_LOG"
+"""
+
+# The gate as `run.sh` polls it: it records the tick, publishes the state the
+# scorer would have had by then — one line of `STUB_STATES` per tick — and on
+# request leaves behind the one document a teardown writes.
+RUN_GATE_STUB = """
+printf 'gate %s\\n' "$*" >>"$STUB_LOG"
+state="$(head -n 1 "$STUB_STATES")"
+tail -n +2 "$STUB_STATES" >"$STUB_STATES.rest"
+mv "$STUB_STATES.rest" "$STUB_STATES"
+printf '{"state":"%s"}\\n' "$state" >"$STUB_S3_CP_DIR/summary.json"
+if [[ -n ${STUB_GATE_TEARS_DOWN:-} ]]; then
+	mkdir -p "$(dirname -- "$STUB_TEARDOWN_MARKER")"
+	: >"$STUB_TEARDOWN_MARKER"
+fi
+exit "${STUB_GATE_STATUS:-0}"
+"""
+
+TEARDOWN_STUB = """
+printf 'teardown %s\\n' "$*" >>"$STUB_LOG"
+"""
+
+FINISH_STUB = """
+printf 'finish %s\\n' "$*" >>"$STUB_LOG"
+exit "${STUB_FINISH_STATUS:-0}"
+"""
+
+# Nothing to answer, only to be found: `run.sh` refuses up front over any tool
+# its five drivers need, and these are the ones it never calls itself.
+FOUND_STUB = "exit 0\n"
+
+
+@dataclass(frozen=True)
+class ChainedRun:
+    """One `run.sh` over stubbed drivers, and the drivers it called in order."""
+
+    result: subprocess.CompletedProcess[str]
+    calls: list[str]
+
+    def drivers(self) -> list[str]:
+        return [line.split(" ", 1)[0] for line in self.calls]
+
+    def call(self, driver: str) -> str:
+        matching = [line for line in self.calls if line.startswith(f"{driver} ")]
+        assert len(matching) == 1, f"expected one {driver} call, found {len(matching)}"
+        return matching[0]
+
+
+def _run_chained(
+    tmp_path: Path,
+    arguments: list[str],
+    states: list[str],
+    environment: dict[str, str] | None = None,
+) -> ChainedRun:
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    for name in CHAINED_LIBRARIES:
+        shutil.copy(SCRIPTS / name, repo / "scripts" / name)
+    _stub_bin(
+        repo / "scripts",
+        {
+            "stage.sh": STAGE_STUB,
+            "launch.sh": LAUNCH_STUB,
+            "gate.sh": RUN_GATE_STUB,
+            "teardown.sh": TEARDOWN_STUB,
+            "finish.sh": FINISH_STUB,
+        },
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "site.yaml").write_text(_filled_site())
+    spec = work / "a-run.yaml"
+    spec.write_text("engine: flink\n")
+    published = tmp_path / "published"
+    published.mkdir()
+    state_file = tmp_path / "states"
+    state_file.write_text("".join(f"{state}\n" for state in states))
+    calls = tmp_path / "driver-calls.log"
+    calls.touch()
+    stubs = _stub_bin(
+        tmp_path / "bin",
+        {"aws": AWS_STUB, "kubectl": FOUND_STUB, "curl": FOUND_STUB, "gzip": FOUND_STUB},
+    )
+
+    result = subprocess.run(
+        [str(repo / "scripts" / "run.sh"), str(spec), "--gate-interval-s", "1", *arguments],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env={
+            **os.environ,
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "STUB_LOG": str(calls),
+            "STUB_AWS_LOG": str(tmp_path / "aws-calls.log"),
+            "STUB_S3_CP_DIR": str(published),
+            "STUB_STATES": str(state_file),
+            "STUB_TEARDOWN_MARKER": str(work / "runs" / RUN_ID / "table-metadata.final.json"),
+            **(environment or {}),
+        },
+    )
+    return ChainedRun(result=result, calls=calls.read_text().splitlines())
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    ("states", "environment", "drivers", "status", "said"),
+    [
+        # The state the scorer publishes is what says a run has ended, so the
+        # loop leaves on the first tick that reads one that is not `running`.
+        (["running", "drained"], {}, ["stage", "launch", "gate", "gate", "teardown", "finish"], 0, None),
+        # A run the gate has already torn down is not torn down again: the
+        # second teardown would fail on a topic that is no longer there.
+        (["running"], {"STUB_GATE_TEARS_DOWN": "1"}, ["stage", "launch", "gate", "finish"], 0, None),
+        # `RUN_MAX_S` is the bound on a run that publishes nothing this can
+        # read — and the verdict is still printed, because a run nobody waited
+        # out has its artifacts as the only account of what it was doing.
+        (
+            [],
+            {"RUN_MAX_S": "2"},
+            ["stage", "launch", "gate", "gate", "teardown", "finish"],
+            1,
+            "still running after 2s",
+        ),
+    ],
+    ids=["drained", "gate-tore-it-down", "overran"],
+)
+def test_a_chained_run_ends_when_the_run_does(
+    tmp_path: Path, states: list[str], environment: dict[str, str], drivers: list[str], status: int, said: str | None
+) -> None:
+    run = _run_chained(tmp_path, [], states, environment)
+    assert run.result.returncode == status, run.result.stdout + run.result.stderr
+    assert run.drivers() == drivers, run.calls
+    # On stdout the moment staging returns, because it is the only handle on
+    # the run: an operator who loses this shell reaches it with the drivers.
+    assert f"run_id: {RUN_ID}" in run.result.stdout, run.result.stdout
+    if said is not None:
+        assert said in run.result.stderr, run.result.stderr
+
+
+@needs_shell_tools
+def test_a_chained_run_hands_each_flag_to_the_driver_that_owns_it(tmp_path: Path) -> None:
+    """And exits with `finish.sh`'s status, which is the run's own verdict."""
+    run = _run_chained(
+        tmp_path,
+        ["--image-tag", "abc1234", "--breaches", "2", "--publish", "results/", "--variant", "tuned"],
+        ["drained"],
+        {"STUB_FINISH_STATUS": "1"},
+    )
+    assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+
+    assert "--image-tag abc1234" in run.call("stage")
+    assert "--image-tag abc1234" in run.call("gate")
+    assert "--breaches 2" in run.call("gate")
+    assert "--teardown" in run.call("gate")
+    assert "--publish results/" in run.call("finish")
+    assert "--variant tuned" in run.call("finish")
+    # The site reaches every driver explicitly, so each reads the file this run
+    # was given rather than whatever `SITE_FILE` happens to hold.
+    for driver in ("stage", "launch", "gate", "teardown", "finish"):
+        assert "--site ./site.yaml" in run.call(driver), run.call(driver)

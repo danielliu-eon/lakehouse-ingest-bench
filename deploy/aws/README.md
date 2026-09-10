@@ -16,7 +16,8 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
   `eksctl-cluster.example.yaml` makes a minimal one — see the last section.
 - **Host tools**, on the machine you run all of this from. Every script here and
   every cluster driver under `scripts/` refuses up front on a missing one, and
-  points at this list:
+  points at this list. `run.sh` chains five of those drivers, so it refuses on
+  any tool one of them needs:
 
   | Tool | Needed by |
   |---|---|
