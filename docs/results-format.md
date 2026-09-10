@@ -68,6 +68,7 @@ result was measured against, and the prices.
 | `catalog_props` | `facts.catalog_props`, redacted |
 | `epoch_ms` | the run's time origin; `null` for a run that was staged but never launched |
 | `corpus_hash` | from `summary.json` |
+| `value_encoding` | `facts.value_encoding` — the framing the values carried, `avro` or `confluent`. The run's own facts and not the spec, since that document is what every reader of the run was configured from |
 | `compression` | `spec.producer.compression` — the codec the offer crossed the link with, resolved rather than left to the copied spec's defaults |
 
 ## `artifacts`

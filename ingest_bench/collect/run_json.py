@@ -382,6 +382,10 @@ def build_run_json(
             "corpus_hash": None if summary is None else summary["corpus_hash"],
             "table": facts["table"],
             "topic": facts["topic"],
+            # The framing the values carried, from the run's own facts: that is
+            # the document every reader of the run was configured from, so it
+            # is what a result was measured on rather than what was asked for.
+            "value_encoding": facts["value_encoding"],
             # Resolved from the spec rather than left to the copied document,
             # where a run that named no codec names none: comparing two results
             # means knowing which codec each offer crossed the link with.

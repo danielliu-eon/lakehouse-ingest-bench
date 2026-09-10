@@ -181,6 +181,7 @@ def _run_dir(
     geometry: bool = True,
     publish_logs: bool = True,
     engine_image: bool = True,
+    value_encoding: str = "avro",
 ) -> Path:
     run_dir = tmp_path / "runs" / "collect-flink-20260909T052508Z"
     scores = run_dir / "scores"
@@ -194,6 +195,7 @@ def _run_dir(
                 "topic": "collect-flink-20260909T052508Z",
                 "corpus_uri": f"{BUCKET}/corpus/smoke-e13842f9",
                 "schema_avsc_uri": f"{BUCKET}/corpus/smoke-e13842f9/schema.avsc",
+                "value_encoding": value_encoding,
                 "catalog_props": {
                     "uri": "https://catalog.invalid/iceberg",
                     "warehouse": f"{BUCKET}/warehouse",
@@ -473,25 +475,28 @@ def test_run_json_redacts_the_catalog_properties(tmp_path: Path) -> None:
     assert run["spec"] == yaml.safe_load(FLINK_SPEC)
 
 
-def test_run_json_states_the_wire_codec_the_offer_used(tmp_path: Path) -> None:
-    """The codec is resolved in the result, not left in the copied spec's defaults.
+def test_run_json_states_the_wire_format_the_offer_used(tmp_path: Path) -> None:
+    """Both halves of the wire are resolved in the result, not left to the copied spec.
 
-    The spec is embedded verbatim, so a run that said nothing about the codec
-    says nothing about it there — and a reader comparing two results has to
-    know which codec each offer crossed the link with.
+    The spec is embedded verbatim, so a run that said nothing about its framing
+    or its codec says nothing about either there — and two results compare only
+    at one of each. The framing comes from the run's own facts, which is the
+    document every reader of the run was pointed at.
     """
     site_path = _site(tmp_path)
     default = _build(_run_dir(tmp_path / "default"), site_path)
     run = default["run"]
     assert isinstance(run, dict)
     assert run["compression"] == "zstd"
+    assert run["value_encoding"] == "avro"
 
     raw = yaml.safe_load(FLINK_SPEC)
     raw["producer"] = {**raw["producer"], "compression": "lz4"}
-    lz4 = _build(_run_dir(tmp_path / "lz4", spec=yaml.safe_dump(raw)), site_path)
-    lz4_run = lz4["run"]
-    assert isinstance(lz4_run, dict)
-    assert lz4_run["compression"] == "lz4"
+    framed = _build(_run_dir(tmp_path / "framed", spec=yaml.safe_dump(raw), value_encoding="confluent"), site_path)
+    framed_run = framed["run"]
+    assert isinstance(framed_run, dict)
+    assert framed_run["compression"] == "lz4"
+    assert framed_run["value_encoding"] == "confluent"
 
 
 def test_run_json_derives_the_figures_a_result_is_read_by(tmp_path: Path) -> None:
