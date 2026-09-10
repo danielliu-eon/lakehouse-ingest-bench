@@ -3195,16 +3195,46 @@ def test_purge_refuses_while_the_run_is_still_being_scored(tmp_path: Path) -> No
 
 @needs_shell_tools
 def test_purge_refuses_a_run_whose_location_it_was_never_told(tmp_path: Path) -> None:
-    """No copied document, no purge: the location is read, never guessed.
+    """No copied document, no table: the location is read, never guessed.
 
     A prefix derived from the table's name is a prefix that may hold something
-    else, and `aws s3 rm --recursive` does not ask twice.
+    else, and `aws s3 rm --recursive` does not ask twice. With no artifacts
+    asked for either there is nothing at all left to remove, so the absence is
+    a refusal naming the teardown that would have copied the document.
     """
     _torn_down_run(tmp_path, metadata=False)
     run = _run_driver(PURGE, [RUN_ID, "--yes"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
     assert run.result.returncode != 0
     assert "run scripts/teardown.sh first" in run.result.stderr
+    assert "--artifacts" in run.result.stderr, "the refusal names what a purge could still do"
     assert "s3 rm" not in run.aws_calls
+
+
+@needs_shell_tools
+def test_purge_reclaims_the_artifacts_of_a_run_that_never_had_a_table(tmp_path: Path) -> None:
+    """A run whose table was never created still has a prefix worth reclaiming.
+
+    Its artifacts are what a failed run leaves — the staged documents, the
+    scores it got as far as — and they are paid for whether or not a table was
+    ever made. Nothing under the warehouse is touched, because without the
+    copied document nothing here knows which prefix would be the table's.
+    """
+    _torn_down_run(tmp_path, metadata=False)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", "--artifacts"],
+        tmp_path,
+        _purge_environment(tmp_path),
+        programs=PURGE_PROGRAMS,
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert str(FACTS["table"]) in run.result.stdout and "left alone" in run.result.stdout
+
+    removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
+    assert removals == [f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/"]
+    # The catalog is left as it is: dropping the entry without knowing where
+    # the files are would strand them under the warehouse for good.
+    assert (tmp_path / "drop-table.log").read_text() == ""
 
 
 @needs_shell_tools

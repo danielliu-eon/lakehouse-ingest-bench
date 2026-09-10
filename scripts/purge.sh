@@ -27,7 +27,8 @@ usage: scripts/purge.sh <run_id> [options]
   <run_id>       a run torn down under $RUNS_DIR, whose table and data are to be removed
   --site PATH    the site config naming the cluster, the catalog and the runs prefix (default: ./site.yaml)
   --artifacts    also remove the run's own prefix under the runs root — its scores, its publish
-                 logs and the metadata document this script read the location out of
+                 logs and the metadata document this script read the location out of. For a run
+                 that left no such document it is the only thing there is to remove
   --yes          do not ask; for a purge run from a script
 
 Environment: RUNS_DIR.
@@ -82,33 +83,48 @@ RUN_DIR="$RUNS_DIR/$RUN_ID"
 FACTS="$RUN_DIR/facts.json"
 [[ -f $FACTS ]] || die "no staged run at $RUN_DIR; run this where stage.sh fetched it, or set RUNS_DIR"
 
+# Whether this run has a table to reclaim at all. A run that failed before its
+# table was created left no copied document, and then nothing here knows which
+# prefix under the warehouse would have been the table's — so no prefix under it
+# is touched and the catalog is left as it is: dropping an entry without knowing
+# where its files are would strand them for good. The run's own prefix is still
+# worth reclaiming, which makes `--artifacts` the whole of what a purge can do
+# for such a run; with that flag off there is nothing left to do at all, and the
+# absence is a refusal naming the teardown that would have copied the document.
 METADATA_FINAL="$RUN_DIR/$METADATA_FINAL_FILE"
-[[ -f $METADATA_FINAL ]] ||
-	die "no $METADATA_FINAL, so nothing here knows where $RUN_ID's data is; run scripts/teardown.sh first"
+HAVE_TABLE=yes
+if [[ ! -f $METADATA_FINAL ]]; then
+	HAVE_TABLE=no
+	[[ $ARTIFACTS == yes ]] ||
+		die "no $METADATA_FINAL, so nothing here knows where $RUN_ID's data is; run scripts/teardown.sh first, or --artifacts to reclaim the run's own prefix alone"
+fi
 
 k8s_read_site
 
 TABLE="$(jq -r .table "$FACTS")"
 [[ -n $TABLE && $TABLE != null ]] || die "$FACTS names no table"
-# The document's own statement of where its table lives, which is what makes
-# this a deletion of that table's files and not of a prefix that reads like it.
-LOCATION="$(jq -r '.location // empty' "$METADATA_FINAL")"
-[[ -n $LOCATION ]] || die "$METADATA_FINAL carries no location, so it does not say which prefix holds $TABLE's files"
+LOCATION=""
+if [[ $HAVE_TABLE == yes ]]; then
+	# The document's own statement of where its table lives, which is what makes
+	# this a deletion of that table's files and not of a prefix that reads like it.
+	LOCATION="$(jq -r '.location // empty' "$METADATA_FINAL")"
+	[[ -n $LOCATION ]] || die "$METADATA_FINAL carries no location, so it does not say which prefix holds $TABLE's files"
 
-# A table's location has to look like one: under the site's warehouse root, and
-# naming something below it. `aws s3 rm --recursive` takes a prefix and asks
-# nothing, and every prefix at or above this one is other data — the warehouse
-# root is every table the site has ever held, and a bucket root is the corpus
-# and every run's artifacts besides. A document that named either would
-# otherwise pass the non-empty check above and be removed whole.
-WAREHOUSE="$(site_root '.warehouse')"
-WAREHOUSE="${WAREHOUSE%/}"
-[[ $LOCATION == "$WAREHOUSE"/* ]] ||
-	die "$METADATA_FINAL puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"
-# Every trailing separator, so neither the root itself nor the root with a
-# separator or two after it reads as a prefix of its own.
-[[ ${LOCATION#"$WAREHOUSE"/} == *[!/]* ]] ||
-	die "$METADATA_FINAL puts $TABLE at the warehouse root $WAREHOUSE itself, which holds every table this site has; nothing is removed"
+	# A table's location has to look like one: under the site's warehouse root,
+	# and naming something below it. `aws s3 rm --recursive` takes a prefix and
+	# asks nothing, and every prefix at or above this one is other data — the
+	# warehouse root is every table the site has ever held, and a bucket root is
+	# the corpus and every run's artifacts besides. A document that named either
+	# would otherwise pass the non-empty check above and be removed whole.
+	WAREHOUSE="$(site_root '.warehouse')"
+	WAREHOUSE="${WAREHOUSE%/}"
+	[[ $LOCATION == "$WAREHOUSE"/* ]] ||
+		die "$METADATA_FINAL puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"
+	# Every trailing separator, so neither the root itself nor the root with a
+	# separator or two after it reads as a prefix of its own.
+	[[ ${LOCATION#"$WAREHOUSE"/} == *[!/]* ]] ||
+		die "$METADATA_FINAL puts $TABLE at the warehouse root $WAREHOUSE itself, which holds every table this site has; nothing is removed"
+fi
 
 # ---------------------------------------------------------------------------
 # Refuse while the run is still being read
@@ -129,8 +145,13 @@ STILL_RUNNING="$(k8s_object_present job "$SCORER")" ||
 # ---------------------------------------------------------------------------
 
 printf 'purging %s removes, permanently:\n' "$RUN_ID"
-printf '  the table    %s\n' "$TABLE"
-printf '  its files    %s\n' "$LOCATION"
+if [[ $HAVE_TABLE == yes ]]; then
+	printf '  the table    %s\n' "$TABLE"
+	printf '  its files    %s\n' "$LOCATION"
+else
+	printf '  left alone   %s, and every prefix under the warehouse: %s holds no %s\n' \
+		"$TABLE" "$RUN_ID" "$METADATA_FINAL_FILE"
+fi
 if [[ $ARTIFACTS == yes ]]; then
 	printf '  its run      %s/%s/\n' "$RUNS_ROOT" "$RUN_ID"
 fi
@@ -143,15 +164,17 @@ fi
 # Remove it
 # ---------------------------------------------------------------------------
 
-# The catalog entry first, so nothing can load a table whose files are on their
-# way out. `drop-table` accepts a table that is already gone, which is what
-# makes a second purge after a partial one converge.
-read_catalog_prop_flags
-log "dropping $TABLE"
-harness_local --extra aws drop-table --table "$TABLE" ${CATALOG_PROP_FLAGS[@]+"${CATALOG_PROP_FLAGS[@]}"}
+if [[ $HAVE_TABLE == yes ]]; then
+	# The catalog entry first, so nothing can load a table whose files are on
+	# their way out. `drop-table` accepts a table that is already gone, which is
+	# what makes a second purge after a partial one converge.
+	read_catalog_prop_flags
+	log "dropping $TABLE"
+	harness_local --extra aws drop-table --table "$TABLE" ${CATALOG_PROP_FLAGS[@]+"${CATALOG_PROP_FLAGS[@]}"}
 
-log "removing $LOCATION"
-aws s3 rm --recursive "$LOCATION" >&2 || die "could not remove $LOCATION; $TABLE is already out of the catalog"
+	log "removing $LOCATION"
+	aws s3 rm --recursive "$LOCATION" >&2 || die "could not remove $LOCATION; $TABLE is already out of the catalog"
+fi
 
 if [[ $ARTIFACTS == yes ]]; then
 	log "removing $RUNS_ROOT/$RUN_ID/"

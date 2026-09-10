@@ -138,7 +138,9 @@ decision taken once the result has been read.
 location out of the metadata document teardown copied rather than deriving it
 from the table's name, refuses while the run's scorer is still in the namespace,
 prints the table, the prefix and — with `--artifacts` — the run's prefix, and
-then asks. Nothing is removed without `--yes` or a `y` at the prompt.
+then asks. Nothing is removed without `--yes` or a `y` at the prompt. A run that
+left no such document has no table to reclaim, so `--artifacts` is then the only
+thing to remove and the table is left where it is.
 
 ### Publishing a result
 
