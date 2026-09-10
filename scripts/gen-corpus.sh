@@ -14,14 +14,18 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=scripts/_k8s.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 
-GEN_JOB=corpus-gen
-MERGE_JOB=corpus-merge
-
 # Generation is hours for the large presets and minutes for the smoke; the merge
 # reads every shard's metadata and writes one document, so it is minutes either
 # way. Both are waits, not budgets — see k8s_wait_job.
 GEN_WAIT_S="${GEN_WAIT_S:-14400}"
 MERGE_WAIT_S="${MERGE_WAIT_S:-1800}"
+
+# What one generator pod asks for. The generator holds a whole batch in memory
+# while it encodes one, so its peak follows the preset's batch bytes —
+# `offered_bytes_per_s x batch_interval_ms / 1000`, and roughly ten times that
+# resident — and not the shard count. The default fits the smoke preset; see
+# "Generating a corpus" in docs/running.md for what the larger ones need.
+GEN_MEMORY="${GEN_MEMORY:-2Gi}"
 
 usage() {
 	cat <<'USAGE'
@@ -33,7 +37,7 @@ usage: scripts/gen-corpus.sh <preset> [options]
   --site PATH        the site config naming the cluster and the corpus root (default: ./site.yaml)
   --image-tag TAG    the harness image tag to run (default: this checkout's commit)
 
-Environment: GEN_WAIT_S, MERGE_WAIT_S.
+Environment: GEN_WAIT_S, MERGE_WAIT_S, GEN_MEMORY.
 
 It prints the corpus URI, and nothing else, on stdout.
 USAGE
@@ -128,6 +132,12 @@ else
 	GEN_COMMAND="$GEN_COMMAND --shard-index \$JOB_COMPLETION_INDEX --shard-count $SHARDS --seed $SEED"
 fi
 
+# Named after the preset, because `k8s_delete job` below removes whatever holds
+# the name: two generations of different presets would otherwise be one Job, and
+# the second would delete the first hours into it.
+GEN_JOB="corpus-gen-$(k8s_object_name "$(basename -- "$PRESET")")"
+MERGE_JOB="corpus-merge-$(k8s_object_name "$(basename -- "$PRESET")")"
+
 log "generating $PRESET in $SHARDS shard(s) with $IMAGE"
 k8s_delete job "$GEN_JOB"
 k8s_render_apply deploy/k8s/corpus-gen-job.yaml.tmpl \
@@ -137,6 +147,7 @@ k8s_render_apply deploy/k8s/corpus-gen-job.yaml.tmpl \
 	"IMAGE=$IMAGE" \
 	"COMMAND=$GEN_COMMAND" \
 	"COUNT=$SHARDS" \
+	"MEMORY=$GEN_MEMORY" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \

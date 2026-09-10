@@ -29,6 +29,12 @@ IDLE_STOP_S="${IDLE_STOP_S:-600}"
 # is looked for.
 FIRST_POLL_WAIT_S="${FIRST_POLL_WAIT_S:-300}"
 FIRST_POLL_S="${FIRST_POLL_S:-5}"
+# What one producer shard's pod asks for. A shard reads one whole batch object
+# into memory and decompresses it whole, so its peak follows the preset's batch
+# bytes — `offered_bytes_per_s x batch_interval_ms / 1000` — and not the shard
+# count. The default fits the smoke preset; see "Generating a corpus" in
+# docs/running.md for what the larger ones need.
+PRODUCER_MEMORY="${PRODUCER_MEMORY:-2Gi}"
 
 usage() {
 	cat <<'USAGE'
@@ -38,7 +44,8 @@ usage: scripts/launch.sh <run_id> [options]
   --site PATH        the site config naming the cluster and the runs prefix (default: ./site.yaml)
   --image-tag TAG    the harness image tag the producer and the scorer run (default: this checkout's commit)
 
-Environment: EPOCH_LEAD_S, IDLE_STOP_S, FIRST_POLL_WAIT_S, FIRST_POLL_S, RUNS_DIR.
+Environment: EPOCH_LEAD_S, IDLE_STOP_S, FIRST_POLL_WAIT_S, FIRST_POLL_S,
+PRODUCER_MEMORY, RUNS_DIR.
 USAGE
 }
 
@@ -218,6 +225,7 @@ k8s_render_apply deploy/k8s/producer-job.yaml.tmpl \
 	"IMAGE=$IMAGE" \
 	"COMMAND=$PRODUCE" \
 	"COUNT=$SHARDS" \
+	"MEMORY=$PRODUCER_MEMORY" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \

@@ -1795,7 +1795,7 @@ def test_a_sharded_merge_names_the_corpus_its_generation_wrote(tmp_path: Path) -
 
     assert run.result.returncode == 0, run.result.stderr
     assert run.result.stdout.strip() == f"{CORPUS_ROOT}/{CORPUS_DIR}"
-    command = _job_command(_named_job(run, "corpus-merge"))
+    command = _job_command(_named_job(run, f"corpus-merge-{SHARDED_PRESET}"))
     assert command == (
         f"merge-corpus {CORPUS_ROOT}/shards/0/{CORPUS_DIR} {CORPUS_ROOT}/shards/1/{CORPUS_DIR} --out {CORPUS_ROOT}"
     )
@@ -2150,6 +2150,62 @@ def test_launch_starts_the_producer_for_a_table_its_engine_will_create(tmp_path:
         assert f"--table-managed-by {managed_by}" in scorer, scorer
     # And the producer is applied, which is the thing the deadlock stopped.
     assert _job_command(_named_job(run, f"producer-{RUN_OBJECT}")).startswith("produce ")
+
+
+@needs_shell_tools
+def test_a_batch_sized_pod_can_be_given_the_memory_its_preset_needs(tmp_path: Path) -> None:
+    """The two Jobs whose peak follows the preset's batch bytes, not the pod count.
+
+    A generator holds a whole batch while it encodes one and a producer shard
+    reads one whole batch object and decompresses it whole, so a 600 MB/s
+    preset's batch needs gigabytes where the smoke one's needs hundreds of
+    megabytes. Both requests were fixed in a tracked file, so the only way to
+    raise either was to edit the repository.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    launched = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {"PRODUCER_MEMORY": "8Gi"})
+    assert launched.result.returncode == 0, launched.result.stderr
+    producer = _named_job(launched, f"producer-{RUN_OBJECT}")
+    requests = _mapping(_mapping(_mapping(_sequence(_pod_spec(producer)["containers"])[0])["resources"])["requests"])
+    assert requests["memory"] == "8Gi"
+
+    generated = _run_driver(
+        GEN_CORPUS,
+        [SHARDED_PRESET, "--image-tag", "abc1234"],
+        tmp_path,
+        {"GEN_MEMORY": "6Gi"},
+        job_log=f"wrote {CORPUS_ROOT}/{CORPUS_DIR}: 12000000 rows, 600000000 encoded bytes\n",
+    )
+    assert generated.result.returncode == 0, generated.result.stderr
+    generator = _named_job(generated, f"corpus-gen-{SHARDED_PRESET}")
+    requests = _mapping(_mapping(_mapping(_sequence(_pod_spec(generator)["containers"])[0])["resources"])["requests"])
+    assert requests["memory"] == "6Gi"
+
+
+@needs_shell_tools
+def test_two_generations_of_different_presets_are_two_jobs(tmp_path: Path) -> None:
+    """A driver deletes the Job of its own name on the way in, so the name is the preset's.
+
+    Under one fixed name a second generation would delete the first hours into
+    it, and the first driver would then wait out its budget on a Job that no
+    longer exists.
+    """
+    run = _run_driver(
+        GEN_CORPUS,
+        [SHARDED_PRESET, "--image-tag", "abc1234"],
+        tmp_path,
+        {},
+        job_log=f"wrote {CORPUS_ROOT}/{CORPUS_DIR}: 12000000 rows, 600000000 encoded bytes\n",
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    name = str(_mapping(run.applied[0]["metadata"])["name"])
+    assert name == f"corpus-gen-{SHARDED_PRESET}", name
+    assert f"delete job corpus-gen-{SHARDED_PRESET}" in run.calls, run.calls
 
 
 @needs_shell_tools

@@ -36,10 +36,15 @@ spec:
           # resolves against: the manifest and the command line carry the
           # reference, and the value exists only in that Secret.
           envFrom: __ENV_FROM__
+          # A shard reads one whole batch object into memory and decompresses
+          # it whole, so its peak is set by the preset's batch bytes and not by
+          # the shard count: sharding buys throughput, never headroom. The
+          # driver's PRODUCER_MEMORY is what raises this for a preset whose
+          # batch is larger than the smoke one's.
           resources:
             requests:
               cpu: "1"
-              memory: "2Gi"
+              memory: __MEMORY__
           volumeMounts:
             - name: work
               mountPath: /work

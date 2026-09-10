@@ -44,10 +44,11 @@ spec:
           envFrom: __ENV_FROM__
           # The generator holds one whole batch in memory while it encodes it,
           # so its peak is set by the preset's batch bytes and not by the shard
-          # count: sharding buys throughput, never headroom. This request fits
+          # count: sharding buys throughput, never headroom. The default fits
           # the smoke preset; see "Generating a corpus" in docs/running.md for
-          # what the larger ones need, and raise it before running one.
+          # what the larger ones need, and the driver's GEN_MEMORY for how to
+          # ask for it.
           resources:
             requests:
               cpu: "1"
-              memory: "2Gi"
+              memory: __MEMORY__

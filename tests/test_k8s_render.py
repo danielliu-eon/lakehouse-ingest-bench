@@ -39,6 +39,7 @@ SAMPLE = {
     "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}',
     "TOLERATIONS": '[{"key": "a-taint", "operator": "Exists", "effect": "NoSchedule"}]',
     "COUNT": "4",
+    "MEMORY": "6Gi",
     "SPEC_CONFIGMAP": "stage-a-run-spec",
     "SITE_CONFIGMAP": "stage-a-run-site",
 }
@@ -69,6 +70,10 @@ _ONE_OFF = frozenset(
     }
 )
 _INDEXED = _ONE_OFF | {"COUNT"}
+# The two Jobs whose peak memory follows the preset's batch bytes rather than
+# the pod count: the generator holds a whole batch while it encodes one, and a
+# producer shard reads one whole batch object and decompresses it whole.
+_BATCH_SIZED = _INDEXED | {"MEMORY"}
 _MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
 
 # The one shipped template that is not a harness Job: a Deployment and a
@@ -86,8 +91,8 @@ EXPIRY_S = 3600
 EXPECTATIONS = {
     "harness-job.yaml.tmpl": Expectation(_ONE_OFF, "500m", "1Gi", indexed=False, work_volume=False),
     "stage-job.yaml.tmpl": Expectation(_MOUNTED, "500m", "1Gi", indexed=False, work_volume=True),
-    "corpus-gen-job.yaml.tmpl": Expectation(_INDEXED, "1", "2Gi", indexed=True, work_volume=False),
-    "producer-job.yaml.tmpl": Expectation(_INDEXED, "1", "2Gi", indexed=True, work_volume=True),
+    "corpus-gen-job.yaml.tmpl": Expectation(_BATCH_SIZED, "1", "6Gi", indexed=True, work_volume=False),
+    "producer-job.yaml.tmpl": Expectation(_BATCH_SIZED, "1", "6Gi", indexed=True, work_volume=True),
     "scorer-job.yaml.tmpl": Expectation(_ONE_OFF, "1", "2Gi", indexed=False, work_volume=True),
 }
 
