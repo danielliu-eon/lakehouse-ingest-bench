@@ -3293,46 +3293,100 @@ def test_purge_refuses_while_the_run_is_still_being_scored(tmp_path: Path) -> No
 
 
 @needs_shell_tools
-def test_purge_refuses_a_run_whose_location_it_was_never_told(tmp_path: Path) -> None:
-    """No copied document, no table: the location is read, never guessed.
+def test_purge_asks_the_catalog_when_no_document_was_copied(tmp_path: Path) -> None:
+    """An absent document is not an absent table, so the catalog is asked.
 
-    A prefix derived from the table's name is a prefix that may hold something
-    else, and `aws s3 rm --recursive` does not ask twice. With no artifacts
-    asked for either there is nothing at all left to remove, so the absence is
-    a refusal naming the teardown that would have copied the document.
+    A run torn down by hand, or never torn down at all, has no copied metadata
+    document and may still have a table holding every byte it wrote. Reading
+    the absence as "no table" would leave exactly that table behind while
+    reporting a purge that succeeded — so the catalog answers the question, and
+    its answer also carries the location, which is the thing that must never be
+    guessed.
     """
     _torn_down_run(tmp_path, metadata=False)
-    run = _run_driver(PURGE, [RUN_ID, "--yes"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
-    assert run.result.returncode != 0
-    assert "run scripts/teardown.sh first" in run.result.stderr
-    assert "--artifacts" in run.result.stderr, "the refusal names what a purge could still do"
-    assert "s3 rm" not in run.aws_calls
+    published = tmp_path / "published"
+    published.mkdir()
+    (published / "00007-live.metadata.json").write_text(json.dumps({"location": TABLE_LOCATION}))
+
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", "--artifacts"],
+        tmp_path,
+        {
+            **_purge_environment(tmp_path),
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "0",
+            "STUB_METADATA_OUT": f"{TABLE_LOCATION}/metadata/00007-live.metadata.json",
+            "STUB_S3_CP_DIR": str(published),
+        },
+        programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert f"--table {FACTS['table']}" in (tmp_path / "metadata.log").read_text()
+    # Dropped and removed exactly as a purge with the document already in hand.
+    assert f"--table {FACTS['table']}" in (tmp_path / "drop-table.log").read_text()
+    removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
+    assert removals == [
+        f"s3 rm --recursive {TABLE_LOCATION}",
+        f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/",
+    ]
 
 
 @needs_shell_tools
-def test_purge_reclaims_the_artifacts_of_a_run_that_never_had_a_table(tmp_path: Path) -> None:
+def test_purge_reclaims_the_artifacts_of_a_run_the_catalog_holds_no_table_for(tmp_path: Path) -> None:
     """A run whose table was never created still has a prefix worth reclaiming.
 
     Its artifacts are what a failed run leaves — the staged documents, the
     scores it got as far as — and they are paid for whether or not a table was
-    ever made. Nothing under the warehouse is touched, because without the
-    copied document nothing here knows which prefix would be the table's.
+    ever made. The catalog saying it holds no such table is what makes removing
+    them alone the whole of the purge rather than half of one.
     """
     _torn_down_run(tmp_path, metadata=False)
     run = _run_driver(
         PURGE,
         [RUN_ID, "--yes", "--artifacts"],
         tmp_path,
-        _purge_environment(tmp_path),
-        programs=PURGE_PROGRAMS,
+        {
+            **_purge_environment(tmp_path),
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            # What `table-metadata` exits for a table the catalog does not hold.
+            "STUB_METADATA_STATUS": "3",
+        },
+        programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB},
     )
     assert run.result.returncode == 0, run.result.stderr
-    assert str(FACTS["table"]) in run.result.stdout and "left alone" in run.result.stdout
+    assert "holds no" in run.result.stdout and str(FACTS["table"]) in run.result.stdout
 
     removals = [line for line in run.aws_calls.splitlines() if line.startswith("s3 rm")]
     assert removals == [f"s3 rm --recursive s3://a-bucket/runs/{RUN_ID}/"]
-    # The catalog is left as it is: dropping the entry without knowing where
-    # the files are would strand them under the warehouse for good.
+    assert (tmp_path / "drop-table.log").read_text() == "", "there is no table to drop"
+
+
+@needs_shell_tools
+def test_purge_refuses_when_it_cannot_ask_the_catalog(tmp_path: Path) -> None:
+    """ "I could not ask" and "there is no table" have to be different answers.
+
+    A catalog this script could not reach says nothing about whether the table
+    is there, and a purge that read the failure as an absence would remove a
+    run's artifacts — the copied document among them — and leave its table with
+    nothing left pointing at where its files are.
+    """
+    _torn_down_run(tmp_path, metadata=False)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", "--artifacts"],
+        tmp_path,
+        {
+            **_purge_environment(tmp_path),
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "1",
+            "STUB_METADATA_ERROR": "could not reach the catalog",
+        },
+        programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode != 0
+    assert "scripts/teardown.sh" in run.result.stderr
+    assert "s3 rm" not in run.aws_calls
     assert (tmp_path / "drop-table.log").read_text() == ""
 
 

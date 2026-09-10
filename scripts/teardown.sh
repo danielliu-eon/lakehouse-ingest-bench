@@ -22,11 +22,6 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 # to agree, inside a pod that has to be scheduled and pull an image.
 DROP_WAIT_S="${DROP_WAIT_S:-600}"
 
-# What `table-metadata` exits when the catalog holds no such table, as
-# ingest_bench.table.cli.TABLE_ABSENT. Any other non-zero exit is a catalog this
-# script could not reach, which is a failure and not an absent table.
-TABLE_ABSENT=3
-
 usage() {
 	cat <<'USAGE'
 usage: scripts/teardown.sh <run_id> [options]

@@ -139,8 +139,9 @@ location out of the metadata document teardown copied rather than deriving it
 from the table's name, refuses while the run's scorer is still in the namespace,
 prints the table, the prefix and — with `--artifacts` — the run's prefix, and
 then asks. Nothing is removed without `--yes` or a `y` at the prompt. A run that
-left no such document has no table to reclaim, so `--artifacts` is then the only
-thing to remove and the table is left where it is.
+left no such document — torn down by hand, or not torn down at all — has its
+table looked up in the catalog instead, and a catalog that cannot be reached is
+a refusal rather than an absent table.
 
 ### Publishing a result
 

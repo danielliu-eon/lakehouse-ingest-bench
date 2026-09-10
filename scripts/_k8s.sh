@@ -59,6 +59,12 @@ METADATA_FINAL_FILE=table-metadata.final.json
 # The table's metadata document
 # ---------------------------------------------------------------------------
 
+# What `table-metadata` exits when the catalog holds no such table, as
+# ingest_bench.table.cli.TABLE_ABSENT. Any other non-zero exit is a catalog the
+# caller could not reach, which is a failure and not an absent table — the two
+# drivers that ask have to tell them apart.
+TABLE_ABSENT=3
+
 # k8s_fetch_metadata_document <metadata uri> <local path>
 #
 # The table's current metadata document, stored as the JSON its readers parse.

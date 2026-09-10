@@ -28,7 +28,7 @@ usage: scripts/purge.sh <run_id> [options]
   --site PATH    the site config naming the cluster, the catalog and the runs prefix (default: ./site.yaml)
   --artifacts    also remove the run's own prefix under the runs root — its scores, its publish
                  logs and the metadata document this script read the location out of. For a run
-                 that left no such document it is the only thing there is to remove
+                 whose table the catalog no longer holds it is the only thing there is to remove
   --yes          do not ask; for a purge run from a script
 
 Environment: RUNS_DIR.
@@ -77,32 +77,52 @@ done
 	exit 2
 }
 
-require_host_tools kubectl aws yq jq
+require_host_tools kubectl aws yq jq gzip
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 FACTS="$RUN_DIR/facts.json"
 [[ -f $FACTS ]] || die "no staged run at $RUN_DIR; run this where stage.sh fetched it, or set RUNS_DIR"
 
-# Whether this run has a table to reclaim at all. A run that failed before its
-# table was created left no copied document, and then nothing here knows which
-# prefix under the warehouse would have been the table's — so no prefix under it
-# is touched and the catalog is left as it is: dropping an entry without knowing
-# where its files are would strand them for good. The run's own prefix is still
-# worth reclaiming, which makes `--artifacts` the whole of what a purge can do
-# for such a run; with that flag off there is nothing left to do at all, and the
-# absence is a refusal naming the teardown that would have copied the document.
-METADATA_FINAL="$RUN_DIR/$METADATA_FINAL_FILE"
-HAVE_TABLE=yes
-if [[ ! -f $METADATA_FINAL ]]; then
-	HAVE_TABLE=no
-	[[ $ARTIFACTS == yes ]] ||
-		die "no $METADATA_FINAL, so nothing here knows where $RUN_ID's data is; run scripts/teardown.sh first, or --artifacts to reclaim the run's own prefix alone"
-fi
-
 k8s_read_site
 
 TABLE="$(jq -r .table "$FACTS")"
 [[ -n $TABLE && $TABLE != null ]] || die "$FACTS names no table"
+
+# Read once, because both of the harness commands below take them: the one that
+# asks the catalog whether it still holds the table, and the one that drops it.
+read_catalog_prop_flags
+
+# A teardown copies the table's last metadata document beside the run, and that
+# copy is what says where the table's files are. A run torn down by hand, or
+# never torn down at all, has no such copy — and its absence says nothing about
+# whether the table is there. Reading it as "no table" is what would leave a
+# table holding every byte the run wrote while reporting a purge that
+# succeeded, so the catalog is asked instead.
+#
+# `table-metadata` answers all three cases: the document's URI for a table the
+# catalog holds, TABLE_ABSENT for one it does not, and any other code for a
+# catalog it could not reach — which has to stay a refusal, because "I could
+# not ask" and "there is nothing there" are different answers and only one of
+# them makes removing the run's artifacts safe.
+METADATA_FINAL="$RUN_DIR/$METADATA_FINAL_FILE"
+HAVE_TABLE=yes
+if [[ ! -f $METADATA_FINAL ]]; then
+	log "no $METADATA_FINAL, so the catalog is asked whether it still holds $TABLE"
+	CURRENT_STATUS=0
+	CURRENT="$(harness_local --extra aws table-metadata --table "$TABLE" \
+		${CATALOG_PROP_FLAGS[@]+"${CATALOG_PROP_FLAGS[@]}"})" || CURRENT_STATUS=$?
+	if ((CURRENT_STATUS == 0)); then
+		# Fetched through the same reader a teardown uses, so a compressed
+		# document reaches the `jq` below as the JSON it parses.
+		k8s_fetch_metadata_document "$CURRENT" "$METADATA_FINAL" ||
+			die "could not fetch $CURRENT, which is where the catalog says $TABLE's metadata is; nothing is removed"
+	elif ((CURRENT_STATUS == TABLE_ABSENT)); then
+		HAVE_TABLE=no
+	else
+		die "could not ask the catalog whether it holds $TABLE: table-metadata exited $CURRENT_STATUS; nothing is removed. The lines above are its own error — run scripts/teardown.sh once it is reachable, or fix the catalog properties in $SITE_FILE"
+	fi
+fi
+
 LOCATION=""
 if [[ $HAVE_TABLE == yes ]]; then
 	# The document's own statement of where its table lives, which is what makes
@@ -149,8 +169,7 @@ if [[ $HAVE_TABLE == yes ]]; then
 	printf '  the table    %s\n' "$TABLE"
 	printf '  its files    %s\n' "$LOCATION"
 else
-	printf '  left alone   %s, and every prefix under the warehouse: %s holds no %s\n' \
-		"$TABLE" "$RUN_ID" "$METADATA_FINAL_FILE"
+	printf '  no table:    this catalog holds no %s, so only the prefix above goes\n' "$TABLE"
 fi
 if [[ $ARTIFACTS == yes ]]; then
 	printf '  its run      %s/%s/\n' "$RUNS_ROOT" "$RUN_ID"
@@ -168,7 +187,6 @@ if [[ $HAVE_TABLE == yes ]]; then
 	# The catalog entry first, so nothing can load a table whose files are on
 	# their way out. `drop-table` accepts a table that is already gone, which is
 	# what makes a second purge after a partial one converge.
-	read_catalog_prop_flags
 	log "dropping $TABLE"
 	harness_local --extra aws drop-table --table "$TABLE" ${CATALOG_PROP_FLAGS[@]+"${CATALOG_PROP_FLAGS[@]}"}
 
