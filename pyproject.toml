@@ -5,6 +5,18 @@ description = "Benchmark for streaming ingest from Kafka into Apache Iceberg"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
+# Placeholders, like the two in NOTICE: Apache-2.0 names no licensor of its
+# own, and a package published from this tree has to state one.
+authors = [{ name = "<COPYRIGHT HOLDER>" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: System :: Benchmark",
+]
 dependencies = [
   "numpy>=1.26",
   "pyarrow>=16",
@@ -17,6 +29,13 @@ dependencies = [
   "gcsfs>=2024.6",
   "pyyaml>=6",
 ]
+
+# Placeholders. A published package's metadata points at where the source and
+# the issues are, and this repository's home is not a thing the tree can know.
+[project.urls]
+Homepage = "https://example.invalid/lakehouse-ingest-bench"
+Source = "https://example.invalid/lakehouse-ingest-bench"
+Issues = "https://example.invalid/lakehouse-ingest-bench/issues"
 
 [project.optional-dependencies]
 # Amazon MSK IAM authentication: the token signer, and the credential chain it

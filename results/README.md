@@ -1,5 +1,10 @@
 # Publishing a result
 
+**This directory holds no result yet.** `RESULTS.md` renders its
+"(none published yet)" header until the first `finish.sh --publish` lands one
+here, so an empty `results/` is the expected state of a fresh clone rather than
+a file that failed to arrive.
+
 A result is one `run.json` (`schema_version: 2`) under `results/<engine>/`,
 plus `RESULTS.md` regenerated from every file here. Both arrive together, from
 `scripts/finish.sh <run_id> --publish results/` — never by hand-editing either.
