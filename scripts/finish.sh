@@ -172,6 +172,16 @@ if [[ -n $PUBLISH_DIR ]]; then
 	ENGINE="$(jq -r '.run.engine // empty' "$RUN_DIR/run.json")" ||
 		die "could not read $RUN_DIR/run.json; the line above is jq's own error"
 	[[ -n $ENGINE ]] || die "$RUN_DIR/run.json has no engine; cannot choose the results directory"
+	# Match collect.validate's missing-machine rules before writing a result.
+	MISSING_MACHINE_ROLES="$(jq -r '
+		.run.fleet | if length == 0 then "empty fleet" else
+			.[] | (.machine_type // "") as $machine_type |
+			select($machine_type == "" or $machine_type == "unspecified" or
+				($machine_type | startswith("YOUR_"))) | .role
+		end
+	' "$RUN_DIR/run.json")" || die "could not read fleet machine types from $RUN_DIR/run.json"
+	[[ -z $MISSING_MACHINE_ROLES ]] ||
+		die "cannot publish: set a real machine_type in the run spec for: $MISSING_MACHINE_ROLES"
 	# Create the directory before resolving its absolute path.
 	mkdir -p "$PUBLISH_DIR"
 	PUBLISH_ABS="$(abs_path "$PUBLISH_DIR")"

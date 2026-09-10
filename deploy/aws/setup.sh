@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Provision shared AWS resources: S3, ECR, MSK, IAM, and Kubernetes identities.
+# Provision shared AWS resources, including MSK only for managed Kafka sites.
 # Check existing resources before creation so interrupted setup can be rerun.
 # The EKS cluster is managed separately; see eksctl-cluster.example.yaml.
 set -euo pipefail
@@ -13,20 +13,27 @@ source "$AWS_DIR/_resources.sh"
 
 usage() {
 	cat <<'USAGE'
-usage: deploy/aws/setup.sh [--write-site PATH]
+usage: deploy/aws/setup.sh [--site PATH] [--write-site PATH]
 
+  --site PATH         read kafka.deployment from PATH (default: SITE_FILE or ./site.yaml)
   --write-site PATH   write site.yaml to PATH using the printed settings;
                       fail if PATH already exists
 
-Configure this script through environment variables. AWS_REGION and
+The site must explicitly set kafka.deployment: managed, in-cluster, or external.
+Configure AWS resources through environment variables. AWS_REGION and
 CLUSTER_NAME are required. See Environment in deploy/aws/README.md for
 all variables and defaults.
 USAGE
 }
 
 WRITE_SITE=""
+SITE_FILE="${SITE_FILE:-./site.yaml}"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--site)
+		SITE_FILE="${2:?--site needs a path}"
+		shift 2
+		;;
 	--write-site)
 		WRITE_SITE="${2:?--write-site needs a path}"
 		shift 2
@@ -42,6 +49,18 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+# Refuse an overwrite before provisioning resources.
+[[ -z $WRITE_SITE || ! -e $WRITE_SITE ]] ||
+	die "$WRITE_SITE already exists; --write-site cannot overwrite it. Choose another path or move the existing file"
+
+read_deployment_site
+if [[ $KAFKA_DEPLOYMENT == external && -n $WRITE_SITE ]]; then
+	yq -e '(.kafka.bootstrap_servers | tag == "!!str") and (.kafka.bootstrap_servers != "") and
+		(.catalog.props | tag == "!!map") and
+		([.kafka, .catalog] | to_json | contains("YOUR_") | not)' "$SITE_FILE" >/dev/null ||
+		die "$SITE_FILE must supply kafka.bootstrap_servers and a catalog.props mapping without YOUR_ placeholders before --write-site"
+fi
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -92,19 +111,16 @@ SPARK_SERVICE_ACCOUNT=ingest-bench-spark
 
 ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink lakehouse-ingest-bench/spark"
 
-[[ $MSK_BROKERS =~ ^[1-9][0-9]*$ ]] || die "MSK_BROKERS must be a positive integer, got '$MSK_BROKERS'"
-[[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
-# Reject an existing output path before the potentially long MSK wait.
-[[ -z $WRITE_SITE || ! -e $WRITE_SITE ]] ||
-	die "$WRITE_SITE already exists; --write-site cannot overwrite it. Choose another path or move the existing file"
+if [[ $KAFKA_DEPLOYMENT == managed ]]; then
+	[[ $MSK_BROKERS =~ ^[1-9][0-9]*$ ]] || die "MSK_BROKERS must be a positive integer, got '$MSK_BROKERS'"
+	[[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
+fi
 
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 
 require_host_tools aws kubectl helm jq envsubst
-# Only --write-site needs yq to validate the generated configuration.
-[[ -z $WRITE_SITE ]] || require_host_tools yq
 
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"; then
 	die "aws sts get-caller-identity failed: $ACCOUNT — sign in first (aws configure, or aws sso login --profile ...)"
@@ -190,105 +206,110 @@ done
 # MSK
 # ---------------------------------------------------------------------------
 
-# Place brokers in private EKS subnets, one per availability zone. Select
-# as many zones as brokers to satisfy MSK's broker/zone count constraint.
-SUBNET_IDS="$(jq -r '.cluster.resourcesVpcConfig.subnetIds | join(" ")' <<<"$CLUSTER_JSON")"
-# shellcheck disable=SC2086  # a deliberate expansion: one --subnet-ids argument per id
-SUBNETS_JSON="$(aws ec2 describe-subnets --subnet-ids $SUBNET_IDS --output json)"
-PRIVATE_SUBNETS="$(jq -r '
-	[.Subnets[] | select(.MapPublicIpOnLaunch == false)]
-	| group_by(.AvailabilityZone) | map(.[0]) | sort_by(.AvailabilityZone)
-	| map(.SubnetId) | join(" ")' <<<"$SUBNETS_JSON")"
+MSK_ARN="" MSK_TOPIC_ARN="" MSK_GROUP_ARN=""
+if [[ $KAFKA_DEPLOYMENT == managed ]]; then
+	# Place brokers in private EKS subnets, one per availability zone. Select
+	# as many zones as brokers to satisfy MSK's broker/zone count constraint.
+	SUBNET_IDS="$(jq -r '.cluster.resourcesVpcConfig.subnetIds | join(" ")' <<<"$CLUSTER_JSON")"
+	# shellcheck disable=SC2086  # a deliberate expansion: one --subnet-ids argument per id
+	SUBNETS_JSON="$(aws ec2 describe-subnets --subnet-ids $SUBNET_IDS --output json)"
+	PRIVATE_SUBNETS="$(jq -r '
+		[.Subnets[] | select(.MapPublicIpOnLaunch == false)]
+		| group_by(.AvailabilityZone) | map(.[0]) | sort_by(.AvailabilityZone)
+		| map(.SubnetId) | join(" ")' <<<"$SUBNETS_JSON")"
 
-MSK_SUBNETS=""
-MSK_SUBNET_COUNT=0
-# shellcheck disable=SC2086  # a deliberate expansion: the ids are space separated
-for subnet in $PRIVATE_SUBNETS; do
-	if ((MSK_SUBNET_COUNT >= MSK_BROKERS)); then
-		break
-	fi
-	MSK_SUBNETS="${MSK_SUBNETS:+$MSK_SUBNETS }$subnet"
-	MSK_SUBNET_COUNT=$((MSK_SUBNET_COUNT + 1))
-done
-if ((MSK_SUBNET_COUNT < MSK_BROKERS)); then
-	die "MSK_BROKERS is $MSK_BROKERS but $CLUSTER_NAME has private subnets in only $MSK_SUBNET_COUNT availability zone(s) ($PRIVATE_SUBNETS).
-     MSK places one broker per subnet, so lower MSK_BROKERS or give the VPC a private subnet in another zone."
-fi
-log "msk subnets: $MSK_SUBNETS"
-
-MSK_SG_NAME="$MSK_NAME-msk"
-MSK_SG_ID="$(aws ec2 describe-security-groups \
-	--filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=$MSK_SG_NAME" \
-	--query 'SecurityGroups[0].GroupId' --output text)"
-if [[ -z $MSK_SG_ID || $MSK_SG_ID == None ]]; then
-	log "creating security group $MSK_SG_NAME in $VPC_ID"
-	MSK_SG_ID="$(aws ec2 create-security-group --group-name "$MSK_SG_NAME" \
-		--description "MSK brokers for lakehouse-ingest-bench" --vpc-id "$VPC_ID" \
-		--tag-specifications "ResourceType=security-group,Tags=[{Key=$TAG_KEY,Value=true}]" \
-		--query GroupId --output text)"
-fi
-log "msk security group $MSK_SG_ID"
-
-# Allow all VPC CIDRs, including secondary pod ranges. CIDR rules cover
-# managed, self-managed, and autoscaled nodes regardless of security group.
-VPC_CIDRS="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" \
-	--query 'Vpcs[0].CidrBlockAssociationSet[?CidrBlockState.State==`associated`].CidrBlock' --output text)"
-[[ -n $VPC_CIDRS ]] || die "$VPC_ID reports no associated CIDR block; nothing to open $MSK_IAM_PORT to"
-# shellcheck disable=SC2086  # a deliberate expansion: --output text tab-separates the CIDRs
-for cidr in $VPC_CIDRS; do
-	if AUTHORIZE_ERROR="$(aws ec2 authorize-security-group-ingress --group-id "$MSK_SG_ID" \
-		--protocol tcp --port "$MSK_IAM_PORT" --cidr "$cidr" 2>&1)"; then
-		log "opened $MSK_IAM_PORT/tcp on $MSK_SG_ID to $cidr"
-	else
-		case "$AUTHORIZE_ERROR" in
-		*InvalidPermission.Duplicate*) log "$MSK_IAM_PORT/tcp on $MSK_SG_ID is already open to $cidr" ;;
-		*) die "could not open $MSK_IAM_PORT/tcp on $MSK_SG_ID to $cidr: $AUTHORIZE_ERROR" ;;
-		esac
-	fi
-done
-
-# The API name filter is a prefix match; also require the exact cluster name.
-MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
-	--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
-if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
-	if [[ -z ${MSK_KAFKA_VERSION:-} ]]; then
-		if ! KAFKA_VERSIONS="$(aws kafka list-kafka-versions \
-			--query "KafkaVersions[?Status=='ACTIVE'].Version" --output text 2>&1)"; then
-			die "aws kafka list-kafka-versions failed: $KAFKA_VERSIONS — set MSK_KAFKA_VERSION to choose one yourself"
+	MSK_SUBNETS=""
+	MSK_SUBNET_COUNT=0
+	# shellcheck disable=SC2086  # a deliberate expansion: the ids are space separated
+	for subnet in $PRIVATE_SUBNETS; do
+		if ((MSK_SUBNET_COUNT >= MSK_BROKERS)); then
+			break
 		fi
-		choose_kafka_version "$KAFKA_VERSIONS"
-		log "kafka version $MSK_KAFKA_VERSION (newest ACTIVE 3.x)"
-	else
-		log "kafka version $MSK_KAFKA_VERSION (from MSK_KAFKA_VERSION)"
+		MSK_SUBNETS="${MSK_SUBNETS:+$MSK_SUBNETS }$subnet"
+		MSK_SUBNET_COUNT=$((MSK_SUBNET_COUNT + 1))
+	done
+	if ((MSK_SUBNET_COUNT < MSK_BROKERS)); then
+		die "MSK_BROKERS is $MSK_BROKERS but $CLUSTER_NAME has private subnets in only $MSK_SUBNET_COUNT availability zone(s) ($PRIVATE_SUBNETS).
+	     MSK places one broker per subnet, so lower MSK_BROKERS or give the VPC a private subnet in another zone."
 	fi
-	BROKER_GROUP="$(jq -nc \
-		--arg type "$MSK_BROKER_TYPE" --arg sg "$MSK_SG_ID" \
-		--arg subnets "$MSK_SUBNETS" --argjson volume "$MSK_VOLUME_GIB" '{
-			InstanceType: $type,
-			ClientSubnets: ($subnets | split(" ")),
-			SecurityGroups: [$sg],
-			StorageInfo: {EbsStorageInfo: {VolumeSize: $volume}}
-		}')"
-	log "creating MSK cluster $MSK_NAME ($MSK_BROKERS x $MSK_BROKER_TYPE, ${MSK_VOLUME_GIB} GiB each)"
-	# Enable IAM authentication only; disable the unauthenticated listener.
-	MSK_ARN="$(aws kafka create-cluster \
-		--cluster-name "$MSK_NAME" \
-		--kafka-version "$MSK_KAFKA_VERSION" \
-		--number-of-broker-nodes "$MSK_BROKERS" \
-		--broker-node-group-info "$BROKER_GROUP" \
-		--client-authentication '{"Sasl":{"Iam":{"Enabled":true}},"Unauthenticated":{"Enabled":false}}' \
-		--encryption-info '{"EncryptionInTransit":{"ClientBroker":"TLS","InCluster":true}}' \
-		--tags "$TAG_KEY=true" \
-		--query ClusterArn --output text)"
-else
-	log "MSK cluster $MSK_NAME exists"
-	grow_broker_volume
-fi
-log "msk cluster $MSK_ARN"
+	log "msk subnets: $MSK_SUBNETS"
 
-# Derive topic and group ARNs from the cluster ARN to retain its UUID scope.
-MSK_TOPIC_ARN="${MSK_ARN/:cluster/:topic}/*"
-MSK_GROUP_ARN="${MSK_ARN/:cluster/:group}/*"
+	MSK_SG_NAME="$MSK_NAME-msk"
+	MSK_SG_ID="$(aws ec2 describe-security-groups \
+		--filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=$MSK_SG_NAME" \
+		--query 'SecurityGroups[0].GroupId' --output text)"
+	if [[ -z $MSK_SG_ID || $MSK_SG_ID == None ]]; then
+		log "creating security group $MSK_SG_NAME in $VPC_ID"
+		MSK_SG_ID="$(aws ec2 create-security-group --group-name "$MSK_SG_NAME" \
+			--description "MSK brokers for lakehouse-ingest-bench" --vpc-id "$VPC_ID" \
+			--tag-specifications "ResourceType=security-group,Tags=[{Key=$TAG_KEY,Value=true}]" \
+			--query GroupId --output text)"
+	fi
+	log "msk security group $MSK_SG_ID"
+
+	# Allow all VPC CIDRs, including secondary pod ranges. CIDR rules cover
+	# managed, self-managed, and autoscaled nodes regardless of security group.
+	VPC_CIDRS="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" \
+		--query 'Vpcs[0].CidrBlockAssociationSet[?CidrBlockState.State==`associated`].CidrBlock' --output text)"
+	[[ -n $VPC_CIDRS ]] || die "$VPC_ID reports no associated CIDR block; nothing to open $MSK_IAM_PORT to"
+	# shellcheck disable=SC2086  # a deliberate expansion: --output text tab-separates the CIDRs
+	for cidr in $VPC_CIDRS; do
+		if AUTHORIZE_ERROR="$(aws ec2 authorize-security-group-ingress --group-id "$MSK_SG_ID" \
+			--protocol tcp --port "$MSK_IAM_PORT" --cidr "$cidr" 2>&1)"; then
+			log "opened $MSK_IAM_PORT/tcp on $MSK_SG_ID to $cidr"
+		else
+			case "$AUTHORIZE_ERROR" in
+			*InvalidPermission.Duplicate*) log "$MSK_IAM_PORT/tcp on $MSK_SG_ID is already open to $cidr" ;;
+			*) die "could not open $MSK_IAM_PORT/tcp on $MSK_SG_ID to $cidr: $AUTHORIZE_ERROR" ;;
+			esac
+		fi
+	done
+
+	# The API name filter is a prefix match; also require the exact cluster name.
+	MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
+		--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
+	if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
+		if [[ -z ${MSK_KAFKA_VERSION:-} ]]; then
+			if ! KAFKA_VERSIONS="$(aws kafka list-kafka-versions \
+				--query "KafkaVersions[?Status=='ACTIVE'].Version" --output text 2>&1)"; then
+				die "aws kafka list-kafka-versions failed: $KAFKA_VERSIONS — set MSK_KAFKA_VERSION to choose one yourself"
+			fi
+			choose_kafka_version "$KAFKA_VERSIONS"
+			log "kafka version $MSK_KAFKA_VERSION (newest ACTIVE 3.x)"
+		else
+			log "kafka version $MSK_KAFKA_VERSION (from MSK_KAFKA_VERSION)"
+		fi
+		BROKER_GROUP="$(jq -nc \
+			--arg type "$MSK_BROKER_TYPE" --arg sg "$MSK_SG_ID" \
+			--arg subnets "$MSK_SUBNETS" --argjson volume "$MSK_VOLUME_GIB" '{
+				InstanceType: $type,
+				ClientSubnets: ($subnets | split(" ")),
+				SecurityGroups: [$sg],
+				StorageInfo: {EbsStorageInfo: {VolumeSize: $volume}}
+			}')"
+		log "creating MSK cluster $MSK_NAME ($MSK_BROKERS x $MSK_BROKER_TYPE, ${MSK_VOLUME_GIB} GiB each)"
+		# Enable IAM authentication only; disable the unauthenticated listener.
+		MSK_ARN="$(aws kafka create-cluster \
+			--cluster-name "$MSK_NAME" \
+			--kafka-version "$MSK_KAFKA_VERSION" \
+			--number-of-broker-nodes "$MSK_BROKERS" \
+			--broker-node-group-info "$BROKER_GROUP" \
+			--client-authentication '{"Sasl":{"Iam":{"Enabled":true}},"Unauthenticated":{"Enabled":false}}' \
+			--encryption-info '{"EncryptionInTransit":{"ClientBroker":"TLS","InCluster":true}}' \
+			--tags "$TAG_KEY=true" \
+			--query ClusterArn --output text)"
+	else
+		log "MSK cluster $MSK_NAME exists"
+		grow_broker_volume
+	fi
+	log "msk cluster $MSK_ARN"
+
+	# Derive topic and group ARNs from the cluster ARN to retain its UUID scope.
+	MSK_TOPIC_ARN="${MSK_ARN/:cluster/:topic}/*"
+	MSK_GROUP_ARN="${MSK_ARN/:cluster/:group}/*"
+else
+	log "skipping MSK and its security group (kafka.deployment=$KAFKA_DEPLOYMENT)"
+fi
 
 # ---------------------------------------------------------------------------
 # IAM
@@ -301,6 +322,12 @@ export ACCOUNT REGION BUCKET MSK_ARN MSK_TOPIC_ARN MSK_GROUP_ARN
 PLACEHOLDERS='${ACCOUNT} ${REGION} ${BUCKET} ${MSK_ARN} ${MSK_TOPIC_ARN} ${MSK_GROUP_ARN}'
 TRUST_POLICY="$(envsubst "$PLACEHOLDERS" <"$AWS_DIR/iam/trust.json")"
 HARNESS_POLICY="$(envsubst "$PLACEHOLDERS" <"$AWS_DIR/iam/harness-policy.json")"
+if [[ $KAFKA_DEPLOYMENT != managed ]]; then
+	HARNESS_POLICY="$(jq '.Statement |= map(select(.Sid | startswith("Msk") | not))' <<<"$HARNESS_POLICY")"
+fi
+if [[ $KAFKA_DEPLOYMENT == in-cluster ]]; then
+	HARNESS_POLICY="$(jq '.Statement |= map(select(.Sid != "GlueIcebergCatalog"))' <<<"$HARNESS_POLICY")"
+fi
 
 if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
 	log "iam role $ROLE_NAME exists; refreshing its trust policy"
@@ -363,47 +390,64 @@ fi
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
 
-MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
-[[ $MSK_STATE == ACTIVE ]] || log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"
-waited=0
-while [[ $MSK_STATE != ACTIVE ]]; do
-	case "$MSK_STATE" in
-	CREATING | UPDATING | MAINTENANCE) ;;
-	*) die "MSK cluster $MSK_NAME is $MSK_STATE; inspect the cluster in the MSK console before retrying" ;;
-	esac
-	if ((waited >= MSK_ACTIVE_WAIT_S)); then
-		die "$MSK_NAME is still $MSK_STATE after ${waited}s; re-run this script to keep waiting, or raise MSK_ACTIVE_WAIT_S"
-	fi
-	if ((waited % 300 == 0)); then
-		log "  ... $MSK_NAME is $MSK_STATE (${waited}s)"
-	fi
-	sleep 30
-	waited=$((waited + 30))
+if [[ $KAFKA_DEPLOYMENT == managed ]]; then
 	MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
-done
+	[[ $MSK_STATE == ACTIVE ]] || log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"
+	waited=0
+	while [[ $MSK_STATE != ACTIVE ]]; do
+		case "$MSK_STATE" in
+		CREATING | UPDATING | MAINTENANCE) ;;
+		*) die "MSK cluster $MSK_NAME is $MSK_STATE; inspect the cluster in the MSK console before retrying" ;;
+		esac
+		if ((waited >= MSK_ACTIVE_WAIT_S)); then
+			die "$MSK_NAME is still $MSK_STATE after ${waited}s; re-run this script to keep waiting, or raise MSK_ACTIVE_WAIT_S"
+		fi
+		if ((waited % 300 == 0)); then
+			log "  ... $MSK_NAME is $MSK_STATE (${waited}s)"
+		fi
+		sleep 30
+		waited=$((waited + 30))
+		MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
+	done
 
-BOOTSTRAP="$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \
-	--query BootstrapBrokerStringSaslIam --output text)"
+	BOOTSTRAP="$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \
+		--query BootstrapBrokerStringSaslIam --output text)"
+elif [[ $KAFKA_DEPLOYMENT == in-cluster ]]; then
+	BOOTSTRAP="ingest-bench-kafka-bootstrap.$NAMESPACE.svc:9092"
+else
+	BOOTSTRAP="$(yq -r '.kafka.bootstrap_servers' "$SITE_FILE")"
+fi
 
 if [[ -n $WRITE_SITE ]]; then
 	log "resources are ready. Writing $WRITE_SITE with these values:"
 else
-	log "setup complete. Copy site.aws.example.yaml to site.yaml and set:"
+	log "setup complete. Update $SITE_FILE with these shared resource settings:"
 fi
+case "$KAFKA_DEPLOYMENT" in
+managed)
+	printf '  kafka.security.aws.region:      %s\n' "$AWS_REGION"
+	printf '  catalog.props.uri:              https://glue.%s.amazonaws.com/iceberg\n' "$AWS_REGION"
+	printf '  catalog.props.warehouse:        "%s"\n' "$ACCOUNT"
+	printf '  catalog.props.rest.signing-region / s3.region: %s\n' "$AWS_REGION"
+	;;
+in-cluster)
+	printf '  kafka.security:                {}\n'
+	printf '  catalog.props.uri:              http://lakekeeper.%s.svc:8181/catalog\n' "$NAMESPACE"
+	printf '  catalog.props.warehouse:        ingest-bench\n'
+	printf '  catalog.props.s3.region:        %s\n' "$AWS_REGION"
+	;;
+external) log "preserving Kafka security and catalog settings from $SITE_FILE" ;;
+esac
 cat <<SITE
   kafka.bootstrap_servers:        $BOOTSTRAP
-  kafka.security.aws.region:      $AWS_REGION
   corpus_root / runs_root / warehouse: s3://$BUCKET/{corpus,runs,warehouse}
-  catalog.props.uri:              https://glue.$AWS_REGION.amazonaws.com/iceberg
-  catalog.props.warehouse:        "$ACCOUNT"
-  catalog.props.rest.signing-region / s3.region: $AWS_REGION
   kubernetes.context:             $KUBE_CONTEXT
   kubernetes.namespace:           $NAMESPACE
   kubernetes.registry:            $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
   kubernetes.aws_region:          $AWS_REGION
 SITE
 
-if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
+if [[ $WITH_SCHEMA_REGISTRY == true && $KAFKA_DEPLOYMENT != external ]]; then
 	cat <<SITE
   kafka.schema_registry.url:      http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7
 SITE
@@ -412,4 +456,6 @@ if [[ -n $WRITE_SITE ]]; then
 	write_site "$WRITE_SITE"
 	log "fill in the pricing block in $WRITE_SITE before publishing results. See Cost in docs/methodology.md."
 fi
-log "MSK incurs hourly charges while idle. Run deploy/aws/teardown.sh when finished."
+if [[ $KAFKA_DEPLOYMENT == managed ]]; then
+	log "MSK incurs hourly charges while idle. Run deploy/aws/teardown.sh when finished."
+fi

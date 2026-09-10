@@ -88,6 +88,7 @@ Pass site-specific values through environment variables:
 | `CLUSTER_NAME` | *required* | The EKS cluster's name |
 | `KUBE_CONTEXT` | `$CLUSTER_NAME` | The kubeconfig context. Written with `aws eks update-kubeconfig --alias` if it is missing |
 | `BUCKET` | `lakehouse-ingest-bench-<account id>` | Bucket for `corpus/`, `runs/`, and `warehouse/`; the account ID helps avoid global name collisions |
+| `SITE_FILE` | `./site.yaml` | Site configuration read by setup and teardown; `--site PATH` overrides it |
 | `MSK_NAME` | `lakehouse-ingest-bench` | MSK cluster name; its security group is `<name>-msk` |
 | `MSK_BROKER_TYPE` | `kafka.m5.large` | Broker instance type |
 | `MSK_BROKERS` | `2` | Broker count; requires this many availability zones with private subnets |
@@ -116,15 +117,16 @@ Setup then provisions:
   not overwrite tags or change versioning on an unrelated bucket.
 - **ECR:** the `lakehouse-ingest-bench/harness`, `lakehouse-ingest-bench/flink`,
   and `lakehouse-ingest-bench/spark` repositories.
-- **MSK:** a provisioned cluster in the EKS VPC's private subnets, with one
-  broker per availability zone, IAM authentication, and TLS. Its security
-  group allows port 9098 from all VPC CIDRs, covering node and pod ranges;
-  IAM controls client authorization.
+- **MSK (only for `kafka.deployment: managed`):** a provisioned cluster in the
+  EKS VPC's private subnets, with one broker per availability zone, IAM
+  authentication, and TLS. Its security group allows port 9098 from all VPC
+  CIDRs, covering node and pod ranges; IAM controls client authorization.
 - **IAM:** the `lakehouse-ingest-bench-harness` role, trusted by
   `pods.eks.amazonaws.com` for `sts:AssumeRole` and `sts:TagSession`. Its inline
-  policy covers the bucket's three prefixes, the `ingest_bench` Glue database,
-  and this MSK cluster's topics and consumer groups. Pod Identity associations
-  bind all three benchmark service accounts to the role.
+  policy covers the bucket's three prefixes, the `ingest_bench` Glue database
+  except for in-cluster sites, and, for managed Kafka, the MSK cluster's topics
+  and consumer groups. Pod Identity binds unassociated benchmark service
+  accounts to the role; existing bindings remain unchanged.
 - **Kubernetes:** the namespace, harness/Flink/Spark service accounts, and
   engine RBAC. The Spark operator is installed after the namespace because its
   chart creates a Role there. It watches `spark.jobNamespaces={$NAMESPACE}`
@@ -134,20 +136,28 @@ Setup then provisions:
 - **Optional registry:** with `WITH_SCHEMA_REGISTRY=true`, an in-memory
   Apicurio Deployment and Service, followed by a rollout wait.
 
-Setup prints the values needed for `site.yaml`. `--write-site PATH` writes a
-complete configuration matching `site.aws.example.yaml`, with pricing left at
-zero for you to fill in. It rejects an existing path before creating resources.
+Setup and teardown read `kafka.deployment` from `--site PATH`, defaulting to
+`SITE_FILE` and then `./site.yaml`, before contacting AWS. The value is required
+and must be `managed`, `in-cluster`, or `external`. Only `managed` permits MSK
+and its security-group operations. The other modes omit MSK permissions and
+readiness waits. Environment variables cannot override this choice.
+
+`--write-site PATH` writes a new configuration and refuses to overwrite an
+existing file. On first setup, use the matching example as input. Generated
+managed sites use MSK and Glue; in-cluster sites use the Kafka and Lakekeeper
+service addresses. External sites preserve the input Kafka and catalog blocks;
+replace all `YOUR_` placeholders in those blocks before using `--write-site`.
+Generated prices remain zero until you fill them in.
 
 ```bash
 export AWS_REGION=... CLUSTER_NAME=...
-deploy/aws/setup.sh --write-site site.yaml # shared infrastructure and site configuration
+deploy/aws/setup.sh --site site.aws.example.yaml --write-site site.yaml
 scripts/push-images.sh                    # harness and engine images, tagged with this commit
 scripts/gen-corpus.sh smoke --shards 4     # generate a corpus in the bucket
 ```
 
 Fill in `site.yaml` pricing before publishing results; validation rejects zero
-prices. Without `--write-site`, copy `site.aws.example.yaml` to `site.yaml` and
-fill it using the printed values.
+prices. Without `--write-site`, update your input site using the printed values.
 
 `push-images.sh` builds all images for `linux/amd64` by default. Use
 `--platform linux/arm64` or a comma-separated platform list to change this.
@@ -164,13 +174,28 @@ Rerunning setup reuses the cluster and can grow broker storage when requested.
 ## Remove shared resources
 
 ```bash
-deploy/aws/teardown.sh              # namespace, identity, MSK, and security group
+deploy/aws/teardown.sh              # namespace and identity; MSK when managed
 deploy/aws/teardown.sh --all        # also ECR, both operators, and the bucket
 deploy/aws/teardown.sh --all --yes  # same cleanup without the bucket prompt
 ```
 
-Cleanup follows dependency order: stop workloads, remove their identity,
-delete MSK, then remove its security group after network interfaces release it.
+Teardown stops before contacting AWS if the site is missing or lacks a valid
+`kafka.deployment`. If the original file is unavailable, select the example
+matching the deployment you are removing:
+
+```bash
+deploy/aws/teardown.sh --site site.aws.example.yaml  # managed Kafka: includes MSK
+deploy/aws/teardown.sh --site site.k8s.example.yaml  # in-cluster Kafka: skips MSK
+```
+
+Run only the matching command. Teardown reads only the deployment mode from the
+site; keep `AWS_REGION`, `CLUSTER_NAME`, and any resource-name overrides set to
+their original values. For external Kafka, use a file containing
+`kafka: {deployment: external}`. No completed site configuration is required.
+
+Cleanup follows dependency order: stop workloads and remove their identity.
+For managed Kafka, delete MSK, then remove its security group after network
+interfaces release it.
 Without `--all`, the bucket, images, and operators remain available for another
 campaign or other workloads.
 
@@ -205,11 +230,28 @@ Run these commands yourself; setup and teardown do not invoke `eksctl`.
 ## In-cluster AWS resources
 
 The [in-cluster stack](../k8s/stack/README.md) uses Kafka and Lakekeeper in
-place of MSK and Glue. With `CLOUD=aws`, `_stack_hooks.sh` provisions the
-`lakehouse-ingest-bench-stack` role for the bucket's three prefixes and binds
-it through Pod Identity to the run and catalog accounts. It also creates a gp3
-StorageClass and requires the EBS CSI driver.
+place of MSK and Glue. Its AWS hooks create a bucket-scoped
+`lakehouse-ingest-bench-stack` role for the catalog and any run service accounts
+that are not already associated. They also create separate gp3 StorageClasses
+for Kafka and catalog Postgres and require the EBS CSI driver.
 
 Use `eksctl-kafka-nodegroup.example.yaml` for dedicated broker nodes. The AWS
-setup above supplies the bucket and image registry, but also creates an MSK
-cluster that this deployment does not use. Remove that unused MSK cluster.
+setup supplies the bucket, image registry, and engine operators without MSK:
+
+```bash
+deploy/aws/setup.sh --site site.k8s.example.yaml --write-site site.yaml
+CLOUD=aws deploy/k8s/stack/setup.sh
+```
+
+The generated Kafka and Lakekeeper addresses match the stack defaults. Use the
+same namespace in both steps so the Spark operator watches the run namespace.
+Both teardown scripts read the same site; stack commands require
+`kafka.deployment: in-cluster`.
+
+An existing MSK cluster is not removed when the site selects `in-cluster`. If an
+earlier setup created one that no run uses, delete the cluster named by
+`MSK_NAME`, wait for its network interfaces to disappear, then delete its tagged
+`<MSK_NAME>-msk` security group. Rerunning shared setup with the in-cluster site
+removes the `MskCluster`, `MskTopics`, `MskGroups`, and `GlueIcebergCatalog`
+statements from the harness role. Do not use shared teardown for selective MSK
+cleanup: it also removes the run namespace and identities.

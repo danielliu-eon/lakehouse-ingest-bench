@@ -14,9 +14,12 @@ source "$REPO_ROOT/scripts/_k8s.sh"
 
 usage() {
 	cat <<'USAGE'
-usage: deploy/k8s/stack/setup.sh
+usage: deploy/k8s/stack/setup.sh [--site PATH]
 
-  This script takes no arguments. Configure it through environment variables:
+  --site PATH  read kafka.deployment (default: SITE_FILE or ./site.yaml)
+
+  The site must set kafka.deployment: in-cluster. Configure resources through
+  environment variables:
   CLOUD=aws selects AWS; KUBE_CONTEXT selects the cluster; NAMESPACE selects
   the stack and run namespace; BUCKET selects the storage bucket.
 
@@ -27,8 +30,13 @@ usage: deploy/k8s/stack/setup.sh
 USAGE
 }
 
+SITE_FILE="${SITE_FILE:-./site.yaml}"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--site)
+		SITE_FILE="${2:?--site needs a path}"
+		shift 2
+		;;
 	-h | --help)
 		usage
 		exit 0
@@ -104,6 +112,8 @@ SPARK_OPERATOR_NAMESPACE=spark-operator
 require_host_tools kubectl helm helmfile yq jq curl envsubst
 # shellcheck source=deploy/aws/_stack_hooks.sh
 source "$REPO_ROOT/deploy/$CLOUD/_stack_hooks.sh"
+read_deployment_site
+[[ $KAFKA_DEPLOYMENT == in-cluster ]] || die "$SITE_FILE must set kafka.deployment: in-cluster for stack setup.sh"
 
 if ! NODES="$(kubectl --context "$KUBE_CONTEXT" get nodes -o name 2>&1)"; then
 	die "kubectl --context $KUBE_CONTEXT cannot reach the cluster: $NODES"
@@ -177,7 +187,7 @@ fi
 # ---------------------------------------------------------------------------
 
 stack_catalog_settings
-export STRIMZI_VERSION LAKEKEEPER_CHART_VERSION KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_STORAGE_CLASS KAFKA_CPU KAFKA_MEM_GI KAFKA_JVM_HEAP KAFKA_NODE_SELECTOR KAFKA_TOLERATIONS CATALOG_NODE_SELECTOR CATALOG_TOLERATIONS CATALOG_SECRET STACK_CATALOG_CONFIG_JSON STACK_CATALOG_ENV_JSON
+export CATALOG_STORAGE_CLASS STRIMZI_VERSION LAKEKEEPER_CHART_VERSION KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_STORAGE_CLASS KAFKA_CPU KAFKA_MEM_GI KAFKA_JVM_HEAP KAFKA_NODE_SELECTOR KAFKA_TOLERATIONS CATALOG_NODE_SELECTOR CATALOG_TOLERATIONS CATALOG_SECRET STACK_CATALOG_CONFIG_JSON STACK_CATALOG_ENV_JSON
 log "helmfile sync: strimzi $STRIMZI_VERSION, kafka/$KAFKA_NAME ($KAFKA_BROKERS x ${KAFKA_VOLUME_GI}Gi on $KAFKA_STORAGE_CLASS), lakekeeper chart $LAKEKEEPER_CHART_VERSION"
 # Use sync for install-or-upgrade without requiring the Helm diff plugin.
 helmfile --file "$STACK_DIR/helmfile.yaml.gotmpl" --kube-context "$KUBE_CONTEXT" sync
@@ -258,7 +268,7 @@ fi
 # What to put in site.yaml
 # ---------------------------------------------------------------------------
 
-log "setup complete. Copy site.k8s.example.yaml to site.yaml and set:"
+log "setup complete. Update $SITE_FILE with these stack settings:"
 # Printed roots and region are AWS-specific, matching the supported cloud hook.
 cat <<SITE
   kafka.bootstrap_servers:        $KAFKA_NAME-kafka-bootstrap.$NAMESPACE.svc:9092

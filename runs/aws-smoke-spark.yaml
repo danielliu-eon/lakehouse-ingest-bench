@@ -12,6 +12,8 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 spark:
+  # Set the actual node instance type before publishing; this does not select nodes.
+  # machine_type: YOUR_MACHINE_TYPE
   # Four executor cores, matching local smoke. Cluster executors have separate JVMs;
   # allocate 4 GiB each for decoding and buffering.
   executors: 2

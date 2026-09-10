@@ -20,6 +20,20 @@ die() {
 	exit 1
 }
 
+# Require an explicit deployment before provisioning or deleting resources.
+read_deployment_site() {
+	[[ -f $SITE_FILE ]] ||
+		die "site configuration $SITE_FILE does not exist; pass --site with a configuration that sets kafka.deployment (managed, in-cluster, or external)"
+	require_host_tools yq
+	if ! KAFKA_DEPLOYMENT="$(yq -r '.kafka.deployment // ""' "$SITE_FILE" 2>&1)"; then
+		die "could not read kafka.deployment from $SITE_FILE: $KAFKA_DEPLOYMENT"
+	fi
+	case "$KAFKA_DEPLOYMENT" in
+	managed | in-cluster | external) ;;
+	*) die "$SITE_FILE must set kafka.deployment to managed, in-cluster, or external; use --site to select another site" ;;
+	esac
+}
+
 # Enable all profiles so every service is addressable; callers explicitly name what to
 # start. Discover engine profiles from their Compose files so adding an engine needs no
 # change here.

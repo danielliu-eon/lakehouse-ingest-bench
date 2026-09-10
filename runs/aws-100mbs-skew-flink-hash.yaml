@@ -20,6 +20,8 @@ scoring:
   freshness_bound_s: 180
   warmup_s: 120
 flink:
+  # Set the actual node instance type before publishing; this does not select nodes.
+  machine_type: YOUR_MACHINE_TYPE
   taskmanagers: 8
   slots: 4
   tm_cpu: 2

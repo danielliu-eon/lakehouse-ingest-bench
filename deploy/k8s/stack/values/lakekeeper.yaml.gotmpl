@@ -49,6 +49,6 @@ postgresql:
       secretKey: pgPassword
   storage:
     requestedSize: 10Gi
-    className: {{ requiredEnv "KAFKA_STORAGE_CLASS" }}
+    className: {{ requiredEnv "CATALOG_STORAGE_CLASS" }}
   nodeSelector: {{ requiredEnv "CATALOG_NODE_SELECTOR" }}
   tolerations: {{ requiredEnv "CATALOG_TOLERATIONS" }}

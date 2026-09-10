@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
+import pytest
 
 from ingest_bench.corpus.generate import BatchRecord
 from ingest_bench.scorer import exactness, freshness, gate, keepup, tally
@@ -239,3 +240,24 @@ def test_an_empty_newest_window_is_void_however_the_bound_was_raised() -> None:
         stale_after_s=600,
     )
     assert verdict[0] == "VOID" and "last 10s" in verdict[1], verdict
+
+
+@pytest.mark.parametrize("age_s, verdict", [(1, "PASS"), (61, "VOID")])
+def test_gate_describes_waiting_for_epoch_without_hiding_stale_samples(age_s: int, verdict: str) -> None:
+    now = E - 100_000
+    result, reason = gate.gate_verdict(
+        {"lag_s": -100.0, "aborted": False},
+        [keepup.KeepupSample(now - age_s * 1000, 0, 0, 0, None, None)],
+        bound_s=60,
+        adaptation_s=120,
+        window_s=60,
+        now_ms=now,
+        epoch_ms=E,
+        stale_after_s=60,
+    )
+    assert result == verdict
+    if verdict == "PASS":
+        assert "waiting for epoch" in reason and "100.0s" in reason
+        assert "lag -" not in reason
+    else:
+        assert "staleness" in reason

@@ -11,10 +11,11 @@ source "$STACK_DIR/../../../scripts/_lib.sh"
 
 usage() {
 	cat <<'USAGE'
-usage: deploy/k8s/stack/teardown.sh [--all] [--yes]
+usage: deploy/k8s/stack/teardown.sh [--site PATH] [--all] [--yes]
 
-  --all   also remove the Strimzi operator and the brokers' StorageClass
-  --yes   skip confirmation before deleting the stack
+  --site PATH  read kafka.deployment: in-cluster (default: SITE_FILE or ./site.yaml)
+  --all        also remove the Strimzi operator and both StorageClasses
+  --yes        skip confirmation before deleting the stack
 
 Environment: CLOUD, KUBE_CONTEXT, NAMESPACE, AWS_REGION, and CLUSTER_NAME
 must match the values used by setup.sh.
@@ -23,8 +24,13 @@ USAGE
 
 ALL=0
 ASSUME_YES=no
+SITE_FILE="${SITE_FILE:-./site.yaml}"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--site)
+		SITE_FILE="${2:?--site needs a path}"
+		shift 2
+		;;
 	--all)
 		ALL=1
 		shift
@@ -80,9 +86,11 @@ STRIMZI_NAMESPACE=strimzi-operator
 require_host_tools kubectl helm helmfile jq
 # shellcheck source=deploy/aws/_stack_hooks.sh
 source "$REPO_ROOT/deploy/$CLOUD/_stack_hooks.sh"
+read_deployment_site
+[[ $KAFKA_DEPLOYMENT == in-cluster ]] || die "$SITE_FILE must set kafka.deployment: in-cluster for stack teardown.sh"
 stack_preflight
 stack_catalog_settings
-export NAMESPACE STRIMZI_VERSION LAKEKEEPER_CHART_VERSION KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_STORAGE_CLASS KAFKA_CPU KAFKA_MEM_GI KAFKA_JVM_HEAP KAFKA_NODE_SELECTOR KAFKA_TOLERATIONS CATALOG_NODE_SELECTOR CATALOG_TOLERATIONS CATALOG_SECRET STACK_CATALOG_CONFIG_JSON STACK_CATALOG_ENV_JSON
+export CATALOG_STORAGE_CLASS NAMESPACE STRIMZI_VERSION LAKEKEEPER_CHART_VERSION KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_STORAGE_CLASS KAFKA_CPU KAFKA_MEM_GI KAFKA_JVM_HEAP KAFKA_NODE_SELECTOR KAFKA_TOLERATIONS CATALOG_NODE_SELECTOR CATALOG_TOLERATIONS CATALOG_SECRET STACK_CATALOG_CONFIG_JSON STACK_CATALOG_ENV_JSON
 
 helmfile_here() {
 	helmfile --file "$STACK_DIR/helmfile.yaml.gotmpl" --kube-context "$KUBE_CONTEXT" "$@"
@@ -98,7 +106,7 @@ printf '  the lakekeeper release, its Postgres and its volume, in %s\n' "$NAMESP
 printf '  namespace %s, with every run object still in it\n' "$NAMESPACE"
 printf '  the pod identity associations of its four ServiceAccounts, and role %s\n' "$STACK_ROLE_NAME"
 if ((ALL == 1)); then
-	printf '  the Strimzi operator in %s (its CRDs stay), and StorageClass %s\n' "$STRIMZI_NAMESPACE" "$KAFKA_STORAGE_CLASS"
+	printf '  the Strimzi operator in %s (its CRDs stay), and StorageClasses %s and %s\n' "$STRIMZI_NAMESPACE" "$KAFKA_STORAGE_CLASS" "$CATALOG_STORAGE_CLASS"
 fi
 printf 'The bucket, the node group and the CSI add-on stay.\n'
 if [[ $ASSUME_YES != yes ]]; then
@@ -132,6 +140,6 @@ if ((ALL == 1)); then
 	kubectl --context "$KUBE_CONTEXT" delete namespace "$STRIMZI_NAMESPACE" --ignore-not-found --wait=true
 	stack_delete_storage_class
 else
-	log "the Strimzi operator and StorageClass $KAFKA_STORAGE_CLASS stay; --all removes them"
+	log "the Strimzi operator and StorageClasses $KAFKA_STORAGE_CLASS and $CATALOG_STORAGE_CLASS stay; --all removes them"
 fi
 log "teardown complete"

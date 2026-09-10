@@ -65,7 +65,7 @@ the trigger interval during staging; see [pitfalls](../../docs/pitfalls.md).
 | `max_offsets_per_trigger` | unset | `maxOffsetsPerTrigger`; the option is omitted when unset |
 | `distribution_mode` | required | `none` / `hash` / `range`, as a write option |
 | `fanout` | `false` | `fanout-enabled` write option |
-| `machine_type` | unset | cost column and placement |
+| `machine_type` | unset | fleet reporting only; publication requires a real value, while site settings control placement |
 | `extra_spark_conf` | `{}` | applied last, so it overrides anything above |
 
 Shuffle partitions default to `executors × executor_cores`, avoiding Spark's

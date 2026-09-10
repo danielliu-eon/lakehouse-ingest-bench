@@ -966,3 +966,26 @@ def test_main_prints_the_run_id_first(
     assert code == 0 and lines[0] == "run_id: smoke-external-20260908T150000Z"
     assert lines[-1] == "Start your engine now; run launch when it is consuming."
     assert "catalog_props: {" in "\n".join(lines) and "epoch: null" in lines
+
+
+@pytest.mark.parametrize("deployment", [None, "managed", "in-cluster", "external"])
+def test_site_loads_kafka_deployment_without_changing_client_properties(tmp_path: Path, deployment: str | None) -> None:
+    path = _cluster_site(tmp_path, {})
+    raw = yaml.safe_load(path.read_text())
+    if deployment is not None:
+        raw["kafka"]["deployment"] = deployment
+    path.write_text(yaml.safe_dump(raw))
+    site = model.load_site(path)
+    assert site.kafka_deployment == deployment
+    assert site.kafka_bootstrap == "localhost:9092"
+    assert site.kafka_security == {}
+
+
+@pytest.mark.parametrize("deployment", ["", "automatic", True])
+def test_site_rejects_unknown_kafka_deployments(tmp_path: Path, deployment: object) -> None:
+    path = _cluster_site(tmp_path, {})
+    raw = yaml.safe_load(path.read_text())
+    raw["kafka"]["deployment"] = deployment
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="site.kafka.deployment"):
+        model.load_site(path)

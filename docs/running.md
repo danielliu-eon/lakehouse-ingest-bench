@@ -45,9 +45,9 @@ scripts/smoke.sh --engine external        # stage and score; you start the engin
 `SPARK_APP_WAIT_S`, `SPARK_QUERY_WAIT_S` override where an engine is polled and
 for how long.
 
-The script prints the verdict and exits 0 only if the scorer reports
-`run_valid: true`. On failure, it prints the end of the scorer and engine logs
-before teardown.
+After scoring, the script measures the live table's file geometry and prints it
+with the verdict. It exits 0 only if the scorer reports `run_valid: true`. On
+failure, it prints the end of the scorer and engine logs before teardown.
 
 For Flink, the smoke waits for slots, submits the job and runs `verify-flink`
 before starting the producer. Local Spark uses `--master local[N]`, so the
@@ -85,9 +85,9 @@ pytest suite and `scripts/validate-results.py`. It does not run the smoke —
 
 ## On a cloud
 
-Measured runs place the engine, producer and scorer in separate pods. The AWS
-setup uses EKS, Amazon MSK with IAM authentication, S3 and the Glue Iceberg REST
-catalog. Complete the prerequisites and corpus setup in the
+Measured runs place the engine, producer and scorer in separate pods. AWS runs
+use EKS and S3 with either Amazon MSK and Glue or in-cluster Kafka and
+Lakekeeper. Complete the prerequisites and corpus setup in the
 [AWS guide](../deploy/aws/README.md), then follow this sequence for each run.
 
 ```bash
@@ -99,6 +99,10 @@ scripts/purge.sh <the run id it printed> --artifacts   # once you are done with 
 `--gate-interval-s` seconds (default 60) until the scorer leaves the `running`
 state or the gate triggers teardown. It then tears down any remaining fleet and
 runs `finish.sh`.
+
+Before the scheduled epoch, a healthy gate check reports `PASS` with the time
+remaining rather than a negative lag. A stale scorer sample still reports
+`VOID` during this wait.
 
 The script normally returns `finish.sh`'s exit status. It returns 6 if teardown
 fails and the fleet may still be running. `RUN_MAX_S` limits the wait after
@@ -128,7 +132,11 @@ scripts/purge.sh "$RUN_ID" --artifacts     # once you are done with the table
 Use `runs/aws-100mbs-skew-flink-hash.yaml` and its Spark sibling as hour-long
 starting specs. They share the corpus, Kafka settings and offer. Their fleet
 sizes are starting points for capacity probes: increase capacity and rerun while
-the gate reports `UNDERSIZED`, then publish a passing run.
+the gate reports `UNDERSIZED`, then publish a passing run. Before staging, replace
+`machine_type: YOUR_MACHINE_TYPE` with the actual node instance type and fill in
+the site pricing. Smoke specs leave `machine_type` optional; `finish.sh --publish`
+rejects missing or placeholder machine types. The knob records the fleet; use
+site placement settings to select nodes.
 
 Both managed engines use the same drivers. Engine modules supply resource and
 status details; `verify-<engine>` checks the running configuration against the
@@ -167,7 +175,10 @@ tuning the run stands for; any engine-specific tuning beyond the run-spec knobs
 is a separately named variant rather than a second version of one file.
 
 Publishing a run with `run_valid: false` requires `--publish-invalid`; the
-result retains its validity label. See [publication requirements](../results/README.md)
+result retains its validity label. This flag does not waive publication metadata
+requirements: every fleet role must still have a real `machine_type`. Missing or
+placeholder values fail before a result is written to the publication directory.
+See [publication requirements](../results/README.md)
 and the [result schema](results-format.md).
 
 ### In-cluster stack

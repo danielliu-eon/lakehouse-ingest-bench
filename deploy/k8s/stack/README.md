@@ -13,8 +13,8 @@ separately.
 ## Prerequisites
 
 - **Kubernetes and object storage.** On AWS, use EKS with the Pod Identity agent
-  and an accessible bucket. `deploy/aws/setup.sh` can provision the bucket and
-  image registry.
+  and an accessible bucket. `deploy/aws/setup.sh --site site.k8s.example.yaml`
+  can provision the bucket and image registry without creating MSK.
 - **EBS CSI driver on AWS.** Broker and database volumes require
   `ebs.csi.aws.com`. Setup checks for it and suggests:
 
@@ -34,13 +34,17 @@ separately.
 - **Host tools.** Use the tools listed in the [AWS guide](../../aws/README.md)
   plus `helmfile` 0.170 or later.
 
+Setup and teardown read `--site PATH`, defaulting to `SITE_FILE` and then
+`./site.yaml`, and require `kafka.deployment: in-cluster` before contacting AWS.
+Use this site for shared AWS setup as well so it cannot provision MSK.
+
 ## Environment
 
 | Variable | Default | What it is |
 |---|---|---|
 | `CLOUD` | *required* | `aws`; selects `deploy/aws/_stack_hooks.sh`. Other clouds are unsupported |
 | `KUBE_CONTEXT` | `$CLUSTER_NAME` | The kubeconfig context |
-| `NAMESPACE` | `ingest-bench` | Namespace for the stack and runs; use a separate namespace when also running the managed-broker deployment |
+| `NAMESPACE` | `ingest-bench` | Namespace for the stack and runs |
 | `BUCKET` | *required* | The bucket with `corpus/`, `runs/` and `warehouse/` |
 | `AWS_REGION`, `CLUSTER_NAME` | *required with `CLOUD=aws`* | AWS region and EKS cluster for Pod Identity associations |
 | `KAFKA_BROKERS` | `3` | Dual-role broker/controller replicas. Replication is `min(3, brokers)`; minimum in-sync replicas is `max(1, replication − 1)` |
@@ -59,10 +63,12 @@ separately.
 1. The namespace, three run service accounts, and engine RBAC, using the shared
    namespace manifest.
 2. On AWS, the `lakehouse-ingest-bench-stack` IAM role, scoped to the bucket's
-   three prefixes. Pod Identity binds it to the run accounts and
-   `ingest-bench-catalog`. This role is independent of MSK permissions.
+   three prefixes. Pod Identity binds the catalog account and any unassociated
+   run accounts to it. Existing run-account bindings remain unchanged. This
+   role has no MSK permissions.
 3. On AWS, the expandable gp3 StorageClass `ingest-bench-kafka`, with provisioned
-   throughput. Volumes are created in the scheduled pod's availability zone.
+   throughput, plus `ingest-bench-catalog` for Postgres at baseline 125 MiB/s
+   and 3000 IOPS. Volumes are created in the scheduled pod's availability zone.
 4. The `ingest-bench-catalog-keys` Secret: encryption key, database passwords,
    and warehouse credential external ID. Setup creates it once and preserves it
    on reruns so stored secrets remain readable.
@@ -80,8 +86,8 @@ separately.
 export CLOUD=aws AWS_REGION=... CLUSTER_NAME=... BUCKET=...
 export KAFKA_NODE_SELECTOR='{"lakehouse-ingest-bench/role":"kafka"}'
 export KAFKA_TOLERATIONS='[{"key":"lakehouse-ingest-bench/kafka","operator":"Equal","value":"true","effect":"NoSchedule"}]'
-deploy/k8s/stack/setup.sh
-cp site.k8s.example.yaml site.yaml        # fill in the values printed by setup
+deploy/aws/setup.sh --site site.k8s.example.yaml --write-site site.yaml
+deploy/k8s/stack/setup.sh --site site.yaml
 ```
 
 Build images and generate a corpus with `scripts/push-images.sh` and
@@ -98,7 +104,7 @@ Teardown removes the stack's volumes but leaves the node group.
 
 ```bash
 deploy/k8s/stack/teardown.sh              # Kafka, catalog, namespace, and identities
-deploy/k8s/stack/teardown.sh --all        # also Strimzi and the StorageClass
+deploy/k8s/stack/teardown.sh --all        # also Strimzi and both StorageClasses
 deploy/k8s/stack/teardown.sh --all --yes  # same cleanup without confirmation
 ```
 
@@ -109,6 +115,13 @@ removes database claims and run objects.
 
 The node group, CSI add-on, and bucket remain. Even with `--all`, Strimzi's CRDs
 remain because Helm does not delete CRDs installed from `crds/`.
+
+The dedicated catalog StorageClass changes Postgres's immutable StatefulSet
+claim template. A normal Helm upgrade cannot apply it to a stack whose Postgres
+claim uses the Kafka class. Recreate a disposable smoke stack before running the
+new setup. To preserve a catalog, back up the database and migrate it to new
+storage first; setup does not migrate catalog data. Teardown with `--all`
+removes both StorageClasses.
 
 ## Troubleshooting
 

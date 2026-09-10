@@ -80,5 +80,7 @@ def gate_verdict(
     if middle is not None and oldest is not None and recent > middle > oldest > 0:
         return UNDERSIZED, f"backlog floor rose {oldest} -> {middle} -> {recent} rows over three {window_s}s windows"
 
+    if now_ms < epoch_ms:
+        return PASS, f"waiting for epoch in {(epoch_ms - now_ms) / 1000:.1f}s, backlog floor {recent} rows not rising"
     lag_figure = f"lag {lag:.1f}s" if lag is not None else "no lag sample yet"
     return PASS, f"{lag_figure} within the {max_bound_s:.0f}s max bound, backlog floor {recent} rows not rising"

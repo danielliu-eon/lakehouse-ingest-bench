@@ -19,6 +19,8 @@ scoring:
   freshness_bound_s: 180
   warmup_s: 120
 spark:
+  # Set the actual node instance type before publishing; this does not select nodes.
+  machine_type: YOUR_MACHINE_TYPE
   executors: 8
   executor_cores: 2
   executor_mem_mb: 8192

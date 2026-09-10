@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Remove shared resources in dependency order: workloads, identity, MSK,
-# then its security group. Check existence before deletion so reruns can finish
-# partial teardown.
+# Remove workloads and identities, then MSK and its security group for managed
+# Kafka sites. Check existence so reruns can finish partial teardown.
 #
 # Keep S3, ECR, and both operators unless --all is set. Bucket deletion
 # requires confirmation because it removes corpus data and measured results.
@@ -17,22 +16,29 @@ source "$AWS_DIR/_resources.sh"
 
 usage() {
 	cat <<'USAGE'
-usage: deploy/aws/teardown.sh [--all] [--yes]
+usage: deploy/aws/teardown.sh [--site PATH] [--all] [--yes]
 
-  --all   also delete the bucket and everything in it, the three ECR
-          repositories and both engine operators' releases
-  --yes   skip confirmation before emptying the bucket
+  --site PATH  read kafka.deployment from PATH (default: SITE_FILE or ./site.yaml)
+  --all        also delete the bucket and its contents, the three ECR
+               repositories and both engine operators' releases
+  --yes        skip confirmation before emptying the bucket
 
 Environment: AWS_REGION and CLUSTER_NAME are required. BUCKET, MSK_NAME,
 NAMESPACE and KUBE_CONTEXT must match the values used by setup.sh.
+MSK and its security group are removed only for kafka.deployment: managed.
 MSK_DELETED_WAIT_S sets the timeout for MSK deletion.
 USAGE
 }
 
 ALL=0
 ASSUME_YES=no
+SITE_FILE="${SITE_FILE:-./site.yaml}"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--site)
+		SITE_FILE="${2:?--site needs a path}"
+		shift 2
+		;;
 	--all)
 		ALL=1
 		shift
@@ -52,6 +58,8 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+read_deployment_site
 
 export AWS_REGION="${AWS_REGION:?AWS_REGION must name the region the EKS cluster is in}"
 CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME must name the EKS cluster setup.sh was run against}"
@@ -149,49 +157,53 @@ fi
 # The broker and its security group
 # ---------------------------------------------------------------------------
 
-MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
-	--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
-if [[ -n $MSK_ARN && $MSK_ARN != None ]]; then
-	MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
-	if [[ $MSK_STATE != DELETING ]]; then
-		log "deleting MSK cluster $MSK_NAME"
-		aws kafka delete-cluster --cluster-arn "$MSK_ARN" >/dev/null
+if [[ $KAFKA_DEPLOYMENT == managed ]]; then
+	MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
+		--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
+	if [[ -n $MSK_ARN && $MSK_ARN != None ]]; then
+		MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
+		if [[ $MSK_STATE != DELETING ]]; then
+			log "deleting MSK cluster $MSK_NAME"
+			aws kafka delete-cluster --cluster-arn "$MSK_ARN" >/dev/null
+		fi
+		# Wait for broker network interfaces to release the security group.
+		log "waiting for $MSK_NAME to disappear (several minutes)"
+		waited=0
+		while aws kafka describe-cluster --cluster-arn "$MSK_ARN" >/dev/null 2>&1; do
+			if ((waited >= MSK_DELETED_WAIT_S)); then
+				die "$MSK_NAME still exists after ${waited}s; rerun this script after deletion completes"
+			fi
+			if ((waited % 300 == 0)); then
+				log "  ... still deleting (${waited}s)"
+			fi
+			sleep 30
+			waited=$((waited + 30))
+		done
+	else
+		log "MSK cluster $MSK_NAME is already gone"
 	fi
-	# Wait for broker network interfaces to release the security group.
-	log "waiting for $MSK_NAME to disappear (several minutes)"
-	waited=0
-	while aws kafka describe-cluster --cluster-arn "$MSK_ARN" >/dev/null 2>&1; do
-		if ((waited >= MSK_DELETED_WAIT_S)); then
-			die "$MSK_NAME still exists after ${waited}s; rerun this script after deletion completes"
-		fi
-		if ((waited % 300 == 0)); then
-			log "  ... still deleting (${waited}s)"
-		fi
-		sleep 30
-		waited=$((waited + 30))
-	done
-else
-	log "MSK cluster $MSK_NAME is already gone"
-fi
 
-MSK_SG_NAME="$MSK_NAME-msk"
-# Require the ownership tag as well as the name before deleting the group.
-MSK_SG_ID="$(aws ec2 describe-security-groups \
-	--filters "Name=group-name,Values=$MSK_SG_NAME" "Name=tag:$TAG_KEY,Values=true" \
-	--query 'SecurityGroups[0].GroupId' --output text)"
-if [[ -n $MSK_SG_ID && $MSK_SG_ID != None ]]; then
-	log "deleting security group $MSK_SG_NAME ($MSK_SG_ID)"
-	if ! DELETE_ERROR="$(aws ec2 delete-security-group --group-id "$MSK_SG_ID" 2>&1)"; then
-		case "$DELETE_ERROR" in
-		*DependencyViolation*)
-			die "$MSK_SG_ID is still in use: $DELETE_ERROR
-     MSK may retain network interfaces for a few minutes after cluster deletion. Wait, then rerun this script."
-			;;
-		*) die "could not delete $MSK_SG_ID: $DELETE_ERROR" ;;
-		esac
+	MSK_SG_NAME="$MSK_NAME-msk"
+	# Require the ownership tag as well as the name before deleting the group.
+	MSK_SG_ID="$(aws ec2 describe-security-groups \
+		--filters "Name=group-name,Values=$MSK_SG_NAME" "Name=tag:$TAG_KEY,Values=true" \
+		--query 'SecurityGroups[0].GroupId' --output text)"
+	if [[ -n $MSK_SG_ID && $MSK_SG_ID != None ]]; then
+		log "deleting security group $MSK_SG_NAME ($MSK_SG_ID)"
+		if ! DELETE_ERROR="$(aws ec2 delete-security-group --group-id "$MSK_SG_ID" 2>&1)"; then
+			case "$DELETE_ERROR" in
+			*DependencyViolation*)
+				die "$MSK_SG_ID is still in use: $DELETE_ERROR
+	     MSK may retain network interfaces for a few minutes after cluster deletion. Wait, then rerun this script."
+				;;
+			*) die "could not delete $MSK_SG_ID: $DELETE_ERROR" ;;
+			esac
+		fi
+	else
+		log "security group $MSK_SG_NAME is already gone"
 	fi
 else
-	log "security group $MSK_SG_NAME is already gone"
+	log "skipping MSK and its security group (kafka.deployment=$KAFKA_DEPLOYMENT)"
 fi
 
 # ---------------------------------------------------------------------------

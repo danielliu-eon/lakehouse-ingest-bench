@@ -13,6 +13,9 @@ EPOCH_LEAD_S="${EPOCH_LEAD_S:-30}"
 IDLE_STOP_S="${IDLE_STOP_S:-120}"
 # Timeout for --external-ready-file.
 EXTERNAL_READY_WAIT_S="${EXTERNAL_READY_WAIT_S:-900}"
+# Must match ingest_bench.scorer.cli.NO_GEOMETRY. A table without commits has no geometry;
+# other nonzero statuses are read failures.
+NO_GEOMETRY=4
 
 usage() {
 	cat <<'USAGE'
@@ -238,5 +241,22 @@ docker logs "scorer-$RUN_ID" 2>&1 | tail -n 20 >&2
 docker rm "scorer-$RUN_ID" >/dev/null
 log "the scorer exited $SCORER_STATUS (0 means drained, 2 means it stopped idle)"
 
-print_verdict "$RUN_DIR/scores/summary.json"
+# Measure before cleanup removes the catalog. Preserve file-sizes' default offsets
+# when the spec does not supply them.
+OFFSETS="$(yq '[.scoring.geometry_offsets_s // [] | .[] | tostring] | join(",")' "$SPEC_FILE")" ||
+	die "could not read scoring.geometry_offsets_s out of $SPEC_FILE"
+OFFSET_FLAGS=""
+[[ -z $OFFSETS ]] || OFFSET_FLAGS="--offsets $OFFSETS"
+
+log "measuring file geometry for $RUN_ID"
+GEOMETRY_STATUS=0
+harness "file-sizes --table $TABLE --catalog-prop-file /catalog.props --epoch $EPOCH --out /runs/$RUN_ID/scores $OFFSET_FLAGS" ||
+	GEOMETRY_STATUS=$?
+if ((GEOMETRY_STATUS == NO_GEOMETRY)); then
+	log "no geometry: the table never committed"
+elif ((GEOMETRY_STATUS != 0)); then
+	die "could not measure the geometry: file-sizes exited $GEOMETRY_STATUS; see the error above"
+fi
+
+print_verdict "$RUN_DIR/scores/summary.json" "$RUN_DIR/scores/geometry.json"
 log "run_valid: true — $RUN_ID, artifacts in $RUN_DIR"

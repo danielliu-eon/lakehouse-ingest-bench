@@ -12,6 +12,7 @@ STACK_POLICY_NAME=lakehouse-ingest-bench-stack
 STACK_TAG_KEY=lakehouse-ingest-bench
 
 KAFKA_STORAGE_CLASS="${KAFKA_STORAGE_CLASS:-ingest-bench-kafka}"
+CATALOG_STORAGE_CLASS=ingest-bench-catalog
 KAFKA_VOLUME_THROUGHPUT_MIBS="${KAFKA_VOLUME_THROUGHPUT_MIBS:-250}"
 KAFKA_VOLUME_IOPS="${KAFKA_VOLUME_IOPS:-6000}"
 
@@ -32,6 +33,7 @@ stack_preflight() {
 # Validate setup-only storage prerequisites: bucket access, volume settings,
 # and the EBS CSI driver.
 stack_preflight_storage() {
+	[[ $KAFKA_STORAGE_CLASS != "$CATALOG_STORAGE_CLASS" ]] || die "KAFKA_STORAGE_CLASS must differ from the catalog class $CATALOG_STORAGE_CLASS"
 	[[ -n ${BUCKET:-} ]] || die "BUCKET must specify the bucket containing the corpus/, runs/, and warehouse/ prefixes"
 	[[ $KAFKA_VOLUME_THROUGHPUT_MIBS =~ ^[1-9][0-9]*$ ]] ||
 		die "KAFKA_VOLUME_THROUGHPUT_MIBS must be a positive integer, got '$KAFKA_VOLUME_THROUGHPUT_MIBS'"
@@ -114,18 +116,20 @@ stack_unbind_identity() {
 	fi
 }
 
-# Apply the brokers' StorageClass named by KAFKA_STORAGE_CLASS.
+# Apply separate classes so broker throughput tuning does not affect Postgres.
 stack_storage_class() {
 	export KAFKA_STORAGE_CLASS KAFKA_VOLUME_THROUGHPUT_MIBS KAFKA_VOLUME_IOPS
 	log "applying StorageClass $KAFKA_STORAGE_CLASS (gp3, ${KAFKA_VOLUME_THROUGHPUT_MIBS} MiB/s, ${KAFKA_VOLUME_IOPS} iops)"
 	envsubst '${KAFKA_STORAGE_CLASS} ${KAFKA_VOLUME_THROUGHPUT_MIBS} ${KAFKA_VOLUME_IOPS}' \
 		<"$_STACK_HOOKS_DIR/k8s/kafka-storageclass.yaml.tmpl" |
 		kubectl --context "$KUBE_CONTEXT" apply -f -
+	log "applying StorageClass $CATALOG_STORAGE_CLASS (baseline gp3)"
+	kubectl --context "$KUBE_CONTEXT" apply -f "$_STACK_HOOKS_DIR/k8s/catalog-storageclass.yaml"
 }
 
 stack_delete_storage_class() {
-	log "deleting StorageClass $KAFKA_STORAGE_CLASS"
-	kubectl --context "$KUBE_CONTEXT" delete storageclass "$KAFKA_STORAGE_CLASS" --ignore-not-found
+	log "deleting StorageClasses $KAFKA_STORAGE_CLASS and $CATALOG_STORAGE_CLASS"
+	kubectl --context "$KUBE_CONTEXT" delete storageclass "$KAFKA_STORAGE_CLASS" "$CATALOG_STORAGE_CLASS" --ignore-not-found
 }
 
 # Enable direct pod-identity access to storage and supply both AWS region names.

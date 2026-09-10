@@ -64,13 +64,14 @@ Omit the gate keys to use the gate's defaults.
 |---|---|
 | `corpus_root`, `runs_root`, `warehouse` | *required*. Storage roots for corpora, run artifacts and table data; redacted in results. Shell drivers use the AWS CLI and require `s3://` URIs |
 | `kafka.bootstrap_servers` | *required* |
+| `kafka.deployment` | `managed`, `in-cluster`, or `external`. Required by AWS and in-cluster stack setup and teardown; optional for run drivers and existing sites. On AWS, only `managed` provisions MSK |
 | `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim; omitted from results |
 | `kafka.schema_registry` | `{url, basic_auth_user_info?}`; optional for raw Avro, required for Confluent framing |
 | `catalog.props` | *required*. PyIceberg catalog properties. Managed engines require a REST catalog; external runs may use any catalog PyIceberg can open |
 | `kubernetes` | empty for local runs. Cluster runs require `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
 | `pricing` | *required*. `{vcpu_hour_usd, gib_hour_usd}` rates used to calculate cost |
 
-Start from `site.example.yaml` or `site.aws.example.yaml`.
+Start from `site.example.yaml`, `site.aws.example.yaml`, or `site.k8s.example.yaml`.
 Replace every `YOUR_` placeholder; the loader rejects any that remain.
 
 ### Engine configuration translation

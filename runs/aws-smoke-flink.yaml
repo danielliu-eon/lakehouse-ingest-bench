@@ -12,6 +12,8 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 flink:
+  # Set the actual node instance type before publishing; this does not select nodes.
+  # machine_type: YOUR_MACHINE_TYPE
   # Eight slots, matching local smoke. Give each TaskManager 4 GiB to allow for JVM
   # overhead and managed memory.
   taskmanagers: 2

@@ -53,8 +53,9 @@ scripts/smoke.sh --engine spark
 
 The smoke test generates a five-minute, 5 MB/s corpus, creates a Kafka topic
 and an Iceberg table, starts the engine, replays the corpus on its scheduled
-timeline, and scores the table. It prints a verdict like this abridged output
-from the [recorded Flink smoke run](docs/examples/smoke-flink/):
+timeline, scores the table, and measures its file geometry. It prints the
+geometry with a verdict like this abridged output from the
+[recorded Flink smoke run](docs/examples/smoke-flink/):
 
 ```json
 {

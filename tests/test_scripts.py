@@ -28,7 +28,7 @@ from ingest_bench.k8s.render import MARKER_RE, render_template
 from ingest_bench.specs import engines
 from ingest_bench.specs.derive import TABLE_NAMESPACE
 from ingest_bench.specs.kubernetes import FIELDS, NAME, for_name
-from ingest_bench.specs.model import KubernetesConfig, load_site
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, PLACEHOLDER, KubernetesConfig, load_site
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
@@ -731,6 +731,7 @@ def _write_site(path: Path, *, registry: bool = False, yq_stub: str = "") -> sub
         ACCOUNT={IAM_VALUES["ACCOUNT"]}
         AWS_REGION={IAM_VALUES["REGION"]}
         BUCKET={IAM_VALUES["BUCKET"]}
+        KAFKA_DEPLOYMENT=managed
         BOOTSTRAP='{_MSK_BOOTSTRAP}'
         KUBE_CONTEXT={SITE_AWS_FILLINGS["YOUR_KUBE_CONTEXT"]}
         NAMESPACE=ingest-bench
@@ -1697,7 +1698,8 @@ if [[ -z $out ]]; then
 	if [[ -n ${STUB_COLLECT_NO_ENGINE:-} ]]; then
 		printf '{"run": {}}\\n' >"$run_dir/run.json"
 	else
-		printf '{"run": {"engine": "flink"}}\\n' >"$run_dir/run.json"
+		fleet='[{"role":"taskmanager","machine_type":"m6i.xlarge"}]'
+		printf '{"run": {"engine": "flink", "fleet": %s}}\\n' "${STUB_COLLECT_FLEET-$fleet}" >"$run_dir/run.json"
 	fi
 else
 	mkdir -p "${out%/}"
@@ -3897,7 +3899,7 @@ def test_the_catalog_values_turn_vending_and_auth_off_and_name_its_identity() ->
     assert 'extraEnv: {{ requiredEnv "STACK_CATALOG_ENV_JSON" }}' in text
     assert "providerUri" not in text and "k8s:" not in text, "authentication stays at the chart's off default"
     assert "postgresql:\n  enabled: true" in text
-    assert 'className: {{ requiredEnv "KAFKA_STORAGE_CLASS" }}' in text
+    assert 'className: {{ requiredEnv "CATALOG_STORAGE_CLASS" }}' in text
     assert "\nhelmWait: true\n" in text, "the migration Job must not be a post-install hook under --wait"
 
 
@@ -3915,7 +3917,7 @@ def test_stack_setup_answers_before_it_needs_a_cloud() -> None:
     environment = _without("CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION")
     out = subprocess.run([str(STACK_SETUP), "--help"], capture_output=True, text=True, env=environment)
     assert out.returncode == 0, out.stderr
-    assert "takes no arguments" in out.stdout and "CLOUD" in out.stdout
+    assert "--site PATH" in out.stdout and "CLOUD" in out.stdout
 
     refused = subprocess.run([str(STACK_SETUP), "--brokers"], capture_output=True, text=True, env=environment)
     assert refused.returncode == 2, refused.stdout
@@ -4187,3 +4189,43 @@ def test_run_deadline_includes_time_spent_in_gate(tmp_path: Path) -> None:
     assert run.result.returncode == 1, run.result.stderr
     assert run.drivers() == ["stage", "launch", "gate", "teardown", "finish"]
     assert "still running after 3s" in run.result.stderr
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("machine_type", ["", MACHINE_TYPE_UNSPECIFIED, f"{PLACEHOLDER}MACHINE_TYPE"])
+@pytest.mark.parametrize("publish_invalid", [False, True])
+def test_finish_rejects_missing_machine_type_before_publishing(
+    tmp_path: Path, machine_type: str, publish_invalid: bool
+) -> None:
+    _torn_down_run(tmp_path, run_valid=not publish_invalid)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID, "--publish", "results", *(["--publish-invalid"] if publish_invalid else [])],
+        tmp_path,
+        {
+            **_finish_environment(tmp_path),
+            "STUB_COLLECT_FLEET": json.dumps([{"role": "taskmanager", "machine_type": machine_type}]),
+        },
+        programs=FINISH_PROGRAMS,
+    )
+    assert run.result.returncode != 0
+    assert "machine_type" in run.result.stderr and "taskmanager" in run.result.stderr
+    assert not (tmp_path / "work" / "results").exists()
+    assert len((tmp_path / "collect.log").read_text().splitlines()) == 1
+
+
+@needs_shell_tools
+def test_finish_keeps_unpublishable_smoke_results_locally(tmp_path: Path) -> None:
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID],
+        tmp_path,
+        {
+            **_finish_environment(tmp_path),
+            "STUB_COLLECT_FLEET": '[{"role":"taskmanager","machine_type":"unspecified"}]',
+        },
+        programs=FINISH_PROGRAMS,
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert (tmp_path / "work" / "runs" / RUN_ID / "run.json").exists()

@@ -203,7 +203,12 @@ while :; do
 	# Let gate --teardown apply the consecutive-breach rule; do not stop on one verdict.
 	GATE_STATUS=0
 	"$REPO_ROOT/scripts/gate.sh" "${GATE_ARGS[@]}" || GATE_STATUS=$?
-	log "the gate exited $GATE_STATUS (0 PASS, 3 UNDERSIZED, 5 VOID, 1 nothing published to judge yet)"
+	case "$GATE_STATUS" in
+	0) log "gate: PASS (exit 0)" ;;
+	3) log "gate: UNDERSIZED (exit 3)" ;;
+	5) log "gate: VOID (exit 5)" ;;
+	*) log "gate: could not judge the run (exit $GATE_STATUS); see the error above" ;;
+	esac
 
 	# Saved metadata indicates teardown reached the table-copy step.
 	if [[ -f $RUN_DIR/$METADATA_FINAL_FILE ]]; then

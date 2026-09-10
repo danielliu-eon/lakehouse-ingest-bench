@@ -68,7 +68,7 @@ the site's node selector, including any architecture selection.
 | `source_parallelism` | `1` | Kafka readers; must be `<=` topic partitions |
 | `max_parallelism` | `4 * taskmanagers * slots` | `pipeline.max-parallelism` |
 | `distribution_mode` | required | `none` / `hash` / `range`, as a sink hint |
-| `machine_type` | unset | cost column and placement |
+| `machine_type` | unset | fleet reporting only; publication requires a real value, while site settings control placement |
 | `extra_flink_conf` | `{}` | applied last, so it overrides anything above |
 
 The benchmark requires `EXACTLY_ONCE` checkpointing. Verification rejects a

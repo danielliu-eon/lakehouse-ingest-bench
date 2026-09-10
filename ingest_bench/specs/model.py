@@ -461,6 +461,7 @@ class SiteConfig:
     kubernetes: KubernetesConfig | None
     pricing_vcpu_hour_usd: float
     pricing_gib_hour_usd: float
+    kafka_deployment: str | None = None
 
 
 def _refuse_placeholders(value: object, where: str) -> None:
@@ -549,7 +550,12 @@ def load_site(path: Path) -> SiteConfig:
     _refuse_unknown(raw, _SITE_KEYS, "site")
 
     kafka = _as_mapping(_required(raw, "kafka", "site"), "site.kafka")
-    _refuse_unknown(kafka, frozenset({"bootstrap_servers", "security", "schema_registry"}), "site.kafka")
+    _refuse_unknown(kafka, frozenset({"deployment", "bootstrap_servers", "security", "schema_registry"}), "site.kafka")
+    deployment: str | None = None
+    if "deployment" in kafka:
+        deployment = _as_str(kafka["deployment"], "site.kafka.deployment")
+        if deployment not in ("managed", "in-cluster", "external"):
+            raise ValueError("site.kafka.deployment must be managed, in-cluster, or external")
     security = {} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security")
     # Allow arbitrary client properties, except conflicting harness settings.
     refuse_mechanism_alias(security, "site.kafka.security")
@@ -578,6 +584,7 @@ def load_site(path: Path) -> SiteConfig:
         warehouse=_as_str(_required(raw, "warehouse", "site"), "site.warehouse"),
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
         kafka_security=security,
+        kafka_deployment=deployment,
         schema_registry=registry,
         catalog_props=catalog_props,
         kubernetes=kubernetes,
