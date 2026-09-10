@@ -177,30 +177,45 @@ else
 	# reaches the running state is what was just applied.
 	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for $ENGINE_KIND/$RUN_OBJECT to reach $ENGINE_RUNNING_STATE"
 	waited=0
+	# The last error text reported, so a reconcile the operator is retrying is
+	# logged when it appears and not once per poll.
+	reported_error=""
 	while :; do
 		state="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_STATE_JSONPATH")"
 		if [[ $state == "$ENGINE_RUNNING_STATE" ]]; then
 			log "$ENGINE_KIND/$RUN_OBJECT is $state"
 			break
 		fi
+		# Read on every poll, because it is the explanation for both of the
+		# refusals below rather than a state of its own.
+		error="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_ERROR_JSONPATH")"
 		# Comma-delimited on both sides of the match, so a state whose name is
 		# another's prefix cannot pass for it.
 		if [[ -n $state && ",$ENGINE_FAILED_STATES," == *",$state,"* ]]; then
 			k8s_engine_tail "$ENGINE_LOG_TARGET"
-			die "$ENGINE_KIND/$RUN_OBJECT went to $state before it ran; the lines above are the engine's own log"
+			die "$ENGINE_KIND/$RUN_OBJECT went to $state before it ran${error:+: $error}; the lines above are the engine's own log"
 		fi
-		# A document the operator rejected reports no state, because the state
-		# belongs to a job it never created — so the loop above would spend the
-		# whole wait on one. The error field is where the rejection is, and it
-		# is empty for a run still being placed. No log is tailed with it: a
-		# rejected document has no pods to have written one.
-		error="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_ERROR_JSONPATH")"
+		# A document the operator rejected reports no state at all, because the
+		# state belongs to a job it never created — so the loop would otherwise
+		# spend the whole wait on one. The error field alone does not say that
+		# has happened: an operator retrying a reconcile it may yet complete
+		# writes one too. What separates them is the lifecycle it reports
+		# beside the error, so the two together are the refusal and the error
+		# on its own is a step on the way. No log is tailed with it: a rejected
+		# document has no pods to have written one.
 		if [[ -n $error ]]; then
-			die "$ENGINE_KIND/$RUN_OBJECT reports an error before it ran: $error"
+			lifecycle="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_LIFECYCLE_JSONPATH")"
+			if [[ -n $lifecycle && ",$ENGINE_FAILED_STATES," == *",$lifecycle,"* ]]; then
+				die "the operator gave up on $ENGINE_KIND/$RUN_OBJECT ($lifecycle): $error"
+			fi
+			if [[ $error != "$reported_error" ]]; then
+				log "$ENGINE_KIND/$RUN_OBJECT reports an error the operator has not given up over: $error"
+				reported_error="$error"
+			fi
 		fi
 		if ((waited >= ENGINE_RUNNING_WAIT_S)); then
 			k8s_engine_tail "$ENGINE_LOG_TARGET"
-			die "$ENGINE_KIND/$RUN_OBJECT did not reach $ENGINE_RUNNING_STATE within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported})"
+			die "$ENGINE_KIND/$RUN_OBJECT did not reach $ENGINE_RUNNING_STATE within ${ENGINE_RUNNING_WAIT_S}s (last state: ${state:-none reported}${reported_error:+, last error: $reported_error})"
 		fi
 		sleep "$ENGINE_POLL_S"
 		waited=$((waited + ENGINE_POLL_S))

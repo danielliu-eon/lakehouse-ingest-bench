@@ -105,8 +105,11 @@ KUBERNETES = EngineKubernetes(
     failed_states=("FAILED", "SUBMISSION_FAILED", "FAILING", "COMPLETED", "SUCCEEDING"),
     state_jsonpath="{.status.applicationState.state}",
     # The operator's own field beside that state: a submission it could not
-    # make says why here.
+    # make says why here. A SparkApplication has no lifecycle of its own apart
+    # from that state — the operator reports the submission and the application
+    # in the one field — so the two paths are the same path.
     error_jsonpath="{.status.applicationState.errorMessage}",
+    lifecycle_jsonpath="{.status.applicationState.state}",
     rest_service_suffix="-ui-svc",
     rest_port=4040,
     log_target=f"pod/{NAME}-driver",

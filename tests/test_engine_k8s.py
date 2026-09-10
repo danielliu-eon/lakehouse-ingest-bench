@@ -36,6 +36,10 @@ def test_every_managed_engine_says_how_it_is_addressed(engine: str) -> None:
     # is the only thing that tells a rejection from a run still starting.
     assert descriptor.error_jsonpath.startswith("{.status.")
     assert descriptor.error_jsonpath != descriptor.state_jsonpath
+    # What says whether the operator has given up, so that an error it is
+    # still retrying is not read as a rejection. The same path as the state
+    # for an engine whose application state is its lifecycle.
+    assert descriptor.lifecycle_jsonpath.startswith("{.status.")
     # Two documents, named apart: a driver applies the ConfigMap first because
     # the other one mounts it.
     assert descriptor.document_file.endswith(".yaml") and descriptor.configmap_file.endswith(".yaml")
@@ -54,6 +58,8 @@ def test_the_spark_descriptor_names_what_the_operator_named() -> None:
     assert descriptor.kind == "sparkapplication"
     assert descriptor.state_jsonpath == "{.status.applicationState.state}"
     assert descriptor.error_jsonpath == "{.status.applicationState.errorMessage}"
+    # A SparkApplication has no lifecycle apart from that state.
+    assert descriptor.lifecycle_jsonpath == descriptor.state_jsonpath
     assert descriptor.rest_service_suffix == "-ui-svc"
     assert descriptor.rest_port == 4040
     assert for_name(descriptor.log_target, RUN_OBJECT) == f"pod/{RUN_OBJECT}-driver"
@@ -84,6 +90,7 @@ def test_the_flink_descriptor_names_what_the_operator_named() -> None:
     assert descriptor.running_state == "RUNNING"
     assert descriptor.state_jsonpath == "{.status.jobStatus.state}"
     assert descriptor.error_jsonpath == "{.status.error}"
+    assert descriptor.lifecycle_jsonpath == "{.status.lifecycleState}"
     assert descriptor.rest_service_suffix == "-rest"
     assert descriptor.rest_port == 8081
     assert for_name(descriptor.log_target, RUN_OBJECT) == f"deploy/{RUN_OBJECT}"

@@ -100,8 +100,12 @@ KUBERNETES = EngineKubernetes(
     failed_states=("FAILED", "CANCELED", "FINISHED"),
     state_jsonpath="{.status.jobStatus.state}",
     # A document the operator rejected has no jobStatus at all, and its
-    # reconciliation errors land here as JSON text.
+    # reconciliation errors land here as JSON text. The lifecycle beside it is
+    # what says whether the operator has given up on the document or is still
+    # retrying it: FAILED there is a refusal, and every other value with an
+    # error against it is a reconcile that may yet succeed.
     error_jsonpath="{.status.error}",
+    lifecycle_jsonpath="{.status.lifecycleState}",
     rest_service_suffix="-rest",
     rest_port=8081,
     log_target=f"deploy/{NAME}",

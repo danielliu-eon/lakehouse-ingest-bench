@@ -632,6 +632,7 @@ k8s_read_engine() {
 	ENGINE_FAILED_STATES=""
 	ENGINE_STATE_JSONPATH=""
 	ENGINE_ERROR_JSONPATH=""
+	ENGINE_LIFECYCLE_JSONPATH=""
 	ENGINE_REST_SERVICE_SUFFIX=""
 	ENGINE_REST_PORT=""
 	ENGINE_LOG_TARGET=""
@@ -652,6 +653,7 @@ k8s_read_engine() {
 		failed_states) ENGINE_FAILED_STATES="$value" ;;
 		state_jsonpath) ENGINE_STATE_JSONPATH="$value" ;;
 		error_jsonpath) ENGINE_ERROR_JSONPATH="$value" ;;
+		lifecycle_jsonpath) ENGINE_LIFECYCLE_JSONPATH="$value" ;;
 		rest_service_suffix) ENGINE_REST_SERVICE_SUFFIX="$value" ;;
 		rest_port) ENGINE_REST_PORT="$value" ;;
 		log_target) ENGINE_LOG_TARGET="$value" ;;
@@ -665,8 +667,8 @@ k8s_read_engine() {
 	# Every field but the pods selector, which is empty for an engine whose
 	# check reads nothing off the pods.
 	for required in ENGINE_KIND ENGINE_RUNNING_STATE ENGINE_FAILED_STATES ENGINE_STATE_JSONPATH \
-		ENGINE_ERROR_JSONPATH ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT ENGINE_LOG_TARGET \
-		ENGINE_PROVENANCE_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
+		ENGINE_ERROR_JSONPATH ENGINE_LIFECYCLE_JSONPATH ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT \
+		ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
 		[[ -n ${!required} ]] || die "engine-k8s $engine printed no ${required#ENGINE_}, so this run cannot be addressed"
 	done
 }

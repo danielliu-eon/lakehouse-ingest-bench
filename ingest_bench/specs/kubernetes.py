@@ -32,10 +32,17 @@ class EngineKubernetes:
     engine whose check reads nothing off the pods, and its check is then not
     given a pod list at all.
 
-    ``error_jsonpath`` is where the operator writes what went wrong. A
-    document it rejected outright never gains a state — the state belongs to a
-    job it did not create — so that field is the only thing distinguishing a
-    rejection from a run still being placed.
+    ``error_jsonpath`` is where the operator writes what went wrong, and
+    ``lifecycle_jsonpath`` is what says whether it has given up. A document
+    rejected outright never gains a state — the state belongs to a job the
+    operator did not create — so the error field is the only thing that
+    distinguishes a rejection from a run still being placed; and an error
+    alone does not distinguish them, because a reconcile the operator will
+    retry writes one too. The lifecycle is matched against `failed_states`,
+    the same set as the state, since an operator that reports a run's own
+    failure and one that reports the document's use the same words for it.
+    For an engine whose application state *is* its lifecycle, the two paths
+    are the same path.
 
     ``max_object_name_length`` is the longest object name the engine's operator
     accepts, and ``None`` for one that publishes no bound of its own. Staging
@@ -48,6 +55,7 @@ class EngineKubernetes:
     failed_states: tuple[str, ...]
     state_jsonpath: str
     error_jsonpath: str
+    lifecycle_jsonpath: str
     rest_service_suffix: str
     rest_port: int
     log_target: str
@@ -71,6 +79,7 @@ class EngineKubernetes:
             "failed_states": ",".join(self.failed_states),
             "state_jsonpath": self.state_jsonpath,
             "error_jsonpath": self.error_jsonpath,
+            "lifecycle_jsonpath": self.lifecycle_jsonpath,
             "rest_service_suffix": self.rest_service_suffix,
             "rest_port": str(self.rest_port),
             "log_target": self.log_target,

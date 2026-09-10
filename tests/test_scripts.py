@@ -1502,6 +1502,10 @@ case "$*" in
 # field: both engines put their operator's rejection under one named for it.
 # Unset answers empty, which is what an operator that rejected nothing reports.
 *"jsonpath={.status."*error*) printf '%s\\n' "${STUB_ENGINE_ERROR:-}" ;;
+# The lifecycle an operator reports beside that error, for the engine whose
+# lifecycle is a field of its own. For the engine whose application state *is*
+# its lifecycle the path is the state's, and the arm below answers it.
+*"jsonpath={.status.lifecycleState}"*) printf '%s\\n' "${STUB_ENGINE_LIFECYCLE:-}" ;;
 # `-` and not `:-`, so a test can name the empty state an operator that
 # created no job reports, as against not naming one at all.
 *"jsonpath={.status."*) printf '%s\\n' "${STUB_ENGINE_STATE-RUNNING}" ;;
@@ -2759,14 +2763,60 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path) 
             # failure rather than the assertion below.
             "STUB_ENGINE_STATE": "",
             "STUB_ENGINE_ERROR": rejection,
+            # The operator has given up on the document, which is what makes
+            # the error a refusal rather than a step on the way.
+            "STUB_ENGINE_LIFECYCLE": "FAILED",
             "ENGINE_RUNNING_WAIT_S": "30",
             "ENGINE_POLL_S": "1",
         },
     )
     assert run.result.returncode != 0
     assert rejection in run.result.stderr
+    assert "gave up" in run.result.stderr and "FAILED" in run.result.stderr
     assert "did not reach" not in run.result.stderr, "the error is the refusal, not the timeout"
     assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.error}}" in run.calls
+    assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.lifecycleState}}" in run.calls
+
+
+@needs_shell_tools
+def test_an_error_the_operator_has_not_given_up_over_does_not_end_the_wait(tmp_path: Path) -> None:
+    """A reconcile the operator will retry writes an error field too.
+
+    So the error alone cannot be the refusal: an engine whose first reconcile
+    hit a transient failure and whose second would have succeeded would be torn
+    down over a document that was on its way up. The lifecycle beside the error
+    is what separates the two, and until it says the operator has given up the
+    error is reported once and waited out.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+    transient = "could not get the deployment, retrying"
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_STAGE_DIR": str(staged),
+            "STUB_ENGINE_STATE": "",
+            "STUB_ENGINE_ERROR": transient,
+            # Still being reconciled, which is every lifecycle but the failed one.
+            "STUB_ENGINE_LIFECYCLE": "DEPLOYED",
+            "ENGINE_RUNNING_WAIT_S": "4",
+            "ENGINE_POLL_S": "2",
+        },
+    )
+    assert run.result.returncode != 0
+    # The wait is what ends it, and the error it saw is named in that refusal
+    # rather than being the refusal.
+    assert "did not reach" in run.result.stderr
+    assert f"last error: {transient}" in run.result.stderr
+    assert "gave up" not in run.result.stderr
+    # Reported when it appeared and not once per poll.
+    assert run.result.stderr.count("has not given up over") == 1
 
 
 # ---------------------------------------------------------------------------
