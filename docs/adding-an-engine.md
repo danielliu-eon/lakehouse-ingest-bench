@@ -193,8 +193,8 @@ missing verdict or a missing cost:
   running engine does not honour, empty for a run it does.
 
 For a run on a cluster `knobs.py` owes one more thing: `KUBERNETES`, an
-`EngineKubernetes` naming the kind of object a run is, where its state sits in
-the status, what running is called there, which Service carries its HTTP API,
-the labels its pods carry and the longest object name its operator takes. The
-drivers read all but that length through `engine-k8s` and staging checks it, so
-a third engine adds no line to `scripts/` bar the default `--engine` name.
+`EngineKubernetes` naming the kind of object a run is, where its state and its
+error sit in the status, what running is called there, which Service carries its
+HTTP API, the labels its pods carry and the longest object name its operator
+takes. The drivers read all but that length through `engine-k8s` and staging
+checks it, so a third engine adds no line to `scripts/` bar `--engine`'s default.

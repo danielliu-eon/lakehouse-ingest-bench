@@ -38,7 +38,7 @@ import yaml
 from ingest_bench.k8s.render import MARKER_RE, render_template
 from ingest_bench.specs import engines
 from ingest_bench.specs.derive import TABLE_NAMESPACE
-from ingest_bench.specs.kubernetes import NAME, for_name
+from ingest_bench.specs.kubernetes import FIELDS, NAME, for_name
 from ingest_bench.specs.model import KubernetesConfig, load_site
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1497,7 +1497,13 @@ case "$*" in
 *"logs job/corpus-merge"*) cat "${STUB_MERGE_LOG:-$STUB_JOB_LOG}" ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
 *"get pods -l"*) printf '%s\\n' "${STUB_PODS:-}" ;;
-*"jsonpath={.status."*) printf '%s\\n' "${STUB_ENGINE_STATE:-RUNNING}" ;;
+# The run object's error field, told apart from its state by the name of the
+# field: both engines put their operator's rejection under one named for it.
+# Unset answers empty, which is what an operator that rejected nothing reports.
+*"jsonpath={.status."*error*) printf '%s\\n' "${STUB_ENGINE_ERROR:-}" ;;
+# `-` and not `:-`, so a test can name the empty state an operator that
+# created no job reports, as against not naming one at all.
+*"jsonpath={.status."*) printf '%s\\n' "${STUB_ENGINE_STATE-RUNNING}" ;;
 esac
 """
 
@@ -2679,6 +2685,18 @@ def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path
         assert "--pods" not in checked
 
 
+def test_the_shell_reads_every_field_the_descriptor_prints() -> None:
+    """A field no driver reads is a refusal, so adding one to the descriptor is a shell change.
+
+    `k8s_read_engine` dies on a key it has no case for, and it would take every
+    cluster run with it — at staging, after the topic and the table exist. So
+    the two lists are held together here rather than by a run.
+    """
+    text = K8S_LIB.read_text()
+    for field in FIELDS:
+        assert f"\n\t\t{field}) ENGINE_" in text, f"scripts/_k8s.sh reads no {field}"
+
+
 def test_the_shell_and_the_descriptor_mark_a_run_s_name_the_same_way() -> None:
     """The one name in the descriptor the driver has to substitute itself.
 
@@ -2711,6 +2729,43 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
     assert run.result.returncode != 0
     assert f"flinkdeployment/{RUN_OBJECT} went to FAILED" in run.result.stderr
     assert f"logs deploy/{RUN_OBJECT} --tail=40" in run.calls
+
+
+@needs_shell_tools
+def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path) -> None:
+    """A rejected document reports no state at all, so the state wait never ends.
+
+    The state belongs to a job the operator never created; the rejection sits
+    in the error field instead. Without reading it a driver would spend the
+    whole running wait on a document that will never run — and the text there
+    is the only statement of why it was rejected.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "facts.json").write_text(json.dumps(FACTS))
+    for name in ("spec.yaml", "flinkdeployment.yaml", "flink-job-configmap.yaml"):
+        (staged / name).write_text(f"# {name}\n")
+    rejection = "the length must be no more than 45 characters"
+
+    run = _run_driver(
+        STAGE,
+        [str(REPO_ROOT / "runs" / "smoke-flink.yaml"), "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_STAGE_DIR": str(staged),
+            # No state, which is what an operator that created no job reports,
+            # and a running wait long enough that spending it would be the
+            # failure rather than the assertion below.
+            "STUB_ENGINE_STATE": "",
+            "STUB_ENGINE_ERROR": rejection,
+            "ENGINE_RUNNING_WAIT_S": "30",
+            "ENGINE_POLL_S": "1",
+        },
+    )
+    assert run.result.returncode != 0
+    assert rejection in run.result.stderr
+    assert "did not reach" not in run.result.stderr, "the error is the refusal, not the timeout"
+    assert f"get flinkdeployment/{RUN_OBJECT} -o jsonpath={{.status.error}}" in run.calls
 
 
 # ---------------------------------------------------------------------------

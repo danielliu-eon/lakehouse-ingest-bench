@@ -32,6 +32,10 @@ def test_every_managed_engine_says_how_it_is_addressed(engine: str) -> None:
     assert set(descriptor.texts()) == set(FIELDS)
     assert descriptor.kind and descriptor.running_state and descriptor.failed_states
     assert descriptor.state_jsonpath.startswith("{.status.") and descriptor.rest_port > 0
+    # A document the operator rejected reports no state, so the error field
+    # is the only thing that tells a rejection from a run still starting.
+    assert descriptor.error_jsonpath.startswith("{.status.")
+    assert descriptor.error_jsonpath != descriptor.state_jsonpath
     # Two documents, named apart: a driver applies the ConfigMap first because
     # the other one mounts it.
     assert descriptor.document_file.endswith(".yaml") and descriptor.configmap_file.endswith(".yaml")
@@ -49,6 +53,7 @@ def test_the_spark_descriptor_names_what_the_operator_named() -> None:
     descriptor = engines.kubernetes_for("spark")
     assert descriptor.kind == "sparkapplication"
     assert descriptor.state_jsonpath == "{.status.applicationState.state}"
+    assert descriptor.error_jsonpath == "{.status.applicationState.errorMessage}"
     assert descriptor.rest_service_suffix == "-ui-svc"
     assert descriptor.rest_port == 4040
     assert for_name(descriptor.log_target, RUN_OBJECT) == f"pod/{RUN_OBJECT}-driver"
@@ -78,6 +83,7 @@ def test_the_flink_descriptor_names_what_the_operator_named() -> None:
     assert descriptor.kind == "flinkdeployment"
     assert descriptor.running_state == "RUNNING"
     assert descriptor.state_jsonpath == "{.status.jobStatus.state}"
+    assert descriptor.error_jsonpath == "{.status.error}"
     assert descriptor.rest_service_suffix == "-rest"
     assert descriptor.rest_port == 8081
     assert for_name(descriptor.log_target, RUN_OBJECT) == f"deploy/{RUN_OBJECT}"

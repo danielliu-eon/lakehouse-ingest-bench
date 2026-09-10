@@ -483,14 +483,15 @@ k8s_engine_tail() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "$1" --tail=40 >&2 || true
 }
 
-# k8s_engine_state <kind> <name> <jsonpath> — the state an operator reports for
-# a run, empty until it reports one.
+# k8s_engine_field <kind> <name> <jsonpath> — one field of what an operator
+# reports about a run, empty until it reports one.
 #
-# A missing object is the normal first answer — the operator creates it seconds
-# after the apply — so a failed read is empty rather than fatal, and it is the
-# caller's timeout that turns a state which never arrives into a refusal naming
-# the object.
-k8s_engine_state() {
+# The state and the error text are both read through this, because "not yet"
+# and "never" are the same empty answer for either of them. A missing object is
+# the normal first answer — the operator creates it seconds after the apply —
+# so a failed read is empty rather than fatal, and it is the caller that turns
+# an answer which never arrives into a refusal naming the object.
+k8s_engine_field() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get "$1/$2" \
 		-o "jsonpath=$3" 2>/dev/null || true
 }
@@ -592,6 +593,7 @@ k8s_read_engine() {
 	ENGINE_RUNNING_STATE=""
 	ENGINE_FAILED_STATES=""
 	ENGINE_STATE_JSONPATH=""
+	ENGINE_ERROR_JSONPATH=""
 	ENGINE_REST_SERVICE_SUFFIX=""
 	ENGINE_REST_PORT=""
 	ENGINE_LOG_TARGET=""
@@ -611,6 +613,7 @@ k8s_read_engine() {
 		running_state) ENGINE_RUNNING_STATE="$value" ;;
 		failed_states) ENGINE_FAILED_STATES="$value" ;;
 		state_jsonpath) ENGINE_STATE_JSONPATH="$value" ;;
+		error_jsonpath) ENGINE_ERROR_JSONPATH="$value" ;;
 		rest_service_suffix) ENGINE_REST_SERVICE_SUFFIX="$value" ;;
 		rest_port) ENGINE_REST_PORT="$value" ;;
 		log_target) ENGINE_LOG_TARGET="$value" ;;
@@ -624,8 +627,8 @@ k8s_read_engine() {
 	# Every field but the pods selector, which is empty for an engine whose
 	# check reads nothing off the pods.
 	for required in ENGINE_KIND ENGINE_RUNNING_STATE ENGINE_FAILED_STATES ENGINE_STATE_JSONPATH \
-		ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR \
-		ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
+		ENGINE_ERROR_JSONPATH ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT ENGINE_LOG_TARGET \
+		ENGINE_PROVENANCE_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
 		[[ -n ${!required} ]] || die "engine-k8s $engine printed no ${required#ENGINE_}, so this run cannot be addressed"
 	done
 }

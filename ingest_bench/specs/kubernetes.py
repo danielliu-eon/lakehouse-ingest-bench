@@ -32,6 +32,11 @@ class EngineKubernetes:
     engine whose check reads nothing off the pods, and its check is then not
     given a pod list at all.
 
+    ``error_jsonpath`` is where the operator writes what went wrong. A
+    document it rejected outright never gains a state — the state belongs to a
+    job it did not create — so that field is the only thing distinguishing a
+    rejection from a run still being placed.
+
     ``max_object_name_length`` is the longest object name the engine's operator
     accepts, and ``None`` for one that publishes no bound of its own. Staging
     checks the derived name against it, so it is the one field below that no
@@ -42,6 +47,7 @@ class EngineKubernetes:
     running_state: str
     failed_states: tuple[str, ...]
     state_jsonpath: str
+    error_jsonpath: str
     rest_service_suffix: str
     rest_port: int
     log_target: str
@@ -64,6 +70,7 @@ class EngineKubernetes:
             "running_state": self.running_state,
             "failed_states": ",".join(self.failed_states),
             "state_jsonpath": self.state_jsonpath,
+            "error_jsonpath": self.error_jsonpath,
             "rest_service_suffix": self.rest_service_suffix,
             "rest_port": str(self.rest_port),
             "log_target": self.log_target,

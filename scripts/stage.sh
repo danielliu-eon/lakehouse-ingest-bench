@@ -178,7 +178,7 @@ else
 	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for $ENGINE_KIND/$RUN_OBJECT to reach $ENGINE_RUNNING_STATE"
 	waited=0
 	while :; do
-		state="$(k8s_engine_state "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_STATE_JSONPATH")"
+		state="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_STATE_JSONPATH")"
 		if [[ $state == "$ENGINE_RUNNING_STATE" ]]; then
 			log "$ENGINE_KIND/$RUN_OBJECT is $state"
 			break
@@ -188,6 +188,15 @@ else
 		if [[ -n $state && ",$ENGINE_FAILED_STATES," == *",$state,"* ]]; then
 			k8s_engine_tail "$ENGINE_LOG_TARGET"
 			die "$ENGINE_KIND/$RUN_OBJECT went to $state before it ran; the lines above are the engine's own log"
+		fi
+		# A document the operator rejected reports no state, because the state
+		# belongs to a job it never created — so the loop above would spend the
+		# whole wait on one. The error field is where the rejection is, and it
+		# is empty for a run still being placed. No log is tailed with it: a
+		# rejected document has no pods to have written one.
+		error="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_ERROR_JSONPATH")"
+		if [[ -n $error ]]; then
+			die "$ENGINE_KIND/$RUN_OBJECT reports an error before it ran: $error"
 		fi
 		if ((waited >= ENGINE_RUNNING_WAIT_S)); then
 			k8s_engine_tail "$ENGINE_LOG_TARGET"

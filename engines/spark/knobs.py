@@ -104,6 +104,9 @@ KUBERNETES = EngineKubernetes(
     # it out would only postpone the same refusal.
     failed_states=("FAILED", "SUBMISSION_FAILED", "FAILING", "COMPLETED", "SUCCEEDING"),
     state_jsonpath="{.status.applicationState.state}",
+    # The operator's own field beside that state: a submission it could not
+    # make says why here.
+    error_jsonpath="{.status.applicationState.errorMessage}",
     rest_service_suffix="-ui-svc",
     rest_port=4040,
     log_target=f"pod/{NAME}-driver",

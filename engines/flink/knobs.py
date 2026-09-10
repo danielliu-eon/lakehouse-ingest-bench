@@ -99,6 +99,9 @@ KUBERNETES = EngineKubernetes(
     # waiting any of the three out would only postpone the same refusal.
     failed_states=("FAILED", "CANCELED", "FINISHED"),
     state_jsonpath="{.status.jobStatus.state}",
+    # A document the operator rejected has no jobStatus at all, and its
+    # reconciliation errors land here as JSON text.
+    error_jsonpath="{.status.error}",
     rest_service_suffix="-rest",
     rest_port=8081,
     log_target=f"deploy/{NAME}",
