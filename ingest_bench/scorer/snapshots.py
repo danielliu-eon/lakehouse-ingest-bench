@@ -19,7 +19,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.serializers import FromInputFile
 from pyiceberg.table import Table
 from pyiceberg.table.metadata import TableMetadata
-from pyiceberg.table.snapshots import ADDED_RECORDS, TOTAL_RECORDS, Snapshot, Summary
+from pyiceberg.table.snapshots import Snapshot, Summary
 
 from ingest_bench.catalog import open_catalog, table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
@@ -27,14 +27,17 @@ from ingest_bench.corpus.metadata import CorpusMetadata
 
 @dataclass(frozen=True)
 class SnapshotInfo:
-    """One commit, reduced to what the score is computed from."""
+    """One commit, reduced to what the score is computed from.
+
+    No row counts: a summary's own are optional by spec and engines differ over
+    which they write, so the tally is built from the manifest entries the commit
+    added instead — which is also the surface any reader of the table sees.
+    """
 
     snapshot_id: int
     parent_id: int | None
     timestamp_ms: int
     operation: str
-    total_records: int | None
-    added_records: int | None
 
 
 @dataclass(frozen=True)
@@ -112,17 +115,6 @@ def _summary(snapshot: Snapshot) -> Summary:
     return snapshot.summary
 
 
-def _summary_int(summary: Summary, key: str) -> int | None:
-    """One numeric summary property, or ``None`` where the writer omitted it.
-
-    These properties are optional by spec and engines differ over which they
-    write, so absence is reported rather than defaulted: a zero here would read
-    as a commit that added nothing.
-    """
-    raw = summary.get(key)
-    return None if raw is None else int(raw)
-
-
 def snapshots_in_order(metadata: TableMetadata) -> list[SnapshotInfo]:
     """Every snapshot the table holds, in commit order.
 
@@ -141,8 +133,6 @@ def snapshots_in_order(metadata: TableMetadata) -> list[SnapshotInfo]:
                 parent_id=snapshot.parent_snapshot_id,
                 timestamp_ms=snapshot.timestamp_ms,
                 operation=summary.operation.value,
-                total_records=_summary_int(summary, TOTAL_RECORDS),
-                added_records=_summary_int(summary, ADDED_RECORDS),
             )
         )
     return infos

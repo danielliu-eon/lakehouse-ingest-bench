@@ -120,13 +120,6 @@ def _prefix_end(ordered: Sequence[SnapshotInfo], at_ms: int) -> int | None:
     return end
 
 
-def snapshot_at_or_before(metadata: TableMetadata, at_ms: int) -> SnapshotInfo | None:
-    """The commit a reader at ``at_ms`` would have been looking at."""
-    ordered = snapshots_in_order(metadata)
-    end = _prefix_end(ordered, at_ms)
-    return None if end is None else ordered[end]
-
-
 def _quantiles(values: Sequence[int]) -> dict[str, float | None]:
     """p50/p90/p99 of a set of counts or sizes, or nulls where there are none.
 

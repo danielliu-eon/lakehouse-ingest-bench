@@ -166,17 +166,24 @@ def test_data_files_at_is_the_whole_live_set_not_one_commits_addition(tmp_path: 
         assert info.size_bytes == Path(info.path.removeprefix("file://")).stat().st_size
 
 
-def test_snapshot_at_or_before_ends_the_prefix_a_reader_would_have_seen(tmp_path: Path) -> None:
+def test_the_prefix_ends_at_the_commit_a_reader_would_have_seen(tmp_path: Path) -> None:
+    """Each rung of the ladder reports the table as of one instant.
+
+    So the prefix ends at the last commit whose own timestamp is at or before
+    that instant, and never at the next one: answering with a commit a reader
+    could not yet have seen would report the table's geometry ahead of itself,
+    on the strength of a clock that disagrees.
+    """
     props = _props(tmp_path)
     table = _table(props, "prefix")
     _appends(table)
     metadata = _retimed(snapshots.read_metadata(snapshots.load_table(props, "bench.prefix")), COMMIT_OFFSETS_S)
     ordered = snapshots.snapshots_in_order(metadata)
-    assert geometry.snapshot_at_or_before(metadata, EPOCH_MS + 50_000) is None
-    assert geometry.snapshot_at_or_before(metadata, EPOCH_MS + 100_000) == ordered[0]
-    assert geometry.snapshot_at_or_before(metadata, EPOCH_MS + 699_000) == ordered[0]
-    assert geometry.snapshot_at_or_before(metadata, EPOCH_MS + 1_900_000) == ordered[3]
-    assert geometry.snapshot_at_or_before(metadata, EPOCH_MS + 9_999_000) == ordered[3]
+    assert geometry._prefix_end(ordered, EPOCH_MS + 50_000) is None
+    assert geometry._prefix_end(ordered, EPOCH_MS + 100_000) == 0
+    assert geometry._prefix_end(ordered, EPOCH_MS + 699_000) == 0
+    assert geometry._prefix_end(ordered, EPOCH_MS + 1_900_000) == 3
+    assert geometry._prefix_end(ordered, EPOCH_MS + 9_999_000) == 3
 
 
 def _assert_ladder(report: dict[str, object], sizes: list[int]) -> None:
