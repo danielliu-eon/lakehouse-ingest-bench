@@ -18,7 +18,7 @@ from ingest_bench.catalog import open_catalog
 from ingest_bench.clock import Clock, now_ms
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.producer import publish_log
-from ingest_bench.scorer import cli, score, snapshots
+from ingest_bench.scorer import cli, score, snapshots, tally
 from ingest_bench.table import create
 from tests.test_tally import _rows_of
 
@@ -566,6 +566,46 @@ def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
     # The commit stays unseen, so the retry reads it whole.
     assert state.seen == set()
     assert score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE) == []
+
+
+def test_a_read_phase_past_the_poll_interval_says_so(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poll longer than its own interval is announced, and a quick one is not.
+
+    Every poll carries what its read cost and how many files it read, and a
+    read phase past the interval gets a line of its own — because a reader that
+    cannot finish inside its interval is falling behind the table, and the only
+    other symptom of it is a verdict voided for staleness, which says nothing
+    about which side was slow.
+    """
+    table = _many_file_commit(tmp_path, corpus, "slow", files=64)
+    args = _many_file_args(tmp_path, corpus, "slow", read_workers=1, poll_interval_s=5.0)
+    clock = StepClock(now_ms())
+    unwrapped = tally.read_id_column
+
+    def slowly(path: str, file_format: str) -> np.ndarray:
+        clock.sleep(0.1)
+        return unwrapped(path, file_format)
+
+    # The loop reaches it through the same module object, so this is the
+    # function it will call.
+    monkeypatch.setattr(score, "read_id_column", slowly)
+    log = io.StringIO()
+    state = score._load_inputs(args, clock, log)
+    assert score._poll_once(state, clock, log) is True
+    printed = log.getvalue()
+    assert "SLOW_POLL poll_ms=6400 files=64 interval_ms=5000" in printed, printed
+    assert "poll_ms=6400 files=64" in printed.rsplit("POLL t=", 1)[1], printed
+
+    # The same loop, reading a commit of one file at the speed of the disk.
+    monkeypatch.setattr(score, "read_id_column", unwrapped)
+    table.append(_rows_of(metadata.read_manifest(corpus.uri)[1], corpus))
+    clock.sleep(5.0)
+    assert score._poll_once(state, clock, log) is True
+    printed = log.getvalue()
+    assert printed.count("SLOW_POLL") == 1, printed
+    assert "poll_ms=0 files=1" in printed.rsplit("POLL t=", 1)[1], printed
 
 
 def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(

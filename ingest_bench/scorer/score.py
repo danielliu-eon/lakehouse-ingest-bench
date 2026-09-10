@@ -415,7 +415,15 @@ def _load_table(state: ScoreState, log: TextIO) -> Table | None:
     return table
 
 
-def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> None:
+@dataclass(frozen=True)
+class PollRead:
+    """What one poll's read of the table found, beside what it cost to find it."""
+
+    seen_new: bool
+    files: int
+
+
+def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> int:
     """Tally one commit's new data files, reading their id columns at once.
 
     A wide fleet writing a high-cardinality partition commits hundreds of small
@@ -433,7 +441,7 @@ def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> None:
     """
     pending = [file for file in files if file.path not in state.applied_files]
     if not pending:
-        return
+        return 0
     pool = ThreadPoolExecutor(max_workers=min(state.args.read_workers, len(pending)))
     try:
         reads = {pool.submit(read_id_column, file.path, file.file_format): file.path for file in pending}
@@ -446,9 +454,10 @@ def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> None:
         # longer needs would hold it open for the whole commit — which is the
         # delay the failure is being reported instead of.
         pool.shutdown(wait=False, cancel_futures=True)
+    return len(pending)
 
 
-def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
+def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> PollRead:
     """Read both sides of the run and apply every commit not yet seen.
 
     Only appends feed the tally. A rewrite re-adds rows the tally already holds
@@ -471,23 +480,24 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     if table is None:
         # Zero rows and no snapshots, which is what the table holds. The sample
         # `_poll_once` takes from this is the baseline the launch waits for.
-        return False
+        return PollRead(seen_new=False, files=0)
     if state.schema_mismatches is None:
         state.schema_mismatches = check_table_schema(table.schema(), state.corpus)
     if state.schema_mismatches:
         # Nothing is tallied from a table of the wrong shape. The rows it does
         # hold would produce figures about a different table than the corpus
         # describes, and publishing them is what the void exists to prevent.
-        return False
+        return PollRead(seen_new=False, files=0)
     document = read_metadata(table)
     seen_new = False
+    read_files = 0
     for info in snapshots_in_order(document):
         if info.snapshot_id in state.seen:
             continue
         first_seen_ms = clock.now_ms()
         files = added_files(document, info.snapshot_id, table.io)
         if info.operation == APPEND:
-            _apply_added_files(state, files)
+            read_files += _apply_added_files(state, files)
             # Appended before the artifact line, so a failed write is retried
             # against a duplicate observation rather than a duplicate line: the
             # repeated observation is the same step of the same function and
@@ -510,7 +520,7 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
         state.seen.add(info.snapshot_id)
         state.applied_files.clear()
         seen_new = True
-    return seen_new
+    return PollRead(seen_new=seen_new, files=read_files)
 
 
 def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
@@ -520,9 +530,16 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     summary: it has no new information, and a keep-up sample invented from the
     last one would hide the gap from the gate, which reads an empty window as a
     reader that stopped rather than as an empty backlog.
+
+    Every poll reports what its read cost and how many data files it read, and
+    a read phase past the interval gets a line of its own. A reader that cannot
+    finish inside its interval is falling behind the table, and its only other
+    symptom is a verdict voided for staleness — which says the reading is old
+    without saying that reading the commits is what took the time.
     """
+    started_ms = clock.now_ms()
     try:
-        seen_new = _read_inputs(state, clock, log)
+        read = _read_inputs(state, clock, log)
     except Exception as error:
         state.read_failures += 1
         print(
@@ -535,6 +552,8 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
         return False
     state.read_failures = 0
     at_ms = clock.now_ms()
+    poll_ms = at_ms - started_ms
+    interval_ms = round(state.args.poll_interval_s * 1000)
     sample = make_sample(
         at_ms,
         state.offered_rows(),
@@ -547,14 +566,20 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     # Only these two, and every poll: they are what `gate` judges a run in
     # flight on, and the rest of the artifacts exist only once it has ended.
     _mirror(state.args, (KEEPUP_SAMPLES_FILE, SUMMARY_FILE))
+    if poll_ms > interval_ms:
+        print(
+            f"SLOW_POLL poll_ms={poll_ms} files={read.files} interval_ms={interval_ms}",
+            file=log,
+            flush=True,
+        )
     print(
         f"POLL t={(at_ms - state.args.epoch_ms) / 1000:.1f} prefix={state.tally.prefix()}/{state.last_batch()} "
         f"committed={sample.committed_rows} offered={sample.offered_rows} backlog={sample.backlog_rows} "
-        f"snapshots={len(state.seen)}",
+        f"snapshots={len(state.seen)} poll_ms={poll_ms} files={read.files}",
         file=log,
         flush=True,
     )
-    return seen_new
+    return read.seen_new
 
 
 def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
