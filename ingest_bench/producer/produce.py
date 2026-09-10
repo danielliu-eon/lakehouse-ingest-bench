@@ -186,7 +186,8 @@ def run(
     producer = producer_factory(
         kafka_auth.librdkafka_config({**default_producer_config(args.bootstrap, args.compression), **args.kafka_props})
     )
-    records: list[publish_log.PublishRecord] = []
+    batches = 0
+    behind = 0
     offered = 0
     published = 0
     errors = 0
@@ -213,13 +214,14 @@ def run(
             errors=outcome.errors,
         )
         publish_log.append(args.publish_log_path, record)
-        records.append(record)
+        batch_delay = record.first_ack_ms - record.scheduled_ms
+        behind = max(behind, batch_delay) if batches else batch_delay
+        batches += 1
         offered += outcome.rows
         published += outcome.rows - outcome.errors
         errors += outcome.errors
 
         now_ms = clock.now_ms()
-        behind = publish_log.behind_ms(records)
         if now_ms >= next_progress_ms:
             print(
                 f"PROGRESS offered={offered} published={published} behind_ms={behind} errors={errors}",
@@ -241,11 +243,11 @@ def run(
                 _upload(args.upload_prefix, args.publish_log_path)
             return 1
 
-    publish_log.append_done(args.publish_log_path, args.shard, len(records))
+    publish_log.append_done(args.publish_log_path, args.shard, batches)
     if args.upload_prefix is not None:
         _upload(args.upload_prefix, args.publish_log_path)
     print(
-        f"PRODUCE DONE batches={len(records)} rows={offered} behind_ms={publish_log.behind_ms(records)}",
+        f"PRODUCE DONE batches={batches} rows={offered} behind_ms={behind}",
         file=log,
         flush=True,
     )

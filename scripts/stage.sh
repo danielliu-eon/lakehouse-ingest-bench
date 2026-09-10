@@ -100,14 +100,14 @@ trap delete_stage_configmaps EXIT
 k8s_configmap_from_file "$SPEC_CONFIGMAP" "$(basename -- "$SPEC")=$SPEC"
 k8s_configmap_from_file "$SITE_CONFIGMAP" "site.yaml=$SITE_FILE"
 
-STAGE_COMMAND="stage --spec /runs/$(basename -- "$SPEC") --site /site/site.yaml --runs-dir /work/runs"
-STAGE_COMMAND="$STAGE_COMMAND --image-tag $TAG --upload-prefix $RUNS_ROOT"
+STAGE_COMMAND=(stage --spec "/runs/$(basename -- "$SPEC")" --site /site/site.yaml --runs-dir /work/runs
+	--image-tag "$TAG" --upload-prefix "$RUNS_ROOT")
 k8s_render_apply deploy/k8s/stage-job.yaml.tmpl \
 	"NAME=$STAGE_JOB" \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$STAGE_COMMAND" \
+	"COMMAND=$(job_command_json "${STAGE_COMMAND[@]}")" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \

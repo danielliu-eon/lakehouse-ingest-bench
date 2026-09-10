@@ -186,18 +186,19 @@ BREACH_FILE="$RUN_DIR/gate-breaches"
 
 TORN_DOWN=0
 OVERRAN=0
-waited=0
+deadline=$((SECONDS + RUN_MAX_S))
 # Report an unreadable breach file only once.
 BREACH_FILE_REPORTED=""
 while :; do
 	# Enforce the timeout even when no summary can be read.
-	if ((waited >= RUN_MAX_S)); then
+	if ((SECONDS >= deadline)); then
 		log "$RUN_ID was still running after ${RUN_MAX_S}s, so it is being torn down unfinished"
 		OVERRAN=1
 		break
 	fi
-	sleep "$GATE_INTERVAL_S"
-	waited=$((waited + GATE_INTERVAL_S))
+	remaining=$((deadline - SECONDS))
+	sleep "$((remaining < GATE_INTERVAL_S ? remaining : GATE_INTERVAL_S))"
+	((SECONDS < deadline)) || continue
 
 	# Let gate --teardown apply the consecutive-breach rule; do not stop on one verdict.
 	GATE_STATUS=0

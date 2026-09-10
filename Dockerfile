@@ -22,8 +22,7 @@ RUN uv sync --frozen --no-dev --extra aws
 # Give packaged commands a fixed location for presets and schemas.
 ENV INGEST_BENCH_WORKLOADS=/app/workloads
 
-# Accept a single command string, as used by Compose and Job drivers. The shell may remain
-# PID 1; callers needing graceful signal delivery must include exec. Producer logs are
-# appended incrementally to retain progress if stopped.
+# Compose supplies a command string. Kubernetes Jobs override this entrypoint with argv.
+# Shell callers needing graceful signal delivery must include exec.
 ENTRYPOINT ["/bin/sh", "-c"]
 CMD ["gen-corpus --help"]

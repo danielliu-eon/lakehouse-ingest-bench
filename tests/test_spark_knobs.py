@@ -605,3 +605,12 @@ def test_a_reference_spark_cannot_resolve_is_refused_rather_than_rendered(
     d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     with pytest.raises(ValueError, match=r"spark\.sql\.catalog\.ice\.rest\.token.*site\.kafka\.security"):
         knobs.render_conf(_spec(), site, d)
+
+
+@pytest.mark.parametrize("warehouse", ["s3://warehouse", "gs://warehouse", "file:///warehouse"])
+def test_explicit_file_io_overrides_the_storage_default(meta: metadata.CorpusMetadata, warehouse: str) -> None:
+    site = replace(
+        _site(), warehouse=warehouse, catalog_props={**_site().catalog_props, "io-impl": "example.CustomFileIO"}
+    )
+    conf = knobs.render_conf(_spec(), site, _derived(site, meta))
+    assert conf["spark.sql.catalog.ice.io-impl"] == "example.CustomFileIO"

@@ -18,14 +18,13 @@ from typing import cast
 import yaml
 
 from ingest_bench.collect.redact import redact_document, redact_props
+from ingest_bench.collect.schema import SCHEMA_VERSION as SCHEMA_VERSION
 from ingest_bench.producer import publish_log
 from ingest_bench.producer.publish_log import PublishRecord
 from ingest_bench.scorer import score
 from ingest_bench.scorer.geometry import GEOMETRY_FILE
 from ingest_bench.specs.engines import fleet_for
 from ingest_bench.specs.model import FleetRole, RunSpec, SiteConfig, load_run_spec
-
-SCHEMA_VERSION = 2
 
 RUN_JSON_FILE = "run.json"
 
@@ -57,15 +56,22 @@ def _score_path(name: str) -> str:
 
 
 def _read_json(path: Path) -> dict[str, object]:
-    return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: must be a JSON object")
+    return cast(dict[str, object], value)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
-    return [
-        cast(dict[str, object], json.loads(line))
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    rows: list[dict[str, object]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError(f"{path}:{line_number}: must be a JSON object")
+        rows.append(value)
+    return rows
 
 
 @dataclass

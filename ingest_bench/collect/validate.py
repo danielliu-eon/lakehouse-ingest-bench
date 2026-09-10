@@ -13,9 +13,8 @@ import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
 
-from ingest_bench.collect.run_json import SCHEMA_VERSION
+from ingest_bench.collect.schema import FleetRole, ResultDocument, Run, parse_result
 from ingest_bench.collect.table import render_results_table
 from ingest_bench.corpus.cli import workloads_dir
 from ingest_bench.corpus.preset import corpus_hash, load_preset
@@ -61,26 +60,25 @@ def _account_id_failures(path: Path, value: object) -> list[str]:
     return []
 
 
-def _fleet_failures(fleet: list[dict[str, object]]) -> list[str]:
+def _fleet_failures(fleet: list[FleetRole]) -> list[str]:
     if not fleet:
         return ["fleet: run.fleet is empty"]
     failures = []
     for role in fleet:
         name = role["role"]
         # Reject empty, unspecified, and unreplaced example machine types.
-        machine_type = str(role["machine_type"])
+        machine_type = role["machine_type"]
         if not machine_type or machine_type == MACHINE_TYPE_UNSPECIFIED or machine_type.startswith(PLACEHOLDER):
             failures.append(f"fleet: role {name!r} has no machine_type ({machine_type!r})")
-        for field in ("vcpu", "gib"):
-            value = role[field]
-            if not (isinstance(value, int | float) and value > 0):
+        for field, value in (("vcpu", role["vcpu"]), ("gib", role["gib"])):
+            if value <= 0:
                 failures.append(f"fleet: role {name!r} has a non-positive {field} ({value!r})")
     return failures
 
 
-def _corpus_failures(run: dict[str, object], shipped_presets: set[str], workloads: Path) -> list[str]:
-    spec = cast(dict[str, object], run["spec"])
-    name = str(spec["corpus"])
+def _corpus_failures(run: Run, shipped_presets: set[str], workloads: Path) -> list[str]:
+    spec = run["spec"]
+    name = spec["corpus"]
     if name not in shipped_presets:
         return [f"corpus: {name!r} is not a shipped preset (workloads/presets/*.yaml)"]
     corpus_hash_value = run["corpus_hash"]
@@ -95,13 +93,13 @@ def _corpus_failures(run: dict[str, object], shipped_presets: set[str], workload
     return []
 
 
-def _document_failures(document: dict[str, object], shipped_presets: set[str], workloads: Path) -> list[str]:
+def _document_failures(document: ResultDocument, shipped_presets: set[str], workloads: Path) -> list[str]:
     """Every rule beyond `schema_version` that a document must satisfy."""
-    run = cast(dict[str, object], document["run"])
-    spec = cast(dict[str, object], run["spec"])
+    run = document["run"]
+    spec = run["spec"]
     failures: list[str] = []
 
-    producer = cast(dict[str, object], spec["producer"]) if "producer" in spec else {}
+    producer = spec.get("producer", {})
     # A null `seconds` value denotes a full offer, even when the key is present.
     if "seconds" in producer and producer["seconds"] is not None:
         failures.append(
@@ -111,42 +109,41 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
 
     failures.extend(_corpus_failures(run, shipped_presets, workloads))
 
-    derived = cast(dict[str, object], document["derived"])
+    derived = document["derived"]
     if derived["keepup"] is None:
         failures.append("derived.keepup: is null")
-    if cast(dict[str, object], derived["producer"])["producer_bound"] is None:
+    if derived["producer"]["producer_bound"] is None:
         failures.append("derived.producer.producer_bound: is null")
 
-    data = cast(dict[str, object], document["data"])
+    data = document["data"]
     if data["summary"] is None:
         failures.append("data.summary: is null — a published result must include the scorer's summary")
 
-    failures.extend(_fleet_failures(cast(list[dict[str, object]], run["fleet"])))
+    failures.extend(_fleet_failures(run["fleet"]))
 
     site_pricing = run["site_pricing"]
-    if not isinstance(site_pricing, dict) or "vcpu_hour_usd" not in site_pricing or "gib_hour_usd" not in site_pricing:
-        failures.append("site_pricing: run.site_pricing is missing or incomplete")
-    else:
-        # Example zero prices are placeholders, not a valid cost disclosure.
-        for field in ("vcpu_hour_usd", "gib_hour_usd"):
-            price = site_pricing[field]
-            if not (isinstance(price, int | float) and not isinstance(price, bool) and price > 0):
-                failures.append(f"site_pricing.{field}: is {price!r}, so the cost column has no price behind it")
+    # Example zero prices are placeholders, not a valid cost disclosure.
+    for field, price in (
+        ("vcpu_hour_usd", site_pricing["vcpu_hour_usd"]),
+        ("gib_hour_usd", site_pricing["gib_hour_usd"]),
+    ):
+        if price <= 0:
+            failures.append(f"site_pricing.{field}: is {price!r}, so the cost column has no price behind it")
 
     return failures
 
 
-def _freshness_failures(documents: list[tuple[Path, dict[str, object]]]) -> list[str]:
+def _freshness_failures(documents: list[tuple[Path, ResultDocument]]) -> list[str]:
     """Find table and topic names reused across published results."""
     failures: list[str] = []
     for field in ("table", "topic"):
         seen: dict[str, Path] = {}
         for path, document in documents:
-            run = cast(dict[str, object], document["run"])
-            if field not in run or run[field] is None:
+            run = document["run"]
+            name = run.get("table") if field == "table" else run.get("topic")
+            if name is None:
                 failures.append(f"{path}: {field}: run.{field} is absent, so its freshness cannot be checked")
                 continue
-            name = str(run[field])
             if name in seen:
                 failures.append(f"{path}: {field}: {name!r} is also the {field} of {seen[name]}")
                 continue
@@ -161,24 +158,27 @@ def validate(results_dir: Path, *, workloads: Path) -> list[str]:
     """
     shipped_presets = {preset_path.stem for preset_path in (workloads / "presets").glob("*.yaml")}
     failures: list[str] = []
-    documents: list[tuple[Path, dict[str, object]]] = []
-    all_schema_version_2 = True
+    documents: list[tuple[Path, ResultDocument]] = []
+    all_renderable = True
 
     for path in sorted(results_dir.glob("**/*.json")):
         text = path.read_text(encoding="utf-8")
         failures.extend(_uri_failures(path, text))
         try:
-            document = cast(dict[str, object], json.loads(text))
+            value = json.loads(text)
         except json.JSONDecodeError as err:
             failures.append(f"{path}: json: {err}")
-            all_schema_version_2 = False
+            all_renderable = False
             continue
-        failures.extend(_account_id_failures(path, document))
-        schema_version = document["schema_version"] if "schema_version" in document else None
-        if schema_version != SCHEMA_VERSION:
-            failures.append(f"{path}: schema_version: must be {SCHEMA_VERSION}, got {schema_version!r}")
-            all_schema_version_2 = False
+        failures.extend(_account_id_failures(path, value))
+        try:
+            document = parse_result(value)
+        except ValueError as err:
+            failures.append(f"{path}: {err}")
+            all_renderable = False
             continue
+        if document["data"]["summary"] is None:
+            all_renderable = False
         documents.append((path, document))
         failures.extend(f"{path}: {failure}" for failure in _document_failures(document, shipped_presets, workloads))
 
@@ -186,7 +186,7 @@ def validate(results_dir: Path, *, workloads: Path) -> list[str]:
     # is already reported above.
     failures.extend(_freshness_failures(documents))
 
-    if all_schema_version_2:
+    if all_renderable:
         results_md_path = results_dir / RESULTS_MD
         rendered = render_results_table(documents)
         current = results_md_path.read_text(encoding="utf-8") if results_md_path.exists() else None

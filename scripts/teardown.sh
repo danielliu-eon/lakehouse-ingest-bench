@@ -125,7 +125,8 @@ k8s_delete job "$(scorer_job "$RUN_ID")"
 # ---------------------------------------------------------------------------
 
 DROP_JOB="drop-topic-$(k8s_object_name "$RUN_ID")"
-DROP_COMMAND="drop-topic --bootstrap $BOOTSTRAP --topic $TOPIC$(site_flags '.kafka.security' --kafka-prop)"
+read_site_prop_flags '.kafka.security' --kafka-prop
+DROP_COMMAND=(drop-topic --bootstrap "$BOOTSTRAP" --topic "$TOPIC" ${SITE_PROP_FLAGS[@]+"${SITE_PROP_FLAGS[@]}"})
 log "dropping topic $TOPIC as job/$DROP_JOB"
 k8s_delete job "$DROP_JOB"
 k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
@@ -133,7 +134,7 @@ k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$DROP_COMMAND" \
+	"COMMAND=$(job_command_json "${DROP_COMMAND[@]}")" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \

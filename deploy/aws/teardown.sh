@@ -12,6 +12,8 @@ PREREQ_DOC="deploy/aws/README.md"
 AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/_lib.sh
 source "$AWS_DIR/../../scripts/_lib.sh"
+# shellcheck source=deploy/aws/_resources.sh
+source "$AWS_DIR/_resources.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -235,46 +237,6 @@ fi
 # ---------------------------------------------------------------------------
 # The bucket, last and asked about
 # ---------------------------------------------------------------------------
-
-# Treat both a missing tag set and an empty tag list as unowned.
-bucket_is_ours() {
-	local tags
-	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
-		--query "TagSet[?Key=='$TAG_KEY'].Value" --output text 2>/dev/null)" || return 1
-	[[ $tags == true ]]
-}
-
-# Require the benchmark tag before deleting corpus, run artifacts, and
-# warehouse data. A matching bucket name alone does not establish ownership.
-remove_bucket() {
-	if ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
-		log "s3://$BUCKET is already gone"
-		return 0
-	fi
-	bucket_is_ours "$BUCKET" ||
-		die "cannot verify the $TAG_KEY=true tag on s3://$BUCKET: refusing to empty it.
-     Check bucket access and BUCKET, or delete the bucket manually"
-	printf 'deleting %s permanently removes:\n' "s3://$BUCKET"
-	printf '  every corpus generated into it\n'
-	printf '  every run%s artifacts, scores and publish logs\n' "'s"
-	printf '  the warehouse, and every table any run has written\n'
-	if [[ $ASSUME_YES == no ]]; then
-		confirm "delete the resources listed above?"
-	fi
-	log "emptying and deleting s3://$BUCKET"
-	aws s3 rm "s3://$BUCKET" --recursive >/dev/null
-	local delete_error
-	if ! delete_error="$(aws s3api delete-bucket --bucket "$BUCKET" 2>&1)"; then
-		case "$delete_error" in
-		*BucketNotEmpty*)
-			die "s3://$BUCKET still holds objects: $delete_error
-     A bucket that was versioned before keeps its noncurrent versions, which \`aws s3 rm\` does not remove.
-     Delete them (aws s3api list-object-versions / delete-objects) and re-run with --all."
-			;;
-		*) die "could not delete s3://$BUCKET: $delete_error" ;;
-		esac
-	fi
-}
 
 # Delete the bucket last; declining leaves ECR and operators already removed.
 remove_bucket

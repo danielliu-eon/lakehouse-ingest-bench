@@ -34,7 +34,7 @@ def _minimal_document(
     geometry: dict[str, object] | None = None,
     fleet: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """A document holding only the fields `render_results_table` reads."""
+    """A minimal document satisfying the shared result-consumer schema."""
     if fleet is None:
         fleet = [{"role": "worker", "count": 1, "vcpu": 2.0, "gib": 4.0, "machine_type": "m6i.large"}]
     vcpu_price, gib_price = site_pricing
@@ -48,6 +48,7 @@ def _minimal_document(
         "harness_version": harness_version,
         "run": {
             "engine": engine,
+            "corpus_hash": None,
             "variant": variant,
             "spec": {"corpus": preset},
             "fleet": fleet,
@@ -59,6 +60,7 @@ def _minimal_document(
             "exactness": {"exact": exact, "loss_rows": 0 if exact else 3, "duplicate_rows": 0 if exact else 1},
             "keepup": {"absorbed_at_offer_end": 0.993, "drain_s": 5.87},
             "cost": {"usd_per_hour": usd_per_hour},
+            "producer": {"producer_bound": False},
         },
         "geometry": geometry,
     }
@@ -212,3 +214,25 @@ def test_render_results_table_names_the_file_that_is_missing_a_field() -> None:
     del broken["derived"]
     with pytest.raises(ValueError, match="broken.json"):
         render_results_table([(Path("broken.json"), broken)])
+
+
+@pytest.mark.parametrize("value", [None, [], {"schema_version": 2}])
+def test_results_table_cli_reports_bad_shapes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: object
+) -> None:
+    from ingest_bench.collect.cli import results_table_main
+
+    source = tmp_path / "broken.json"
+    source.write_text(json.dumps(value))
+    output = tmp_path / "RESULTS.md"
+    assert results_table_main([str(tmp_path), "--out", str(output)]) == 1
+    assert str(source) in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_result_parser_preserves_unconsumed_artifacts() -> None:
+    from ingest_bench.collect.schema import parse_result
+
+    document = _minimal_document(preset="p", engine="flink", variant="hash", date="2026-01-01")
+    document["artifacts"] = {"future_measurement": [1, 2, 3]}
+    assert parse_result(document) is document

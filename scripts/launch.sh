@@ -141,27 +141,22 @@ warn_if_the_pods_will_not_fit
 # ---------------------------------------------------------------------------
 
 SCORER_JOB="$(scorer_job "$RUN_ID")"
-SCORE="score --corpus $CORPUS_URI --table $TABLE"
-SCORE="$SCORE --publish-logs $RUNS_ROOT/$RUN_ID/producer --epoch $EPOCH"
-# Mirror scores to object storage on every poll so gate and finish can read them after the
-# pod exits.
-SCORE="$SCORE --out /work/scores --upload-prefix $RUNS_ROOT/$RUN_ID/scores"
-SCORE="$SCORE --idle-stop-s $IDLE_STOP_S --publish-shards $SHARDS"
-# An engine-managed table may not exist before the first record. Pass ownership so the
-# scorer can handle that absence.
+SCORE=(score --corpus "$CORPUS_URI" --table "$TABLE"
+	--publish-logs "$RUNS_ROOT/$RUN_ID/producer" --epoch "$EPOCH"
+	--out /work/scores --upload-prefix "$RUNS_ROOT/$RUN_ID/scores"
+	--idle-stop-s "$IDLE_STOP_S" --publish-shards "$SHARDS")
+# An engine-managed table may not exist before the first record.
 MANAGED_BY="$(yq '.table.managed_by' "$SPEC")"
-[[ $MANAGED_BY == null ]] || SCORE="$SCORE --table-managed-by $MANAGED_BY"
-SCORE="$SCORE$(site_flags '.catalog.props' --catalog-prop)"
-# Preserve scorer defaults for omitted options.
+[[ $MANAGED_BY == null ]] || SCORE+=(--table-managed-by "$MANAGED_BY")
+read_site_prop_flags '.catalog.props' --catalog-prop
+SCORE+=(${SITE_PROP_FLAGS[@]+"${SITE_PROP_FLAGS[@]}"})
 for key in warmup_s freshness_bound_s; do
 	value="$(yq ".scoring.$key" "$SPEC")"
-	[[ $value == null ]] || SCORE="$SCORE --${key//_/-} $value"
+	[[ $value == null ]] || SCORE+=("--${key//_/-}" "$value")
 done
-[[ $SPEED == null ]] || SCORE="$SCORE --speed $SPEED"
-# The scorer needs the producer's lateness tolerance to determine producer_bound.
-[[ $BEHIND_MAX_MS == null ]] || SCORE="$SCORE --behind-max-ms $BEHIND_MAX_MS"
-
-[[ -z $SCORER_READ_WORKERS ]] || SCORE="$SCORE --read-workers $SCORER_READ_WORKERS"
+[[ $SPEED == null ]] || SCORE+=(--speed "$SPEED")
+[[ $BEHIND_MAX_MS == null ]] || SCORE+=(--behind-max-ms "$BEHIND_MAX_MS")
+[[ -z $SCORER_READ_WORKERS ]] || SCORE+=(--read-workers "$SCORER_READ_WORKERS")
 
 log "starting the scorer as job/$SCORER_JOB (epoch $EPOCH, idle stop ${IDLE_STOP_S}s)"
 k8s_delete job "$SCORER_JOB"
@@ -170,14 +165,14 @@ k8s_render_apply deploy/k8s/scorer-job.yaml.tmpl \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$SCORE" \
+	"COMMAND=$(job_command_json "${SCORE[@]}")" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 
 log "waiting up to ${FIRST_POLL_WAIT_S}s for job/$SCORER_JOB to take its first reading"
-waited=0
+deadline=$((SECONDS + FIRST_POLL_WAIT_S))
 while :; do
 	# Capture before grep -q: an early pipe close would otherwise cause SIGPIPE under
 	# pipefail.
@@ -186,12 +181,12 @@ while :; do
 		log "the scorer is reading the table"
 		break
 	fi
-	if ((waited >= FIRST_POLL_WAIT_S)); then
+	if ((SECONDS >= deadline)); then
 		k8s_job_tail "$SCORER_JOB"
 		die "job/$SCORER_JOB published no reading within ${FIRST_POLL_WAIT_S}s; see the logs and pod events above"
 	fi
-	sleep "$FIRST_POLL_S"
-	waited=$((waited + FIRST_POLL_S))
+	remaining=$((deadline - SECONDS))
+	sleep "$((remaining < FIRST_POLL_S ? remaining : FIRST_POLL_S))"
 done
 
 # ---------------------------------------------------------------------------
@@ -203,19 +198,19 @@ done
 (($(date +%s) + 30 <= EPOCH)) || die "epoch $EPOCH is under 30s away; raise EPOCH_LEAD_S (currently $EPOCH_LEAD_S) and relaunch"
 
 PRODUCER_JOB="$(producer_job "$RUN_ID")"
-PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $TOPIC --epoch $EPOCH"
-# Expand JOB_COMPLETION_INDEX in the pod's shell so one command serves all shards.
-PRODUCE="$PRODUCE --shard \$JOB_COMPLETION_INDEX --shards $SHARDS"
-PRODUCE="$PRODUCE --publish-log /work/publish_log-\$JOB_COMPLETION_INDEX.jsonl"
-PRODUCE="$PRODUCE --upload-prefix $RUNS_ROOT/$RUN_ID"
-PRODUCE="$PRODUCE$(site_flags '.kafka.security' --kafka-prop)"
-[[ -z $KEY_COLUMN ]] || PRODUCE="$PRODUCE --key-column $KEY_COLUMN"
-[[ -z $VALUE_ENCODING ]] || PRODUCE="$PRODUCE --value-encoding $VALUE_ENCODING"
-[[ -z $SCHEMA_ID ]] || PRODUCE="$PRODUCE --schema-id $SCHEMA_ID"
-[[ $SPEED == null ]] || PRODUCE="$PRODUCE --speed $SPEED"
-[[ $REPLAY_SECONDS == null ]] || PRODUCE="$PRODUCE --seconds $REPLAY_SECONDS"
-[[ $BEHIND_MAX_MS == null ]] || PRODUCE="$PRODUCE --behind-max-ms $BEHIND_MAX_MS"
-[[ $COMPRESSION == null ]] || PRODUCE="$PRODUCE --compression $COMPRESSION"
+# Only the shard index needs shell expansion; all configured values remain argv.
+PRODUCE=(/bin/sh -c 'exec produce --shard "$JOB_COMPLETION_INDEX" --publish-log "/work/publish_log-$JOB_COMPLETION_INDEX.jsonl" "$@"' --
+	--corpus "$CORPUS_URI" --bootstrap "$BOOTSTRAP" --topic "$TOPIC" --epoch "$EPOCH"
+	--shards "$SHARDS" --upload-prefix "$RUNS_ROOT/$RUN_ID")
+read_site_prop_flags '.kafka.security' --kafka-prop
+PRODUCE+=(${SITE_PROP_FLAGS[@]+"${SITE_PROP_FLAGS[@]}"})
+[[ -z $KEY_COLUMN ]] || PRODUCE+=(--key-column "$KEY_COLUMN")
+[[ -z $VALUE_ENCODING ]] || PRODUCE+=(--value-encoding "$VALUE_ENCODING")
+[[ -z $SCHEMA_ID ]] || PRODUCE+=(--schema-id "$SCHEMA_ID")
+[[ $SPEED == null ]] || PRODUCE+=(--speed "$SPEED")
+[[ $REPLAY_SECONDS == null ]] || PRODUCE+=(--seconds "$REPLAY_SECONDS")
+[[ $BEHIND_MAX_MS == null ]] || PRODUCE+=(--behind-max-ms "$BEHIND_MAX_MS")
+[[ $COMPRESSION == null ]] || PRODUCE+=(--compression "$COMPRESSION")
 
 log "offering the corpus from $SHARDS shard(s) as job/$PRODUCER_JOB"
 k8s_delete job "$PRODUCER_JOB"
@@ -224,7 +219,7 @@ k8s_render_apply deploy/k8s/producer-job.yaml.tmpl \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$PRODUCE" \
+	"COMMAND=$(job_command_json "${PRODUCE[@]}")" \
 	"COUNT=$SHARDS" \
 	"MEMORY=$PRODUCER_MEMORY" \
 	"ENV=$JOB_ENV" \

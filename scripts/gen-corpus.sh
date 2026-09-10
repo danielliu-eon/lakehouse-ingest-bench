@@ -106,12 +106,11 @@ wrote_uri() {
 # ---------------------------------------------------------------------------
 
 if ((SHARDS == 1)); then
-	GEN_COMMAND="gen-corpus --preset $PRESET --out $CORPUS_ROOT --seed $SEED"
+	GEN_COMMAND=(gen-corpus --preset "$PRESET" --out "$CORPUS_ROOT" --seed "$SEED")
 else
-	# Give each shard a separate output prefix so its metadata cannot overwrite another
-	# shard's. Expand JOB_COMPLETION_INDEX in the pod's shell.
-	GEN_COMMAND="gen-corpus --preset $PRESET --out $CORPUS_ROOT/shards/\$JOB_COMPLETION_INDEX"
-	GEN_COMMAND="$GEN_COMMAND --shard-index \$JOB_COMPLETION_INDEX --shard-count $SHARDS --seed $SEED"
+	# Expand only the shard index in the pod; pass configuration as arguments.
+	GEN_COMMAND=(/bin/sh -c 'root=$1; shift; exec gen-corpus --out "$root/shards/$JOB_COMPLETION_INDEX" --shard-index "$JOB_COMPLETION_INDEX" "$@"' --
+		"$CORPUS_ROOT" --preset "$PRESET" --shard-count "$SHARDS" --seed "$SEED")
 fi
 
 # Include the preset in the Job name so different presets can generate concurrently.
@@ -125,7 +124,7 @@ k8s_render_apply deploy/k8s/corpus-gen-job.yaml.tmpl \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$GEN_COMMAND" \
+	"COMMAND=$(job_command_json "${GEN_COMMAND[@]}")" \
 	"COUNT=$SHARDS" \
 	"MEMORY=$GEN_MEMORY" \
 	"ENV=$JOB_ENV" \
@@ -155,16 +154,16 @@ SHARD_DIR="${SHARD_DIR##*/}"
 
 # Check each shard's metadata before launching a merge pod. aws s3 ls fails when the path
 # is absent.
-MERGE_COMMAND="merge-corpus"
+MERGE_COMMAND=(merge-corpus)
 shard=0
 while ((shard < SHARDS)); do
 	SHARD_CORPUS="$CORPUS_ROOT/shards/$shard/$SHARD_DIR"
 	aws s3 ls "$SHARD_CORPUS/corpus.json" >/dev/null ||
 		die "could not find corpus.json at $SHARD_CORPUS for shard $shard of $SHARDS; check storage access and read the job log: kubectl logs job/$GEN_JOB"
-	MERGE_COMMAND="$MERGE_COMMAND $SHARD_CORPUS"
+	MERGE_COMMAND+=("$SHARD_CORPUS")
 	shard=$((shard + 1))
 done
-MERGE_COMMAND="$MERGE_COMMAND --out $CORPUS_ROOT"
+MERGE_COMMAND+=(--out "$CORPUS_ROOT")
 
 log "merging $SHARDS shards of $SHARD_DIR"
 k8s_delete job "$MERGE_JOB"
@@ -173,7 +172,7 @@ k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"NAMESPACE=$SITE_NAMESPACE" \
 	"SERVICE_ACCOUNT=$SERVICE_ACCOUNT" \
 	"IMAGE=$IMAGE" \
-	"COMMAND=$MERGE_COMMAND" \
+	"COMMAND=$(job_command_json "${MERGE_COMMAND[@]}")" \
 	"ENV=$JOB_ENV" \
 	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \

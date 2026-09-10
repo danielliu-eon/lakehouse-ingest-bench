@@ -25,7 +25,7 @@ spec:
       containers:
         - name: harness
           image: __IMAGE__
-          args: ["__COMMAND__"]
+          command: __COMMAND__
           env: __ENV__
           envFrom: __ENV_FROM__
           # Size memory for batch bytes via PRODUCER_MEMORY. Request two cores for

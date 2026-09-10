@@ -47,6 +47,7 @@ RUN = SCRIPTS / "run.sh"
 MEASURE_PRODUCER = SCRIPTS / "measure-producer.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
+AWS_RESOURCES = AWS_DEPLOY / "_resources.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
 SITE_K8S_EXAMPLE = REPO_ROOT / "site.k8s.example.yaml"
 
@@ -123,35 +124,6 @@ def _iam_documents() -> list[Path]:
     return sorted((AWS_DEPLOY / "iam").glob("*.json"))
 
 
-# Extract version selection from the script so tests exercise the implementation.
-_VERSION_CHOICE_FIRST = 'MSK_KAFKA_VERSION="$(tr '
-_VERSION_CHOICE_LAST = "set MSK_KAFKA_VERSION yourself"
-
-
-def _version_choice_block() -> str:
-    lines = AWS_SETUP.read_text().splitlines()
-    starts = [index for index, line in enumerate(lines) if _VERSION_CHOICE_FIRST in line]
-    ends = [index for index, line in enumerate(lines) if _VERSION_CHOICE_LAST in line]
-    assert len(starts) == 1 and len(ends) == 1, "setup.sh no longer holds one Kafka-version choice to lift out"
-    assert starts[0] < ends[0]
-    return "\n".join(lines[starts[0] : ends[0] + 1])
-
-
-def _shell_function(path: Path, name: str) -> str:
-    """Extract and syntax-check a shell function from the actual script.
-    The closing brace must be unindented; nested braces must be indented.
-    """
-    lines = path.read_text().splitlines()
-    starts = [index for index, line in enumerate(lines) if line == f"{name}() {{"]
-    assert len(starts) == 1, f"{path.name} does not hold exactly one {name}"
-    ends = [index for index, line in enumerate(lines) if line == "}" and index > starts[0]]
-    assert ends, f"{path.name}'s {name} does not close"
-    lifted = "\n".join(lines[starts[0] : ends[0] + 1])
-    parsed = subprocess.run(["bash", "-n"], input=lifted, capture_output=True, text=True)
-    assert parsed.returncode == 0, f"{path.name}'s {name} did not lift out whole: {parsed.stderr}"
-    return lifted
-
-
 def _mapping(value: object) -> dict[str, object]:
     """``value`` as a mapping, for reading parsed YAML and JSON under strict typing."""
     assert isinstance(value, dict), f"expected a mapping, got {type(value).__name__}"
@@ -216,6 +188,7 @@ def test_every_script_is_executable() -> None:
     entrypoints = _shell_entrypoints()
     sourced = _sourced_shell_files()
     assert [path.relative_to(REPO_ROOT).as_posix() for path in sourced] == [
+        "deploy/aws/_resources.sh",
         "deploy/aws/_stack_hooks.sh",
         "engines/flink/compose.sh",
         "engines/spark/compose.sh",
@@ -271,9 +244,7 @@ def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
                 *logs*) printf 'the job said this\\n' ;;
                 esac
             }}
-{_shell_function(K8S_LIB, "k8s_job_pod_events")}
-{_shell_function(K8S_LIB, "k8s_job_tail")}
-{_shell_function(K8S_LIB, "k8s_wait_job")}
+source "{K8S_LIB}"
             k8s_wait_job a-job {timeout_s}
         """
         result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -341,7 +312,7 @@ def _nodes_with_free_cpu(
         log() {{ printf 'log %s\\n' "$*"; }}
         die() {{ printf 'die %s\\n' "$*"; exit 3; }}
         TOLERATIONS='{tolerations}'
-{_shell_function(K8S_LIB, "k8s_nodes_with_free_cpu")}
+source "{K8S_LIB}"
         k8s_nodes_with_free_cpu {millicores} '{tmp_path / "nodes.json"}' '{tmp_path / "pods.json"}'
     """
     return subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -397,7 +368,7 @@ def test_a_cluster_that_could_not_be_read_is_not_a_cluster_with_no_room(tmp_path
     harness = f"""
         set -euo pipefail
         TOLERATIONS='[]'
-{_shell_function(K8S_LIB, "k8s_nodes_with_free_cpu")}
+source "{K8S_LIB}"
         k8s_nodes_with_free_cpu 2000 '{tmp_path / "nodes.json"}' '{tmp_path / "pods.json"}'
     """
     out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -467,16 +438,6 @@ def test_gen_corpus_refuses_bad_arguments_before_it_needs_a_cluster() -> None:
     assert "expected one preset" in both.stderr
 
 
-def test_gen_corpus_shards_each_shard_into_its_own_prefix() -> None:
-    text = GEN_CORPUS.read_text()
-    assert "--out $CORPUS_ROOT/shards/\\$JOB_COMPLETION_INDEX" in text
-    assert "--shard-index \\$JOB_COMPLETION_INDEX --shard-count $SHARDS" in text
-    assert "gen-corpus --preset $PRESET --out $CORPUS_ROOT --seed $SEED" in text, "one shard writes to the root"
-    for template in ("corpus-gen-job.yaml.tmpl", "harness-job.yaml.tmpl"):
-        assert f"deploy/k8s/{template}" in text
-        assert (REPO_ROOT / "deploy" / "k8s" / template).exists()
-
-
 @needs_bash
 def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
     environment = {key: value for key, value in os.environ.items() if key not in ("AWS_REGION", "CLUSTER_NAME")}
@@ -529,7 +490,8 @@ def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str 
         log() {{ printf 'log %s\\n' "$*"; }}
         die() {{ printf 'die %s\\n' "$*"; exit 3; }}
         KAFKA_VERSIONS="{offered}"
-{_version_choice_block()}
+source "{AWS_RESOURCES}"
+        choose_kafka_version "$KAFKA_VERSIONS"
         printf 'chose %s\\n' "$MSK_KAFKA_VERSION"
     """
     out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -581,7 +543,7 @@ def _volume_growth(*, described: str, refusal: str = "", asked: int = 1000) -> G
             MSK_NAME=a-cluster
             MSK_ARN=arn:aws:kafka:eu-west-1:123456789012:cluster/a-cluster/aaaa-1
             MSK_VOLUME_GIB={asked}
-{_shell_function(AWS_SETUP, "grow_broker_volume")}
+source "{AWS_RESOURCES}"
             grow_broker_volume
         """
         result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -657,7 +619,7 @@ class BucketStep:
     asked: str
 
 
-def _bucket_step(script: Path, function: str, *, tags: str | None, answered: str = "yes") -> BucketStep:
+def _bucket_step(function: str, *, tags: str | None, answered: str = "yes") -> BucketStep:
     """Run bucket operations against S3 stubs. tags is None for an absent bucket,
     empty for an unowned bucket, or the ownership tag value.
     """
@@ -688,8 +650,7 @@ def _bucket_step(script: Path, function: str, *, tags: str | None, answered: str
             BUCKET=a-bucket
             TAG_KEY=lakehouse-ingest-bench
             ASSUME_YES=no
-{_shell_function(script, "bucket_is_ours")}
-{_shell_function(script, function)}
+source "{AWS_RESOURCES}"
             {function}
         """
         result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -701,7 +662,7 @@ def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
     """PutBucketTagging replaces all tags and PutBucketVersioning suspends versioning;
     either would alter an unrelated existing bucket.
     """
-    refused = _bucket_step(AWS_SETUP, "create_bucket", tags="")
+    refused = _bucket_step("create_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
     assert "lakehouse-ingest-bench=true tag could not be verified" in refused.result.stdout, refused.result.stdout
     for mutation in ("put-bucket-tagging", "put-bucket-versioning", "put-public-access-block"):
@@ -710,12 +671,12 @@ def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
 
 @needs_bash
 def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
-    created = _bucket_step(AWS_SETUP, "create_bucket", tags=None)
+    created = _bucket_step("create_bucket", tags=None)
     assert created.result.returncode == 0, created.result.stdout + created.result.stderr
     assert "create-bucket --bucket a-bucket" in created.calls, created.calls
     assert "put-bucket-tagging" in created.calls
 
-    adopted = _bucket_step(AWS_SETUP, "create_bucket", tags="true")
+    adopted = _bucket_step("create_bucket", tags="true")
     assert adopted.result.returncode == 0, adopted.result.stdout + adopted.result.stderr
     assert "create-bucket" not in adopted.calls, adopted.calls
     assert "put-bucket-tagging" in adopted.calls
@@ -723,7 +684,7 @@ def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
 
 @needs_bash
 def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
-    refused = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="")
+    refused = _bucket_step("remove_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
     assert "cannot verify the lakehouse-ingest-bench=true tag" in refused.result.stdout, refused.result.stdout
     assert "s3 rm" not in refused.calls and "delete-bucket" not in refused.calls, refused.calls
@@ -732,13 +693,13 @@ def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
 
 @needs_bash
 def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> None:
-    asked = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="no")
+    asked = _bucket_step("remove_bucket", tags="true", answered="no")
     assert asked.result.returncode == 3, asked.result.stdout
     assert "delete the resources listed above?" in asked.asked, asked.asked
     assert "every corpus generated into it" in asked.result.stdout, asked.result.stdout
     assert "s3 rm" not in asked.calls and "delete-bucket" not in asked.calls, asked.calls
 
-    answered = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="yes")
+    answered = _bucket_step("remove_bucket", tags="true", answered="yes")
     assert answered.result.returncode == 0, answered.result.stdout + answered.result.stderr
     assert "s3 rm s3://a-bucket --recursive" in answered.calls, answered.calls
     assert "delete-bucket --bucket a-bucket" in answered.calls, answered.calls
@@ -746,7 +707,7 @@ def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> N
 
 @needs_bash
 def test_teardown_leaves_a_bucket_that_is_already_gone_alone() -> None:
-    gone = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags=None)
+    gone = _bucket_step("remove_bucket", tags=None)
     assert gone.result.returncode == 0, gone.result.stdout + gone.result.stderr
     assert "already gone" in gone.result.stdout, gone.result.stdout
     assert "s3 rm" not in gone.calls and gone.asked == ""
@@ -780,7 +741,7 @@ def _write_site(path: Path, *, registry: bool = False, yq_stub: str = "") -> sub
         TOLERATIONS='[]'
         WITH_SCHEMA_REGISTRY={"true" if registry else "false"}
         {yq_stub}
-{_shell_function(AWS_SETUP, "write_site")}
+source "{AWS_RESOURCES}"
         write_site '{path}'
     """
     return subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
@@ -871,23 +832,57 @@ def test_setup_refuses_an_existing_site_before_it_touches_the_account(tmp_path: 
     assert calls.read_text() == "", calls.read_text()
 
 
-def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pinned_version() -> None:
-    """The chart must watch the run namespace and enable the webhook that injects
-    mounts. Disable its default identity so drivers use the Pod Identity account.
+@needs_shell_tools
+@pytest.mark.parametrize("already_installed", [False, True])
+@pytest.mark.parametrize("version", [None, "2.6.0"])
+def test_spark_operator_installation_is_pinned_and_idempotent(
+    tmp_path: Path, already_installed: bool, version: str | None
+) -> None:
+    calls = tmp_path / "calls"
+    installed = tmp_path / "installed"
+    if already_installed:
+        installed.touch()
+    harness = f"""
+        set -euo pipefail
+        source "{AWS_RESOURCES}"
+        KUBE_CONTEXT=a-cluster
+        NAMESPACE=ingest-bench
+        log() {{ :; }}
+        die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
+        kubectl() {{
+            printf 'kubectl %s\\n' "$*" >>'{calls}'
+            [[ -e '{installed}' ]]
+        }}
+        helm() {{
+            printf 'helm %s\\n' "$*" >>'{calls}'
+            case "$*" in
+                *install*) touch '{installed}' ;;
+                *list*) printf '[]\\n' ;;
+            esac
+        }}
+        install_spark_operator
+        install_spark_operator
     """
-    setup = AWS_SETUP.read_text()
-    assert setup.count("get crd sparkapplications.sparkoperator.k8s.io") == 1
-    assert setup.count(f'helm --kube-context "$KUBE_CONTEXT" install "{"$SPARK_OPERATOR_RELEASE"}"') == 1
-    assert setup.count("SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator") == 1
-    assert 'SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-' in setup, "the pin should be overridable"
-    for value in (
-        '--version "$SPARK_OPERATOR_VERSION"',
-        '--set "spark.jobNamespaces={$NAMESPACE}"',
-        "--set spark.serviceAccount.create=false",
-        "--set spark.rbac.create=false",
-        "--set webhook.enable=true",
-    ):
-        assert setup.count(value) == 1, value
+    env = {key: value for key, value in os.environ.items() if key != "SPARK_OPERATOR_VERSION"}
+    if version is not None:
+        env["SPARK_OPERATOR_VERSION"] = version
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    commands = calls.read_text().splitlines()
+    assert commands.count("kubectl --context a-cluster get crd sparkapplications.sparkoperator.k8s.io") == 2
+    installs = [command for command in commands if " install " in command]
+    if already_installed:
+        assert installs == []
+        assert not any("repo add" in command for command in commands)
+    else:
+        assert installs == [
+            "helm --kube-context a-cluster install spark-operator spark-operator/spark-operator "
+            "--namespace spark-operator --create-namespace "
+            f"--version {version or '2.5.2'} --set spark.jobNamespaces={{ingest-bench}} "
+            "--set spark.serviceAccount.create=false --set spark.rbac.create=false "
+            "--set webhook.enable=true --wait"
+        ]
+        assert "helm repo add spark-operator https://kubeflow.github.io/spark-operator --force-update" in commands
 
 
 def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:
@@ -1189,7 +1184,7 @@ def test_the_kafka_nodegroup_example_parses_tainted_and_labelled() -> None:
 @needs_bash
 def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
     text = STACK_HOOKS_AWS.read_text()
-    for name in (
+    required = {
         "stack_preflight",
         "stack_preflight_storage",
         "stack_bind_identity",
@@ -1199,8 +1194,14 @@ def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
         "stack_storage_profile_json",
         "stack_storage_credential_json",
         "stack_delete_storage_class",
-    ):
-        assert f"\n{name}() {{\n" in text, name
+    }
+    loaded = subprocess.run(
+        ["bash", "-c", 'source "$1"; declare -F', "_", str(STACK_HOOKS_AWS)],
+        capture_output=True,
+        text=True,
+    )
+    assert loaded.returncode == 0, loaded.stderr
+    assert required <= {line.split()[-1] for line in loaded.stdout.splitlines()}
     assert not text.startswith("#!"), "a sourced file, not an entrypoint"
     assert text.splitlines()[0] == "# SPDX-License-Identifier: Apache-2.0"
 
@@ -1208,9 +1209,9 @@ def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
 @needs_shell_tools
 def test_the_storage_profile_keeps_the_catalog_off_the_data_path() -> None:
     """Pods use their own identities, so disable credential vending and remote signing."""
-    function = _shell_function(STACK_HOOKS_AWS, "stack_storage_profile_json")
+    library = f'source "{STACK_HOOKS_AWS}"'
     out = subprocess.run(
-        ["bash", "-c", f"{function}\nstack_storage_profile_json"],
+        ["bash", "-c", f"{library}\nstack_storage_profile_json"],
         capture_output=True,
         text=True,
         env={**os.environ, "BUCKET": "a-bucket", "AWS_REGION": "eu-west-1"},
@@ -1230,9 +1231,9 @@ def test_the_storage_profile_keeps_the_catalog_off_the_data_path() -> None:
 
 @needs_shell_tools
 def test_the_storage_credential_is_the_pods_own_identity() -> None:
-    function = _shell_function(STACK_HOOKS_AWS, "stack_storage_credential_json")
+    library = f'source "{STACK_HOOKS_AWS}"'
     out = subprocess.run(
-        ["bash", "-c", f'{function}\nstack_storage_credential_json "$1"', "_", "an-external-id"],
+        ["bash", "-c", f'{library}\nstack_storage_credential_json "$1"', "_", "an-external-id"],
         capture_output=True,
         text=True,
     )
@@ -1333,45 +1334,29 @@ def _site_reader(site_file: Path, call: str) -> subprocess.CompletedProcess[str]
 
 
 @needs_shell_tools
-def test_a_sites_reference_reaches_a_pods_python_as_the_site_wrote_it(tmp_path: Path) -> None:
-    """The pod runs sh -c. Single quoting must preserve ${env:NAME} for Python
-    instead of letting the shell expand or reject it.
-    """
-    reference = "${env:IB_KAFKA_PASSWORD}"
+@pytest.mark.parametrize(
+    "value", ["${env:IB_KAFKA_PASSWORD}", "a user with spaces", "a'b\"c\\d", "line one\nline two", "$(HOME)"]
+)
+def test_site_properties_preserve_argument_boundaries(tmp_path: Path, value: str) -> None:
     site_file = tmp_path / "site.yaml"
-    site_file.write_text(
-        _filled_site().replace(
-            "    aws.region:",
-            f"    sasl.password: '{reference}'\n    sasl.username: 'a user with spaces'\n    aws.region:",
-        )
-    )
-    # A stand-in for the harness command, printing one argument per line, so
-    # what is asserted is what the Python process is handed.
-    stubs = _stub_bin(tmp_path / "bin", {"produce": 'printf "%s\\n" "$@"'})
-    # Built the way `launch.sh` builds it, then handed to `sh -c` as one
-    # string — which is how the image's entrypoint runs it.
+    site_file.write_text(yaml.safe_dump({"kafka": {"security": {"sasl.password": value}}}))
     built = _site_reader(
         site_file,
-        f'PATH="{stubs}:$PATH"\nCOMMAND="produce$(site_flags \'.kafka.security\' --kafka-prop)"\nsh -c "$COMMAND"',
+        "read_site_prop_flags '.kafka.security' --kafka-prop\njob_command_json produce \"${SITE_PROP_FLAGS[@]}\"",
     )
     assert built.returncode == 0, built.stderr
-    printed = built.stdout.splitlines()
-    assert f"sasl.password={reference}" in printed, printed
-    assert "sasl.username=a user with spaces" in printed, printed
+    serialized = json.loads(built.stdout)
+    assert serialized[-1] == f"sasl.password={value}".replace("$", "$$")
+    command = [arg.replace("$$", "$") for arg in serialized]
+    assert command == ["produce", "--kafka-prop", f"sasl.password={value}"]
 
 
 @needs_shell_tools
-@pytest.mark.parametrize("quote", ["'", '"'])
-def test_a_property_a_quote_cannot_carry_is_refused_by_name(tmp_path: Path, quote: str) -> None:
-    """A single quote breaks shell quoting; a double quote breaks the enclosing
-    YAML scalar. Reject either before rendering.
-    """
+def test_invalid_site_properties_fail_before_building_a_command(tmp_path: Path) -> None:
     site_file = tmp_path / "site.yaml"
-    property_line = f"    sasl.password: {json.dumps('a' + quote + 'b')}\n    aws.region:"
-    site_file.write_text(_filled_site().replace("    aws.region:", property_line))
-    refused = _site_reader(site_file, "site_flags '.kafka.security' --kafka-prop")
-    assert refused.returncode != 0
-    assert "containing a quote" in refused.stderr, refused.stderr
+    site_file.write_text("kafka:\n  security:\n    sasl.password: [not, a, string]\n")
+    built = _site_reader(site_file, "read_site_prop_flags '.kafka.security' --kafka-prop")
+    assert built.returncode != 0
 
 
 @needs_shell_tools
@@ -1456,23 +1441,23 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
     assert "--speed 1" not in text, "smoke.sh still hardcodes a replay speed"
 
 
-@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
-def test_both_drivers_tell_the_scorer_who_runs_the_ddl(script: Path) -> None:
+@pytest.mark.parametrize("script", (SMOKE,), ids=lambda path: path.name)
+def test_smoke_tells_the_scorer_who_runs_the_ddl(script: Path) -> None:
     text = script.read_text()
     assert "yq '.table.managed_by'" in text, f"{script.name} never reads table.managed_by"
     assert "--table-managed-by $MANAGED_BY" in text, f"{script.name} reads it but never passes it"
 
 
-@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
-def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None:
+@pytest.mark.parametrize("script", (SMOKE,), ids=lambda path: path.name)
+def test_smoke_frames_the_values_the_way_staging_did(script: Path) -> None:
     text = script.read_text()
     for fact in ("value_encoding", "schema_id"):
         assert f"jq -r '.{fact} // empty'" in text, f"{script.name} never reads {fact} out of facts.json"
     assert "--value-encoding $VALUE_ENCODING" in text and "--schema-id $SCHEMA_ID" in text
 
 
-@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
-def test_both_drivers_offer_the_codec_the_spec_asks_for(script: Path) -> None:
+@pytest.mark.parametrize("script", (SMOKE,), ids=lambda path: path.name)
+def test_smoke_offers_the_codec_the_spec_asks_for(script: Path) -> None:
     text = script.read_text()
     assert "yq '.producer.compression'" in text, f"{script.name} never reads producer.compression"
     assert "--compression $COMPRESSION" in text, f"{script.name} reads the codec but never passes --compression"
@@ -1811,6 +1796,8 @@ def _run_driver(
             "STUB_AWS_LOG": str(aws_calls),
             "STUB_APPLIED_DIR": str(applied_dir),
             "STUB_JOB_LOG": str(job_log_file),
+            # Provenance polling has dedicated tests; other drivers need only one read.
+            "ENGINE_IMAGE_WAIT_S": "0",
             **environment,
         },
     )
@@ -1821,10 +1808,29 @@ def _run_driver(
     return DriverRun(result=result, calls=calls.read_text(), aws_calls=aws_calls.read_text(), applied=documents)
 
 
-def _job_command(document: dict[str, object]) -> str:
-    """The single argument a Job's container carries, which is its whole command line."""
+def _job_argv(document: dict[str, object], shard: int = 0) -> list[str]:
+    """Apply Kubernetes dollar escaping and execute indexed wrappers with a stub CLI."""
     containers = _sequence(_pod_spec(document)["containers"])
-    return str(_sequence(_mapping(containers[0])["args"])[0])
+    command = [str(arg).replace("$$", "$") for arg in _sequence(_mapping(containers[0])["command"])]
+    if command[0] != "/bin/sh":
+        return command
+    with tempfile.TemporaryDirectory() as directory:
+        stubs = _stub_bin(
+            Path(directory),
+            {name: f"printf '%s\\0' {name} \"$@\"" for name in ("produce", "gen-corpus")},
+        )
+        out = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "JOB_COMPLETION_INDEX": str(shard)},
+        )
+    return out.stdout.removesuffix("\0").split("\0")
+
+
+def _job_command(document: dict[str, object]) -> str:
+    return " ".join(_job_argv(document))
 
 
 def _pod_spec(document: dict[str, object]) -> dict[str, object]:
@@ -2072,7 +2078,7 @@ def test_a_driver_addresses_the_topic_staging_named(tmp_path: Path, script: Path
 )
 def test_a_service_name_is_told_apart_from_any_other_catalog_host(host: str, answer: str | None) -> None:
     """Recognize Kubernetes Service DNS names rather than guessing from arbitrary hosts."""
-    function = _shell_function(K8S_LIB, "k8s_service_host")
+    function = f'source "{K8S_LIB}"'
     out = subprocess.run(
         ["bash", "-c", f'{function}\nk8s_service_host "$1"', "_", host], capture_output=True, text=True
     )
@@ -2273,19 +2279,19 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     # Unset, so the scorer's own default stands rather than one this driver restates.
     assert "--read-workers" not in scorer
     # The scorer needs all catalog properties; pods do not receive the site file.
-    assert "--catalog-prop 'uri=https://glue.eu-west-1.amazonaws.com/iceberg'" in scorer
-    assert "--catalog-prop 'warehouse=123456789012'" in scorer
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in scorer
+    assert "--catalog-prop warehouse=123456789012" in scorer
     # The spec's scoring keys, so the run scored is the run the spec asks for.
     assert "--warmup-s 60" in scorer and "--freshness-bound-s 60" in scorer
 
     assert f"--topic {RUN_ID}" in producer
-    assert "--shard $JOB_COMPLETION_INDEX --shards 1" in producer
-    assert "--publish-log /work/publish_log-$JOB_COMPLETION_INDEX.jsonl" in producer
+    assert "--shard 0" in producer and "--shards 1" in producer
+    assert "--publish-log /work/publish_log-0.jsonl" in producer
     assert f"--upload-prefix s3://a-bucket/runs/{RUN_ID}" in producer
     assert "--key-column user_id" in producer
     # The MSK IAM properties, the harness's own signing region among them.
-    assert "--kafka-prop 'security.protocol=SASL_SSL'" in producer
-    assert "--kafka-prop 'aws.region=eu-west-1'" in producer
+    assert "--kafka-prop security.protocol=SASL_SSL" in producer
+    assert "--kafka-prop aws.region=eu-west-1" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
 
@@ -2442,7 +2448,7 @@ def test_the_jobs_a_launch_applies_name_a_credential_and_never_hold_one(tmp_path
         container = _mapping(_sequence(_pod_spec(document)["containers"])[0])
         assert container["envFrom"] == [{"secretRef": {"name": "bench-env"}}]
     producer = _job_command(_named_job(run, f"producer-{RUN_OBJECT}"))
-    assert f"--kafka-prop 'sasl.password={reference}'" in producer
+    assert f"--kafka-prop sasl.password={reference}" in producer
     # Resolve credentials only inside the pod process.
     assert "IB_KAFKA_PASSWORD}" in producer and "sasl.password=$" in producer
 
@@ -2543,7 +2549,7 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     assert len(drop) == 1
     command = _job_command(drop[0])
     assert f"drop-topic --bootstrap {BOOTSTRAP} --topic {RUN_ID}" in command
-    assert "--kafka-prop 'security.protocol=SASL_SSL'" in command
+    assert "--kafka-prop security.protocol=SASL_SSL" in command
 
     # The catalog is addressed with every property the site declares.
     assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in metadata_calls.read_text()
@@ -3437,6 +3443,7 @@ printf 'launch %s\\n' "$*" >>"$STUB_LOG"
 # request leaves behind the one document a teardown writes.
 RUN_GATE_STUB = """
 printf 'gate %s\\n' "$*" >>"$STUB_LOG"
+sleep "${STUB_GATE_DELAY_S:-0}"
 state="$(head -n 1 "$STUB_STATES")"
 tail -n +2 "$STUB_STATES" >"$STUB_STATES.rest"
 mv "$STUB_STATES.rest" "$STUB_STATES"
@@ -3591,7 +3598,7 @@ def _run_chained(
         (
             [],
             {"RUN_MAX_S": "2"},
-            ["stage", "launch", "gate", "gate", "teardown", "finish"],
+            ["stage", "launch", "gate", "teardown", "finish"],
             1,
             "still running after 2s",
         ),
@@ -4053,3 +4060,94 @@ def test_the_k8s_site_example_names_what_setup_prints() -> None:
     props = _mapping(_mapping(example["catalog"])["props"])
     assert str(props["uri"]) in setup
     assert f"catalog.props.warehouse:        {props['warehouse']}" in setup.replace("$WAREHOUSE_NAME", "ingest-bench")
+
+
+@needs_shell_tools
+def test_generation_expands_only_the_shard_index(tmp_path: Path) -> None:
+    run = _sharded_generation(tmp_path, {})
+    assert run.result.returncode == 0, run.result.stderr
+    job = _named_job(run, f"corpus-gen-{SHARDED_PRESET}")
+    for shard in (0, 1):
+        argv = _job_argv(job, shard)
+        assert argv[0] == "gen-corpus"
+        assert argv[argv.index("--out") + 1] == f"{CORPUS_ROOT}/shards/{shard}"
+        assert argv[argv.index("--shard-index") + 1] == str(shard)
+        assert argv[argv.index("--shard-count") + 1] == "2"
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("security", [True, False], ids=["quoted-properties", "empty-properties-system-bash"])
+def test_launch_preserves_configured_values_as_single_arguments(tmp_path: Path, security: bool) -> None:
+    value = "spaces 'quotes' \"double\" \\ slash\nnewline $(HOME) ${env:PASSWORD}"
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(
+        json.dumps(
+            {
+                **FACTS,
+                "corpus_uri": f"s3://a-bucket/{value}",
+                "value_encoding": "confluent",
+                "schema_id": 42,
+            }
+        )
+    )
+    spec = yaml.safe_load((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    spec["table"]["managed_by"] = "engine"
+    spec["producer"]["shards"] = 2
+    (run_dir / "spec.yaml").write_text(yaml.safe_dump(spec))
+    site = yaml.safe_load(_filled_site())
+    if security:
+        site["kafka"]["security"]["sasl.password"] = value
+    else:
+        site["kafka"].pop("security")
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "bash").symlink_to("/bin/bash")
+    site["catalog"]["props"]["token"] = value
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {}, site=yaml.safe_dump(site))
+    assert run.result.returncode == 0, run.result.stderr
+    scorer = _job_argv(run.applied[0])
+    assert scorer[0] == "score"
+    assert scorer[scorer.index("--table-managed-by") + 1] == "engine"
+    assert f"token={value}" in scorer
+    for shard in (0, 1):
+        producer = _job_argv(run.applied[1], shard)
+        assert producer[0] == "produce"
+        assert producer[producer.index("--corpus") + 1] == f"s3://a-bucket/{value}"
+        assert producer[producer.index("--shard") + 1] == str(shard)
+        assert producer[producer.index("--publish-log") + 1] == f"/work/publish_log-{shard}.jsonl"
+        assert producer[producer.index("--value-encoding") + 1] == "confluent"
+        assert producer[producer.index("--schema-id") + 1] == "42"
+        if security:
+            assert f"sasl.password={value}" in producer
+        else:
+            assert "--kafka-prop" not in producer
+
+
+@needs_bash
+def test_port_forward_counts_probe_time_and_caps_request_timeout(tmp_path: Path) -> None:
+    calls = tmp_path / "curl.log"
+    program = f"""
+        set -euo pipefail
+        source "{K8S_LIB}"
+        KUBE_CONTEXT=test SITE_NAMESPACE=test K8S_PORT_FORWARD_WAIT_S=1
+        log() {{ :; }}
+        die() {{ printf '%s\\n' "$*" >&2; exit 3; }}
+        kubectl() {{ exec /bin/sleep 10; }}
+        curl() {{ printf '%s\\n' "$*" >>"{calls}"; SECONDS=$((SECONDS + 2)); return 1; }}
+        sleep() {{ printf 'unexpected sleep\\n' >&2; return 1; }}
+        trap k8s_port_forward_stop EXIT
+        k8s_port_forward svc/test 1234:80
+    """
+    out = subprocess.run(["bash", "-c", program], capture_output=True, text=True, timeout=5)
+    assert out.returncode == 3, out.stderr
+    assert "within 1s" in out.stderr
+    assert "unexpected sleep" not in out.stderr
+    assert "--max-time 1" in calls.read_text()
+
+
+@needs_shell_tools
+def test_run_deadline_includes_time_spent_in_gate(tmp_path: Path) -> None:
+    run = _run_chained(tmp_path, [], ["running"], {"RUN_MAX_S": "3", "STUB_GATE_DELAY_S": "2"})
+    assert run.result.returncode == 1, run.result.stderr
+    assert run.drivers() == ["stage", "launch", "gate", "teardown", "finish"]
+    assert "still running after 3s" in run.result.stderr

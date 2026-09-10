@@ -15,11 +15,11 @@ from typing import cast
 
 import yaml
 
+from engines.java_properties import catalog_properties, kafka_properties
 from engines.spark.stream_to_iceberg import JOB_DOCUMENT, READER_SCHEMA, RUN_DIR, VALUE_EXPRESSIONS
 from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
-from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.env import PLACEHOLDER_FORM, has_placeholder
 from ingest_bench.specs.kubernetes import NAME, EngineKubernetes, object_name
@@ -99,36 +99,6 @@ _ICEBERG_EXTENSIONS = "org.apache.iceberg.spark.extensions.IcebergSparkSessionEx
 # from_avro return TimestampNTZ, matching Iceberg's zoneless timestamp.
 _TIMESTAMP_MILLIS = "timestamp-millis"
 _LOCAL_TIMESTAMP_MILLIS = "local-timestamp-millis"
-
-# Translate the harness's OAUTHBEARER + aws.region signal to Java MSK IAM
-# authentication. The login module signs tokens using the pod's credentials.
-_OAUTHBEARER = "OAUTHBEARER"
-_MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
-    ("security.protocol", "SASL_SSL"),
-    (MECHANISM_KEY, "AWS_MSK_IAM"),
-    ("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;"),
-    ("sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler"),
-)
-
-# Replace these keys to avoid duplicate options. Pass the region through
-# AWS_REGION rather than the harness-only aws.region key.
-_MSK_IAM_REPLACED = frozenset({key for key, _ in _MSK_IAM_PROPS} | {REGION_KEY})
-
-# Rename the differing PyIceberg S3 key; pass other properties through.
-_CATALOG_PROP_RENAMES = {"s3.region": "client.region"}
-
-# Select FileIO from the warehouse scheme; the Hadoop fallback is not
-# configured for catalog reads.
-_FILE_IO_BY_SCHEME = {
-    "s3://": "org.apache.iceberg.aws.s3.S3FileIO",
-    "gs://": "org.apache.iceberg.gcp.gcs.GCSFileIO",
-}
-
-# Spark's catalog type selects the backend for the catalog class.
-_PYICEBERG_TYPE = "type"
-
-# Exclude properties already emitted by the catalog block.
-_STATED_CATALOG_PROPS = frozenset({_PYICEBERG_TYPE, "uri", "warehouse"})
 
 # Stock Spark registers Hadoop S3 storage under the s3a scheme.
 _S3_SCHEME = "s3://"
@@ -295,47 +265,21 @@ def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> N
 # ---------------------------------------------------------------------------
 
 
-def _catalog_key(key: str) -> str:
-    """Translate a PyIceberg property name to its Iceberg Java equivalent."""
-    return _CATALOG_PROP_RENAMES.get(key, key)
-
-
 def _required_prop(props: dict[str, str], key: str, why: str) -> str:
     if key not in props:
         raise ValueError(f"site.catalog.props must set {key!r}: {why}")
     return props[key]
 
 
-def _file_io_for(warehouse: str) -> str | None:
-    for scheme, implementation in _FILE_IO_BY_SCHEME.items():
-        if warehouse.startswith(scheme):
-            return implementation
-    return None
-
-
 def _catalog_conf(site: SiteConfig) -> dict[str, str]:
     """Render catalog settings under spark.sql.catalog.<name>."""
-    props = site.catalog_props
-    if _PYICEBERG_TYPE in props and props[_PYICEBERG_TYPE] != REST:
-        raise ValueError(
-            f"Spark requires an Iceberg REST catalog; site.catalog.props specifies type {props[_PYICEBERG_TYPE]!r}"
-        )
     prefix = f"spark.sql.catalog.{CATALOG_NAME}"
-    conf = {
+    props = catalog_properties(site.catalog_props, site.warehouse, engine="Spark")
+    return {
         prefix: _SPARK_CATALOG_CLASS,
-        f"{prefix}.{_PYICEBERG_TYPE}": REST,
-        f"{prefix}.uri": _required_prop(props, "uri", "a Spark run addresses its table through it"),
-        # A Glue REST warehouse identifies an account, not a storage location.
-        f"{prefix}.warehouse": _required_prop(props, "warehouse", "the catalog resolves a table under it"),
+        f"{prefix}.type": REST,
+        **{f"{prefix}.{key}": value for key, value in props.items()},
     }
-    # Use the storage URI; the catalog's warehouse property may be an account ID.
-    file_io = _file_io_for(site.warehouse)
-    if file_io is not None:
-        conf[f"{prefix}.io-impl"] = file_io
-    # Sort properties for deterministic output and readable diffs.
-    for key in sorted(set(props) - _STATED_CATALOG_PROPS):
-        conf[f"{prefix}.{_catalog_key(key)}"] = props[key]
-    return conf
 
 
 def checkpoint_uri(site: SiteConfig, derived: Derived) -> str:
@@ -410,20 +354,9 @@ def render_env(spec: RunSpec) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _is_msk_iam(security: dict[str, str]) -> bool:
-    """Return whether Kafka properties request MSK IAM authentication."""
-    return MECHANISM_KEY in security and security[MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
-
-
 def kafka_options(security: dict[str, str]) -> dict[str, str]:
-    """Translate Kafka properties to source options, including MSK IAM settings.
-
-    Preserve unrelated TLS and client options during authentication translation.
-    """
-    if not _is_msk_iam(security):
-        return {f"kafka.{key}": value for key, value in security.items()}
-    carried = [(key, value) for key, value in security.items() if key not in _MSK_IAM_REPLACED]
-    return {f"kafka.{key}": value for key, value in (*_MSK_IAM_PROPS, *carried)}
+    """Render Java Kafka properties as Spark source options."""
+    return {f"kafka.{key}": value for key, value in kafka_properties(security).items()}
 
 
 def _flag(value: bool) -> str:

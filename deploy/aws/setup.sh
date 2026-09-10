@@ -8,6 +8,8 @@ PREREQ_DOC="deploy/aws/README.md"
 AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/_lib.sh
 source "$AWS_DIR/../../scripts/_lib.sh"
+# shellcheck source=deploy/aws/_resources.sh
+source "$AWS_DIR/_resources.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -80,13 +82,6 @@ MSK_IAM_PORT=9098
 FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-1.15.0}"
 FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
 FLINK_OPERATOR_NAMESPACE=flink-operator
-
-# Pin a CRD version compatible with the rendered SparkApplication fields.
-# spark.jobNamespaces controls which namespaces the operator watches.
-SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-2.5.2}"
-SPARK_OPERATOR_RELEASE=spark-operator
-SPARK_OPERATOR_NAMESPACE=spark-operator
-SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator
 
 ROLE_NAME=lakehouse-ingest-bench-harness
 # Use an inline policy scoped to this bucket and MSK cluster.
@@ -179,44 +174,6 @@ log "flink operator: $OPERATOR_CHART"
 # S3
 # ---------------------------------------------------------------------------
 
-# Missing tags may be an API error or an empty list; both mean unowned here.
-bucket_is_ours() {
-	local tags
-	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
-		--query "TagSet[?Key=='$TAG_KEY'].Value" --output text 2>/dev/null)" || return 1
-	[[ $tags == true ]]
-}
-
-# Only configure existing buckets carrying the benchmark tag. Tag replacement
-# and versioning changes could otherwise alter an unrelated bucket.
-create_bucket() {
-	if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
-		bucket_is_ours "$BUCKET" ||
-			die "s3://$BUCKET already exists, but its $TAG_KEY=true tag could not be verified.
-     Refusing to change its tags or versioning. Set BUCKET to a new bucket name,
-     or verify access and tag this bucket $TAG_KEY=true if it is dedicated to the benchmark."
-		log "s3://$BUCKET exists"
-	else
-		log "creating s3://$BUCKET"
-		# CreateBucket in us-east-1 rejects an explicit LocationConstraint.
-		if [[ $AWS_REGION == us-east-1 ]]; then
-			aws s3api create-bucket --bucket "$BUCKET" >/dev/null
-		else
-			aws s3api create-bucket --bucket "$BUCKET" \
-				--create-bucket-configuration "LocationConstraint=$AWS_REGION" >/dev/null
-		fi
-	fi
-	aws s3api put-public-access-block --bucket "$BUCKET" \
-		--public-access-block-configuration \
-		BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-	aws s3api put-bucket-tagging --bucket "$BUCKET" --tagging "TagSet=[{Key=$TAG_KEY,Value=true}]"
-	# Suspend enabled versioning to avoid retaining billable deleted corpus data.
-	if [[ "$(aws s3api get-bucket-versioning --bucket "$BUCKET" --query 'Status' --output text)" == Enabled ]]; then
-		log "suspending versioning on s3://$BUCKET"
-		aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Suspended
-	fi
-}
-
 create_bucket
 
 # ---------------------------------------------------------------------------
@@ -295,46 +252,6 @@ for cidr in $VPC_CIDRS; do
 	fi
 done
 
-# Grow broker storage to MSK_VOLUME_GIB when needed; MSK cannot shrink it.
-# Enough storage prevents broker capacity from limiting the offered rate.
-grow_broker_volume() {
-	local reported state version current update_error
-	# Read size, state, and update version from one response.
-	reported="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
-		--query 'ClusterInfo.[State,CurrentVersion,BrokerNodeGroupInfo.StorageInfo.EbsStorageInfo.VolumeSize]' \
-		--output text)" ||
-		die "could not read $MSK_NAME's broker storage; try: aws kafka describe-cluster --cluster-arn $MSK_ARN"
-	IFS=$'\t' read -r state version current <<<"$reported"
-	# Reject missing numeric fields instead of interpreting AWS CLI's None as zero.
-	if [[ -z $current || $current == None ]]; then
-		die "$MSK_NAME reports no broker volume size; cannot verify the requested ${MSK_VOLUME_GIB} GiB capacity"
-	fi
-	if ((current >= MSK_VOLUME_GIB)); then
-		log "MSK broker volumes are ${current} GiB, meeting the requested ${MSK_VOLUME_GIB} GiB minimum"
-		return 0
-	fi
-	# An in-progress update may still report the old size; do not request it twice.
-	if [[ $state != ACTIVE ]]; then
-		log "MSK broker volumes are ${current} GiB and $MSK_NAME is $state; rerun setup after it becomes ACTIVE to verify the requested ${MSK_VOLUME_GIB} GiB capacity"
-		return 0
-	fi
-	log "growing the msk broker volumes from ${current} to ${MSK_VOLUME_GIB} GiB"
-	# Use the reported version for the update. The final ACTIVE wait covers it.
-	if update_error="$(aws kafka update-broker-storage --cluster-arn "$MSK_ARN" --current-version "$version" \
-		--target-broker-ebs-volume-info "KafkaBrokerNodeId=All,VolumeSizeGB=$MSK_VOLUME_GIB" 2>&1)"; then
-		return 0
-	fi
-	case "$update_error" in
-	# Cooldowns and concurrent updates are retryable on a later setup invocation.
-	*ACTIVE* | *UPDATING* | *ooldown* | *"6 hour"* | *"6-hour"*)
-		log "$MSK_NAME cannot increase broker storage to ${MSK_VOLUME_GIB} GiB yet: $update_error"
-		;;
-	*)
-		die "could not grow $MSK_NAME's broker volumes to ${MSK_VOLUME_GIB} GiB: $update_error"
-		;;
-	esac
-}
-
 # The API name filter is a prefix match; also require the exact cluster name.
 MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
 	--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
@@ -344,19 +261,7 @@ if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
 			--query "KafkaVersions[?Status=='ACTIVE'].Version" --output text 2>&1)"; then
 			die "aws kafka list-kafka-versions failed: $KAFKA_VERSIONS — set MSK_KAFKA_VERSION to choose one yourself"
 		fi
-		# Choose the newest plain ACTIVE 3.x release, excluding tiered variants.
-		# Sort a trailing x after numeric patches using a temporary sentinel.
-		# Allow no-match through pipefail so the next check can explain the failure.
-		MSK_KAFKA_VERSION="$(tr '\t' '\n' <<<"$KAFKA_VERSIONS" |
-			grep -E '^3\.[0-9]+\.([0-9]+|x)$' |
-			while IFS=. read -r major minor patch; do
-				sort_patch=$patch
-				[[ $patch == x ]] && sort_patch=999999
-				printf '%s %s %s\t%s.%s.%s\n' "$major" "$minor" "$sort_patch" "$major" "$minor" "$patch"
-			done |
-			sort -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2 || true)"
-		[[ -n $MSK_KAFKA_VERSION ]] ||
-			die "no ACTIVE 3.x Kafka version among ${KAFKA_VERSIONS//$'\t'/ }; set MSK_KAFKA_VERSION yourself"
+		choose_kafka_version "$KAFKA_VERSIONS"
 		log "kafka version $MSK_KAFKA_VERSION (newest ACTIVE 3.x)"
 	else
 		log "kafka version $MSK_KAFKA_VERSION (from MSK_KAFKA_VERSION)"
@@ -442,30 +347,7 @@ envsubst '${NAMESPACE}' <"$AWS_DIR/k8s/namespace.yaml.tmpl" |
 
 # Create the namespace first: the Spark chart installs a Role in every
 # namespace listed in spark.jobNamespaces.
-if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
-	log "the sparkapplications CRD is present"
-else
-	log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
-	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
-	# Use the benchmark service account bound to Pod Identity; the namespace
-	# manifest supplies its RBAC. Enable the webhook explicitly because it adds
-	# the ConfigMap volume mounts needed at /opt/bench/run.
-	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
-		"$SPARK_OPERATOR_RELEASE/spark-operator" \
-		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
-		--version "$SPARK_OPERATOR_VERSION" \
-		--set "spark.jobNamespaces={$NAMESPACE}" \
-		--set spark.serviceAccount.create=false \
-		--set spark.rbac.create=false \
-		--set webhook.enable=true \
-		--wait
-fi
-# Record the installed chart version, including preexisting installations.
-if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
-	--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
-	die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
-fi
-log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"' <<<"$SPARK_OPERATOR_RELEASES")"
+install_spark_operator
 
 if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	log "applying the schema registry"
@@ -485,73 +367,6 @@ fi
 # ---------------------------------------------------------------------------
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
-
-# Write a complete site.yaml matching site.aws.example.yaml. Quote scalars,
-# including the numeric-looking Glue warehouse account ID. Leave pricing at
-# zero for the operator to fill in before publishing results.
-write_site() {
-	local path=$1 parsed read_back=""
-	[[ ! -e $path ]] ||
-		die "$path already exists; --write-site cannot overwrite it. Choose another path or move the existing file"
-	{
-		cat <<-SITE
-			# Generated by setup.sh --write-site; see site.aws.example.yaml for field details.
-			corpus_root: "s3://$BUCKET/corpus"
-			runs_root: "s3://$BUCKET/runs"
-			warehouse: "s3://$BUCKET/warehouse"
-			kafka:
-			  bootstrap_servers: "$BOOTSTRAP"
-			  security:
-			    security.protocol: SASL_SSL
-			    sasl.mechanism: OAUTHBEARER
-			    aws.region: "$AWS_REGION"
-		SITE
-		if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
-			cat <<-SITE
-				  schema_registry:
-				    url: "http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7"
-			SITE
-		fi
-		cat <<-SITE
-			catalog:
-			  props:
-			    uri: "https://glue.$AWS_REGION.amazonaws.com/iceberg"
-			    warehouse: "$ACCOUNT"
-			    rest.sigv4-enabled: "true"
-			    rest.signing-name: glue
-			    rest.signing-region: "$AWS_REGION"
-			    s3.region: "$AWS_REGION"
-			kubernetes:
-			  context: "$KUBE_CONTEXT"
-			  namespace: "$NAMESPACE"
-			  harness_service_account: "$HARNESS_SERVICE_ACCOUNT"
-			  flink_service_account: "$FLINK_SERVICE_ACCOUNT"
-			  spark_service_account: "$SPARK_SERVICE_ACCOUNT"
-			  service_account_annotations: {}
-			  registry: "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
-			  aws_region: "$AWS_REGION"
-			  # Optional Secret supplying environment variables for \${env:NAME} references.
-			  # secret_name: bench-env
-			  node_selector: $NODE_SELECTOR
-			  tolerations: $TOLERATIONS
-			# Set hourly vCPU and GiB prices using docs/methodology.md's Cost section.
-			# Published results cannot use these zero defaults.
-			pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}
-		SITE
-	} >"$path"
-	# Validate the generated YAML. Remove invalid output so the overwrite guard
-	# does not prevent a corrected retry.
-	if ! parsed="$(yq -e '.kafka.bootstrap_servers' "$path" 2>&1)"; then
-		read_back="yq could not read a site config out of it: $parsed"
-	elif [[ $parsed != "$BOOTSTRAP" ]]; then
-		read_back="its kafka.bootstrap_servers reads back as '$parsed' rather than '$BOOTSTRAP'"
-	fi
-	if [[ -n $read_back ]]; then
-		rm -f "$path"
-		die "removed $path because the generated site configuration failed validation: $read_back"
-	fi
-	log "wrote $path"
-}
 
 MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
 [[ $MSK_STATE == ACTIVE ]] || log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"

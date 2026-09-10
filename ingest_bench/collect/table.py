@@ -7,9 +7,21 @@ deterministic so validation can detect a stale ``RESULTS.md``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
 
+from ingest_bench.collect.schema import (
+    Cost,
+    Exactness,
+    FleetRole,
+    Freshness,
+    Geometry,
+    Keepup,
+    ResultDocument,
+    Run,
+    Summary,
+    parse_result,
+)
 from ingest_bench.scorer.geometry import MIB
 from ingest_bench.scorer.score import IDLE_STOP, PRODUCER_BOUND, VOID
 
@@ -27,9 +39,9 @@ _FOOTER = (
 _NA = "n/a"
 
 
-def _validity_cell(summary: dict[str, object]) -> str:
+def _validity_cell(summary: Summary) -> str:
     """Return the validity label used in the results table."""
-    if cast(bool, summary["run_valid"]):
+    if summary["run_valid"]:
         return "valid"
     state = summary["state"]
     if state == PRODUCER_BOUND:
@@ -42,101 +54,105 @@ def _validity_cell(summary: dict[str, object]) -> str:
     return "not drained"
 
 
-def _fleet_cell(fleet: list[dict[str, object]]) -> str:
+def _fleet_cell(fleet: list[FleetRole]) -> str:
     return " + ".join(f"{role['role']}×{role['count']} {role['machine_type']}" for role in fleet)
 
 
-def _fmt(value: object, digits: int) -> str:
-    return _NA if value is None else f"{cast(float, value):.{digits}f}"
+def _fmt(value: float | None, digits: int) -> str:
+    return _NA if value is None else f"{value:.{digits}f}"
 
 
-def _freshness_cell(freshness: dict[str, object] | None) -> str:
+def _freshness_cell(freshness: Freshness | None) -> str:
     if freshness is None:
         return _NA
-    window = cast(dict[str, object], freshness["window"])
+    window = freshness["window"]
     return f"{_fmt(window['p50_s'], 1)}/{_fmt(window['p95_s'], 1)}/{_fmt(window['max_s'], 1)}"
 
 
-def _exactness_cell(exactness: dict[str, object] | None) -> str:
+def _exactness_cell(exactness: Exactness | None) -> str:
     if exactness is None:
         return _NA
-    if cast(bool, exactness["exact"]):
+    if exactness["exact"]:
         return "exact"
     return f"lost {exactness['loss_rows']} / dup {exactness['duplicate_rows']}"
 
 
-def _keepup_cell(keepup: dict[str, object] | None) -> str:
+def _keepup_cell(keepup: Keepup | None) -> str:
     if keepup is None:
         return _NA
     absorbed = keepup["absorbed_at_offer_end"]
-    pct = _NA if absorbed is None else f"{cast(float, absorbed) * 100:.1f}%"
+    pct = _NA if absorbed is None else f"{absorbed * 100:.1f}%"
     return f"{pct} / {_fmt(keepup['drain_s'], 1)}s"
 
 
-def _cost_cell(run: dict[str, object], cost: dict[str, object]) -> str:
+def _cost_cell(run: Run, cost: Cost) -> str:
     """Show ``n/a`` when prices are undisclosed, rather than implying a free fleet."""
-    pricing = cast(dict[str, object], run["site_pricing"])
+    pricing = run["site_pricing"]
     if pricing["vcpu_hour_usd"] == 0 and pricing["gib_hour_usd"] == 0:
         return _NA
     return _fmt(cost["usd_per_hour"], 2)
 
 
-def _file_size_cell(geometry: dict[str, object] | None) -> str:
+def _file_size_cell(geometry: Geometry | None) -> str:
     if geometry is None:
         return _NA
     final = geometry["final"]
     if final is None:
         return _NA
-    live = cast(dict[str, object], cast(dict[str, object], final)["live"])
-    quantiles = cast(dict[str, object], live["size_quantiles"])
+    live = final["live"]
+    quantiles = live["size_quantiles"]
     p50 = quantiles["p50"]
-    return _NA if p50 is None else f"{cast(float, p50) / MIB:.1f}"
+    return _NA if p50 is None else f"{p50 / MIB:.1f}"
 
 
-def _row(document: dict[str, object]) -> tuple[tuple[str, str, str, str], str]:
+def _row(document: ResultDocument) -> tuple[tuple[str, str, str, str], str]:
     """One row, paired with the key it sorts by (preset, engine, variant, date)."""
-    run = cast(dict[str, object], document["run"])
-    spec = cast(dict[str, object], run["spec"])
-    data = cast(dict[str, object], document["data"])
-    summary = cast(dict[str, object], data["summary"])
-    derived = cast(dict[str, object], document["derived"])
+    run = document["run"]
+    spec = run["spec"]
+    data = document["data"]
+    summary = data["summary"]
+    derived = document["derived"]
+    if summary is None:
+        raise ValueError("data.summary: is null; a results row requires a scorer summary")
 
-    engine = str(run["engine"])
-    variant = str(run["variant"])
-    preset = str(spec["corpus"])
-    date = str(document["collected_at"])[:10]
+    engine = run["engine"]
+    variant = run["variant"]
+    preset = spec["corpus"]
+    date = document["collected_at"][:10]
 
     cells = (
         engine,
         variant,
         preset,
         date,
-        _fleet_cell(cast(list[dict[str, object]], run["fleet"])),
+        _fleet_cell(run["fleet"]),
         _validity_cell(summary),
-        _freshness_cell(cast("dict[str, object] | None", derived["freshness"])),
-        _exactness_cell(cast("dict[str, object] | None", derived["exactness"])),
-        _keepup_cell(cast("dict[str, object] | None", derived["keepup"])),
-        _cost_cell(run, cast(dict[str, object], derived["cost"])),
-        _file_size_cell(cast("dict[str, object] | None", document["geometry"])),
+        _freshness_cell(derived["freshness"]),
+        _exactness_cell(derived["exactness"]),
+        _keepup_cell(derived["keepup"]),
+        _cost_cell(run, derived["cost"]),
+        _file_size_cell(document["geometry"]),
     )
     return (preset, engine, variant, date), "| " + " | ".join(cells) + " |"
 
 
-def render_results_table(documents: list[tuple[Path, dict[str, object]]]) -> str:
+def render_results_table(documents: Sequence[tuple[Path, object]]) -> str:
     """Render ``results/RESULTS.md`` from run documents.
 
     Report malformed rows with their source paths instead of omitting them.
     """
     rows: list[tuple[tuple[str, str, str, str], str]] = []
+    versions: set[str] = set()
     for path, document in documents:
         try:
-            rows.append(_row(document))
-        except (KeyError, TypeError) as err:
+            parsed = parse_result(document)
+            rows.append(_row(parsed))
+            versions.add(parsed["harness_version"])
+        except ValueError as err:
             raise ValueError(f"{path}: does not hold the fields a results row needs: {err}") from err
     rows.sort(key=lambda entry: entry[0])
 
-    versions = sorted({str(document["harness_version"]) for _, document in documents})
-    harness_line = "Harness version(s): " + (", ".join(versions) if versions else "(none published yet)")
+    harness_line = "Harness version(s): " + (", ".join(sorted(versions)) if versions else "(none published yet)")
 
     lines = ["# Results", "", harness_line, "", _HEADER_ROW, _SEPARATOR_ROW]
     lines.extend(line for _, line in rows)

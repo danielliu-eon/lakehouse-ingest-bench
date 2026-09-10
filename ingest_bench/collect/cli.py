@@ -16,7 +16,8 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import cast
 
-from ingest_bench.collect.run_json import RUN_JSON_FILE, SCHEMA_VERSION, build_run_json
+from ingest_bench.collect.run_json import RUN_JSON_FILE, build_run_json
+from ingest_bench.collect.schema import ResultDocument, parse_result
 from ingest_bench.collect.table import render_results_table
 from ingest_bench.specs.model import load_site
 
@@ -110,16 +111,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
-def load_results(results_dir: Path) -> list[tuple[Path, dict[str, object]]]:
+def load_results(results_dir: Path) -> list[tuple[Path, ResultDocument]]:
     """Load run documents under ``results_dir``; an empty directory yields no rows."""
-    documents: list[tuple[Path, dict[str, object]]] = []
+    documents: list[tuple[Path, ResultDocument]] = []
     for path in sorted(results_dir.glob("**/*.json")):
-        document = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
-        schema_version = document["schema_version"] if "schema_version" in document else None
-        if schema_version != SCHEMA_VERSION:
-            raise ValueError(
-                f"{path}: schema_version {schema_version!r} is not {SCHEMA_VERSION}, so it is not a result document"
-            )
+        try:
+            document = parse_result(json.loads(path.read_text(encoding="utf-8")))
+        except ValueError as err:
+            raise ValueError(f"{path}: {err}") from err
         documents.append((path, document))
     return documents
 

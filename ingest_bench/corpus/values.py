@@ -12,6 +12,7 @@ import hashlib
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import cast
 
 import numpy as np
@@ -313,17 +314,20 @@ def build_value_table(values: list[object], avro_type: object) -> ValueTable:
     )
 
 
-_VALUE_TABLE_CACHE: dict[tuple[ColumnDistribution, int, int], ValueTable] = {}
-
-
 def value_table(column: ColumnDistribution, seed: int, payload_width: int) -> ValueTable:
-    key = (column, seed, payload_width)
-    cached = _VALUE_TABLE_CACHE.get(key)
-    if cached is None:
-        values = [bounded_value(column, seed, rank, payload_width) for rank in range(column.cardinality)]
-        cached = build_value_table(values, AVRO_TYPE_BY_KIND[column.kind])
-        _VALUE_TABLE_CACHE[key] = cached
-    return cached
+    # Only blob contents depend on the seed or byte width. Calibration can reuse
+    # every other table across its candidate payload widths.
+    if column.kind != KIND_BLOB:
+        seed, payload_width = 0, 0
+    elif column.role != ROLE_PAYLOAD:
+        payload_width = column.width
+    return _value_table(column, seed, payload_width)
+
+
+@lru_cache(maxsize=32)
+def _value_table(column: ColumnDistribution, seed: int, payload_width: int) -> ValueTable:
+    values = [bounded_value(column, seed, rank, payload_width) for rank in range(column.cardinality)]
+    return build_value_table(values, AVRO_TYPE_BY_KIND[column.kind])
 
 
 @dataclass(frozen=True)

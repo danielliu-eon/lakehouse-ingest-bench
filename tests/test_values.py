@@ -79,3 +79,33 @@ def test_column_strings_for_sidecars() -> None:
     users = v.column_strings(block, "user_id")
     assert len(users) == 8 and all(s.startswith("u-") for s in users)
     assert v.column_strings(block, "partition_key") == [v.partition_label(int(k)) for k in block.partition_keys]
+
+
+def test_value_tables_reuse_only_irrelevant_inputs() -> None:
+    scalar = c.ColumnDistribution("count", c.KIND_INTEGER, cardinality=4, minimum=1, maximum=4)
+    assert v.value_table(scalar, 7, 100) is v.value_table(scalar, 8, 200)
+
+    blob = c.ColumnDistribution("blob", c.KIND_BLOB, cardinality=4, width=8)
+    original = v.value_table(blob, 7, 100)
+    assert original is v.value_table(blob, 7, 200)
+    assert original.values.tolist() != v.value_table(blob, 8, 100).values.tolist()
+
+    payload = c.ColumnDistribution("payload", c.KIND_BLOB, role=c.ROLE_PAYLOAD, cardinality=4)
+    assert [len(value) for value in v.value_table(payload, 7, 8).values] == [8] * 4
+    assert [len(value) for value in v.value_table(payload, 7, 16).values] == [16] * 4
+
+
+def test_value_table_cache_evicts_without_changing_encodings() -> None:
+    v._value_table.cache_clear()
+    column = c.ColumnDistribution("blob", c.KIND_BLOB, cardinality=4, width=8)
+    original = v.value_table(column, 0, 100)
+    capacity = v._value_table.cache_info().maxsize
+    assert capacity is not None
+    for seed in range(1, capacity + 1):
+        v.value_table(column, seed, 100)
+    assert v._value_table.cache_info().currsize == capacity
+    rebuilt = v.value_table(column, 0, 100)
+    assert rebuilt is not original
+    np.testing.assert_array_equal(rebuilt.values, original.values)
+    np.testing.assert_array_equal(rebuilt.encoded, original.encoded)
+    np.testing.assert_array_equal(rebuilt.encoded_sizes, original.encoded_sizes)

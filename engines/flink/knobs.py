@@ -13,10 +13,10 @@ from typing import cast
 import yaml
 
 from engines.flink.script import join_statements
+from engines.java_properties import catalog_properties, kafka_properties
 from ingest_bench import uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
-from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.kubernetes import NAME, EngineKubernetes, object_name
 from ingest_bench.specs.model import (
@@ -150,37 +150,6 @@ _FORMAT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
 _REGISTRY_URL_KEY = "avro-confluent.url"
 _REGISTRY_USER_INFO_SOURCE = ("avro-confluent.basic-auth.credentials-source", "USER_INFO")
 _REGISTRY_USER_INFO_KEY = "avro-confluent.basic-auth.user-info"
-
-# Translate the harness's OAUTHBEARER + aws.region signal to Java MSK IAM
-# authentication. The login module signs tokens using the pod's credentials.
-_OAUTHBEARER = "OAUTHBEARER"
-_MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
-    ("security.protocol", "SASL_SSL"),
-    (MECHANISM_KEY, "AWS_MSK_IAM"),
-    ("sasl.jaas.config", "software.amazon.msk.auth.iam.IAMLoginModule required;"),
-    ("sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler"),
-)
-
-# Replace these keys to avoid duplicate options. Pass the region through
-# AWS_REGION, since aws.region is a harness key, not a Kafka client option.
-_MSK_IAM_REPLACED = frozenset({key for key, _ in _MSK_IAM_PROPS} | {REGION_KEY})
-
-# Rename the differing PyIceberg S3 key; pass other properties through.
-_CATALOG_PROP_RENAMES = {"s3.region": "client.region"}
-
-# Select FileIO from the warehouse scheme. The default Hadoop fallback lacks
-# the required storage configuration.
-_FILE_IO_BY_SCHEME = {
-    "s3://": "org.apache.iceberg.aws.s3.S3FileIO",
-    "gs://": "org.apache.iceberg.gcp.gcs.GCSFileIO",
-}
-
-# Flink requires type=iceberg and catalog-type=rest; PyIceberg uses type=rest.
-_PYICEBERG_TYPE = "type"
-
-# Exclude properties already emitted by the catalog clause.
-_STATED_CATALOG_PROPS = frozenset({_PYICEBERG_TYPE, "uri", "warehouse"})
-
 
 # ---------------------------------------------------------------------------
 # Reading the block
@@ -378,20 +347,8 @@ def _column_ddl(name: str, meta: CorpusMetadata) -> str:
     return f"  {name} {_DDL_TYPES[published]} NOT NULL"
 
 
-def _is_msk_iam(security: dict[str, str]) -> bool:
-    """Return whether Kafka properties request MSK IAM authentication."""
-    return MECHANISM_KEY in security and security[MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
-
-
 def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
-    """Translate Kafka properties to source options, including MSK IAM settings.
-
-    Preserve unrelated TLS and client options during authentication translation.
-    """
-    if not _is_msk_iam(security):
-        return [(f"properties.{key}", value) for key, value in security.items()]
-    carried = [(key, value) for key, value in security.items() if key not in _MSK_IAM_REPLACED]
-    return [(f"properties.{key}", value) for key, value in (*_MSK_IAM_PROPS, *carried)]
+    return [(f"properties.{key}", value) for key, value in kafka_properties(security).items()]
 
 
 def _source_format(spec: RunSpec) -> str:
@@ -440,44 +397,13 @@ def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusM
     return f"CREATE TABLE {SOURCE_TABLE} (\n{columns}\n) WITH (\n{_with_clause(options)}\n)"
 
 
-def _catalog_key(key: str) -> str:
-    """Translate a PyIceberg property name to its Iceberg Java equivalent."""
-    return _CATALOG_PROP_RENAMES.get(key, key)
-
-
-def _required_prop(props: dict[str, str], key: str) -> str:
-    if key not in props:
-        raise ValueError(f"site.catalog.props must set {key!r}: a Flink run addresses its table through it")
-    return props[key]
-
-
-def _file_io_for(warehouse: str) -> str | None:
-    for scheme, implementation in _FILE_IO_BY_SCHEME.items():
-        if warehouse.startswith(scheme):
-            return implementation
-    return None
-
-
 def _catalog_ddl(site: SiteConfig) -> str:
-    props = site.catalog_props
-    if _PYICEBERG_TYPE in props and props[_PYICEBERG_TYPE] != REST:
-        raise ValueError(
-            f"Flink requires an Iceberg REST catalog; site.catalog.props specifies type {props[_PYICEBERG_TYPE]!r}"
-        )
-    options: list[tuple[str, str]] = [
-        ("type", "iceberg"),
-        ("catalog-type", REST),
-        ("uri", _required_prop(props, "uri")),
-        # A Glue REST warehouse identifies an account, not a storage location.
-        ("warehouse", _required_prop(props, "warehouse")),
-    ]
-    # Sort properties for deterministic output and readable diffs.
-    options += [(_catalog_key(key), props[key]) for key in sorted(set(props) - _STATED_CATALOG_PROPS)]
-    # Use the storage URI; the catalog's warehouse property may be an account ID.
-    file_io = _file_io_for(site.warehouse)
-    if file_io is not None:
-        options.append(("io-impl", file_io))
-    return f"CREATE CATALOG {CATALOG_NAME} WITH (\n{_with_clause(options)}\n)"
+    options = {
+        "type": "iceberg",
+        "catalog-type": REST,
+        **catalog_properties(site.catalog_props, site.warehouse, engine="Flink"),
+    }
+    return f"CREATE CATALOG {CATALOG_NAME} WITH (\n{_with_clause(list(options.items()))}\n)"
 
 
 def _insert(derived: Derived, meta: CorpusMetadata, knobs: Knobs) -> str:

@@ -26,7 +26,7 @@ spec:
       containers:
         - name: harness
           image: __IMAGE__
-          args: ["__COMMAND__"]
+          command: __COMMAND__
           env: __ENV__
           envFrom: __ENV_FROM__
           # Size memory for batch bytes; override through GEN_MEMORY.

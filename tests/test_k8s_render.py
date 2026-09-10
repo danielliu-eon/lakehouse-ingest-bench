@@ -5,6 +5,7 @@ Enumerate expected markers so new template inputs require an explicit test updat
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -22,7 +23,7 @@ SAMPLE = {
     "NAMESPACE": "a-namespace",
     "SERVICE_ACCOUNT": "an-account",
     "IMAGE": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/lakehouse-ingest-bench/harness:abc1234",
-    "COMMAND": "gen-corpus --preset smoke --out s3://a-bucket/corpus/shards/$JOB_COMPLETION_INDEX --shard-count 4",
+    "COMMAND": json.dumps(["gen-corpus", "--preset", "smoke", "--out", "s3://a-bucket/a path"]),
     "ENV": '[{"name": "AWS_REGION", "value": "eu-west-1"}, {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"}]',
     "ENV_FROM": '[{"secretRef": {"name": "bench-env"}}]',
     "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}',
@@ -185,9 +186,8 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
     container = _container(document)
     assert container["name"] == "harness"
     assert container["image"] == SAMPLE["IMAGE"]
-    # The image's entrypoint is `/bin/sh -c`, so the whole command line is one
-    # argument and the shell it names expands `$JOB_COMPLETION_INDEX`.
-    assert container["args"] == [SAMPLE["COMMAND"]]
+    assert container["command"] == json.loads(SAMPLE["COMMAND"])
+    assert "args" not in container
     assert container["env"] == [
         {"name": "AWS_REGION", "value": "eu-west-1"},
         {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"},

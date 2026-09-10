@@ -37,12 +37,12 @@ CREATE CATALOG ice WITH (
   'catalog-type' = 'rest',
   'uri' = 'http://iceberg-rest:8181',
   'warehouse' = 's3://warehouse/',
+  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
   's3.access-key-id' = 'admin',
   's3.endpoint' = 'http://minio:9000',
   's3.path-style-access' = 'true',
   'client.region' = 'us-east-1',
-  's3.secret-access-key' = 'password',
-  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
+  's3.secret-access-key' = 'password'
 );
 
 INSERT INTO ice.`@NAMESPACE@`.`@TABLE@` /*+ OPTIONS('distribution-mode' = 'hash', 'write-parallelism' = '8') */

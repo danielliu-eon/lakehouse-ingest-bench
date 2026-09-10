@@ -5,6 +5,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from ingest_bench.collect.table import render_results_table
 from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, PLACEHOLDER
 from tests.test_collect import _build, _run_dir, _site
@@ -208,3 +210,54 @@ def test_validate_results_fails_on_a_cost_column_with_no_price_behind_it(tmp_pat
         result = _run(_mutated(tmp_path / field, mutate))
         assert result.returncode != 0, result.stdout
         assert f"site_pricing.{field}" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("value", [None, [], "not a document", 3, {"schema_version": 2}])
+def test_validate_reports_invalid_document_shapes(tmp_path: Path, value: object) -> None:
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(value))
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert str(path) in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "results_md" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (("run", "spec"), []),
+        (("run", "fleet"), [None]),
+        (("run", "site_pricing"), {}),
+        (("run", "site_pricing", "vcpu_hour_usd"), True),
+        (("derived", "cost", "usd_per_hour"), "1.2"),
+        (("derived", "freshness", "window", "p50_s"), float("nan")),
+        (("data", "summary", "run_valid"), "false"),
+        (("geometry",), {"final": {"live": {}}}),
+    ],
+)
+def test_validate_reports_nested_shape_errors(tmp_path: Path, field: tuple[str, ...], value: object) -> None:
+    results, path = _valid_results_dir(tmp_path)
+    document = json.loads(path.read_text())
+    target = document
+    for name in field[:-1]:
+        target = target[name]
+    target[field[-1]] = value
+    path.write_text(json.dumps(document))
+    result = _run(results)
+    assert result.returncode == 1
+    assert ".".join(field) in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "results_md" not in result.stdout
+
+
+def test_validate_reports_missing_summary_without_rendering_it(tmp_path: Path) -> None:
+    results, path = _valid_results_dir(tmp_path)
+    document = json.loads(path.read_text())
+    document["data"]["summary"] = None
+    path.write_text(json.dumps(document))
+    result = _run(results)
+    assert result.returncode == 1
+    assert "data.summary: is null" in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "results_md" not in result.stdout

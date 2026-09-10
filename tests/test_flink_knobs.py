@@ -557,3 +557,15 @@ def test_a_cluster_that_names_no_secret_gives_its_container_no_env_from(meta: me
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     document = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))
     assert "envFrom" not in document["spec"]["podTemplate"]["spec"]["containers"][0]
+
+
+@pytest.mark.parametrize("warehouse", ["s3://warehouse", "gs://warehouse", "file:///warehouse"])
+def test_explicit_file_io_overrides_the_storage_default(meta: metadata.CorpusMetadata, warehouse: str) -> None:
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    site = replace(
+        _site(), warehouse=warehouse, catalog_props={**_site().catalog_props, "io-impl": "example.CustomFileIO"}
+    )
+    derived = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    sql = knobs.render_sql(spec, site, derived, meta)
+    assert sql.count("'io-impl'") == 1
+    assert "'io-impl' = 'example.CustomFileIO'" in sql

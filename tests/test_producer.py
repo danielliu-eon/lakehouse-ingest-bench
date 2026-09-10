@@ -559,3 +559,44 @@ def test_the_region_pseudo_key_never_reaches_the_producer(
     assert produce.run(args, factory, clock, io.StringIO()) == 0
     assert "aws.region" not in configs[0] and callable(configs[0]["oauth_cb"])
     assert configs[0]["sasl.mechanism"] == "OAUTHBEARER" and configs[0]["enable.idempotence"] is True
+
+
+@pytest.mark.parametrize("delays", [[], [-8, -4, -9, -7], [5, 20, 10, 1]])
+def test_run_reports_maximum_ack_delay_and_batch_count(
+    tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch, delays: list[int]
+) -> None:
+    clock = FakeClock(0)
+    log = io.StringIO()
+    path = tmp_path / "publish_log-0.jsonl"
+    args = produce.ProduceArgs(
+        corpus_uri=corpus_uri,
+        bootstrap="fake:9092",
+        topic="t",
+        epoch_ms=0,
+        speed=1.0,
+        shard=0,
+        shards=1,
+        seconds=len(delays),
+        key_column=None,
+        value_prefix=b"",
+        publish_log_path=path,
+        behind_max_ms=15,
+        upload_prefix=None,
+        compression="zstd",
+        kafka_props={},
+    )
+    acknowledgements = iter(batch * 1000 + delay for batch, delay in enumerate(delays))
+
+    def outcome(*args: object, **kwargs: object) -> produce.BatchOutcome:
+        ack = next(acknowledgements)
+        return produce.BatchOutcome(ack, ack, 1, 1, 0)
+
+    monkeypatch.setattr(produce, "produce_batch", outcome)
+    assert produce.run(args, lambda cfg: FakeProducer(clock), clock, log) == 0
+    records = publish_log.read(path)
+    assert len(records) == len(delays)
+    assert log.getvalue().splitlines()[-1] == (
+        f"PRODUCE DONE batches={len(delays)} rows={len(delays)} behind_ms={publish_log.behind_ms(records)}"
+    )
+    assert log.getvalue().count("BEHIND ") == int(any(delay > args.behind_max_ms for delay in delays))
+    assert json.loads(path.read_text().splitlines()[-1]) == {"done": True, "shard": 0, "batches": len(delays)}

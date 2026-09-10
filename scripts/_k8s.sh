@@ -115,25 +115,21 @@ site_pairs() {
 	printf '%s' "$entries"
 }
 
-# site_flags <yq path to a map> <flag>
-# Build single-quoted key=value arguments for a Job's shell command. Quoting preserves
-# spaces and literal ${env:NAME} references for Python to resolve. Reject single quotes
-# that would break shell quoting and double quotes that would break the enclosing YAML
-# scalar.
-site_flags() {
-	# Check the assignment explicitly: failure inside command substitution does not reliably
-	# trigger the caller's set -e.
-	local pairs
-	pairs="$(site_pairs "$1")" ||
-		die "cannot build $2 flags for the Job command; see the error above"
-	local flags="" pair
-	while IFS= read -r pair; do
-		[[ -n $pair ]] || continue
-		[[ $pair != *"'"* && $pair != *'"'* ]] ||
-			die "$SITE_FILE has a ${1#.} entry containing a quote, which cannot be passed safely to a Job command"
-		flags="$flags $2 '$pair'"
-	done <<<"$pairs"
-	printf '%s' "$flags"
+# Populate SITE_PROP_FLAGS without interpreting property values as shell syntax.
+read_site_prop_flags() {
+	local entries pair
+	entries="$(site_json "$1" '{}' | jq -c '[to_entries[] | .key + "=" + .value]')" || die "could not read ${1#.} from $SITE_FILE"
+	SITE_PROP_FLAGS=()
+	# NUL delimiters preserve newlines as well as quotes and spaces in values.
+	while IFS= read -r -d '' pair; do
+		SITE_PROP_FLAGS+=("$2" "$pair")
+	done < <(jq -j '.[] + "\u0000"' <<<"$entries")
+}
+
+# Serialize argv as YAML-compatible JSON. Kubernetes reduces $$ to a literal $,
+# preventing its $(NAME) expansion from changing user-provided arguments.
+job_command_json() {
+	jq -cn --args '$ARGS.positional | map(gsub("\\$"; "$$"))' -- "$@"
 }
 
 # Populate CATALOG_PROP_FLAGS with local --catalog-prop arguments. Arrays
@@ -490,11 +486,14 @@ K8S_PORT_FORWARD_PID=""
 # Wait for an HTTP response, not just a listening socket. The namespace defaults
 # to the site's and the probe path to /.
 k8s_port_forward() {
-	local resource=$1 ports=$2 namespace=${3:-$SITE_NAMESPACE} probe=${4:-/} local_port=${2%%:*} waited=0
+	local resource=$1 ports=$2 namespace=${3:-$SITE_NAMESPACE} probe=${4:-/} local_port=${2%%:*}
+	local deadline=$((SECONDS + K8S_PORT_FORWARD_WAIT_S)) remaining probe_timeout
 	kubectl --context "$KUBE_CONTEXT" --namespace "$namespace" port-forward "$resource" "$ports" >&2 &
 	K8S_PORT_FORWARD_PID=$!
-	while ((waited < K8S_PORT_FORWARD_WAIT_S)); do
-		if curl -sf --max-time 5 -o /dev/null "http://localhost:$local_port$probe"; then
+	while ((SECONDS < deadline)); do
+		remaining=$((deadline - SECONDS))
+		probe_timeout=$((remaining < 5 ? remaining : 5))
+		if curl -sf --max-time "$probe_timeout" -o /dev/null "http://localhost:$local_port$probe"; then
 			log "port-forward to $resource is ready on localhost:$local_port"
 			return 0
 		fi
@@ -502,8 +501,9 @@ k8s_port_forward() {
 		if ! kill -0 "$K8S_PORT_FORWARD_PID" 2>/dev/null; then
 			die "kubectl port-forward $resource $ports exited; see its output above"
 		fi
-		sleep 2
-		waited=$((waited + 2))
+		remaining=$((deadline - SECONDS))
+		((remaining > 0)) || break
+		sleep "$((remaining < 2 ? remaining : 2))"
 	done
 	die "port-forward to $resource did not answer on localhost:$local_port within ${K8S_PORT_FORWARD_WAIT_S}s"
 }
