@@ -13,6 +13,21 @@ hands your engine the equivalent `CREATE TABLE` in `facts.ddl`, and a property
 your engine drops from that statement is a property the run does not have. Two
 runs compared on file geometry must have got their properties the same way.
 
+## A partition every writer touches is a small-file storm
+
+An identity partition over many values, written by a fleet of several writers,
+lands up to one file per value per writer at every commit — so a commit's files
+are the partition's cardinality times the fleet's width, however few rows they
+hold. A higher offer rate does not change that count, only how often the commit
+happens.
+
+It is the scorer's problem too, since it reads the id column of every one of
+those files; `--read-workers` (32) is how many of those reads overlap, and the
+pod is sized for that width. A run whose `POLL` lines carry a `SLOW_POLL` is a
+reader that cannot finish inside its own poll interval, and it needs more
+readers or a coarser partition before its verdict means anything: the gate voids
+a reading gone stale, and a voided run says nothing about the engine under it.
+
 ## A dropped setting fails nothing
 
 Both engines accept configuration they then ignore, and neither submission
