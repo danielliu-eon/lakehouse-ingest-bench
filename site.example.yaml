@@ -23,6 +23,8 @@ kubernetes: {}                      # empty means no cluster, and everything run
                                     # service_account_annotations, node_selector and tolerations.
                                     # A cluster refuses a written-out credential above; see
                                     # "Credentials" in docs/running.md.
-pricing:
+pricing:                            # for an instance of `vcpu` cores and `gib` GiB at P an hour,
+                                    # these are P/vcpu/2 and P/gib/2; docs/methodology.md, under
+                                    # Cost, is the rule
   vcpu_hour_usd: 0.0
   gib_hour_usd: 0.0

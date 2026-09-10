@@ -31,9 +31,15 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
   | `curl` | `stage.sh`, to read a running engine through a port-forward |
   | `docker` | `push-images.sh` |
   | `gzip` | `teardown.sh` and `purge.sh`, since a table may write its metadata document compressed |
-- Credentials for the account the cluster is in, with permission to create S3
-  buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
-  add-ons and pod identity associations.
+- **Credentials** for the account the cluster is in, with permission to create
+  S3 buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
+  add-ons and pod identity associations. Every script here and every driver
+  under `scripts/` uses the AWS CLI's ambient credentials and passes no profile
+  of its own, so export `AWS_PROFILE` — or sign in with `aws sso login --profile
+  <name>` or `aws login` — in each shell you run one from, and check it with
+  `aws sts get-caller-identity` first. These two scripts refuse up front on a
+  credential they cannot use; the drivers do not, and a missing one surfaces as
+  `Unable to locate credentials` from the first driver that reads the bucket.
 
 ## Sizing the cluster
 
@@ -160,18 +166,25 @@ version is printed either way). Then:
   Deployment and Service (Apicurio, in-memory storage), waited on until its
   rollout completes.
 
-It ends by printing the values to fill into `site.yaml` (copy
-`site.aws.example.yaml`), the IAM bootstrap string among them.
+It ends by printing the values `site.yaml` needs, the IAM bootstrap string
+among them. `--write-site PATH` also writes them, as a complete `site.yaml` at
+`PATH` — every key `site.aws.example.yaml` has, with `pricing` left at the zeros
+to fill in. It refuses rather than overwrite a file already there, and refuses
+before it creates anything rather than after the wait for MSK.
 
 ## Once per account
 
 ```bash
 export AWS_REGION=... CLUSTER_NAME=...
-deploy/aws/setup.sh                        # bucket, ECR, MSK, IAM, namespace, operators
-cp site.aws.example.yaml site.yaml         # setup.sh prints every value to fill in
+deploy/aws/setup.sh --write-site site.yaml # bucket, ECR, MSK, IAM, namespace, operators, and the site config
 scripts/push-images.sh                     # harness and both engine images, tagged with this commit
 scripts/gen-corpus.sh smoke --shards 4     # a corpus in the bucket, as a Job
 ```
+
+Fill in `site.yaml`'s `pricing` before publishing a result from it: it is the
+one value the account cannot be asked for, and a result published at the zeros
+is refused. Without `--write-site`, `setup.sh` only prints the values and
+`cp site.aws.example.yaml site.yaml` is the copy to fill in by hand.
 
 `push-images.sh` builds the harness and Spark images for `linux/amd64` by
 default; `--platform linux/arm64`, or two comma-separated platforms for a

@@ -237,3 +237,12 @@ container requests, not the nodes they landed on — so it is the same number
 however the cluster packed it. The hours run from the epoch to the later of the
 producer's last acknowledgement and the table's last commit: a fleet is not
 released when the offer stops, and the drain is on the bill.
+
+Both rates come from one rule, so that two sites' figures are comparable. Take
+the hourly price of the instance type the fleet runs on and split it evenly
+between the two terms: for an instance of `vcpu` cores and `gib` GiB at `P` an
+hour, `vcpu_hour_usd = P / vcpu / 2` and `gib_hour_usd = P / gib / 2`. A 4 vCPU
+/ 16 GiB instance at `P` therefore gives `P/8` and `P/32`, so a pod that fills
+the node costs `4 × P/8 + 16 × P/32 = P`, the instance's own price, and a pod
+asking for half the node costs half of it. Use the price the account actually
+pays — on-demand or spot — and the same basis for every run compared.

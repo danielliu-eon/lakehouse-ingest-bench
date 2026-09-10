@@ -583,6 +583,23 @@ def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
 
 
 @needs_bash
+def test_setup_takes_its_one_argument_before_it_needs_an_account() -> None:
+    """The teardown's property, on the script that now takes a flag of its own.
+
+    `--write-site` writes the file every later driver reads, so what it does
+    has to be readable without naming a cluster first.
+    """
+    environment = {key: value for key, value in os.environ.items() if key not in ("AWS_REGION", "CLUSTER_NAME")}
+    out = subprocess.run([str(AWS_SETUP), "--help"], capture_output=True, text=True, env=environment)
+    assert out.returncode == 0, out.stderr
+    assert "--write-site" in out.stdout
+
+    refused = subprocess.run([str(AWS_SETUP), "--everything"], capture_output=True, text=True, env=environment)
+    assert refused.returncode == 2, refused.stdout
+    assert "unknown argument --everything" in refused.stderr
+
+
+@needs_bash
 @pytest.mark.parametrize(
     "offered, chosen",
     [
@@ -894,6 +911,129 @@ def test_teardown_leaves_a_bucket_that_is_already_gone_alone() -> None:
     assert gone.result.returncode == 0, gone.result.stdout + gone.result.stderr
     assert "already gone" in gone.result.stdout, gone.result.stdout
     assert "s3 rm" not in gone.calls and gone.asked == ""
+
+
+# What MSK answers with: a comma-separated list of host:port. It is the value in
+# a written site config that quoting has to survive, since a bare one reads as
+# neither one scalar nor a mapping.
+_MSK_BOOTSTRAP = (
+    "b-1.a-cluster.abc123.c2.kafka.eu-west-1.amazonaws.com:9098,"
+    "b-2.a-cluster.abc123.c2.kafka.eu-west-1.amazonaws.com:9098"
+)
+
+
+def _write_site(path: Path, *, registry: bool = False) -> subprocess.CompletedProcess[str]:
+    """`setup.sh`'s own site writer, against the values a finished setup holds.
+
+    Lifted and run like the bucket and broker-volume steps above: the values it
+    writes are only known at the end of a live setup. What it owes is a file
+    the harness's own loader accepts, which is what the tests below read it
+    with.
+    """
+    harness = f"""
+        set -euo pipefail
+        log() {{ printf 'log %s\\n' "$*"; }}
+        die() {{ printf 'die %s\\n' "$*"; exit 3; }}
+        ACCOUNT={IAM_VALUES["ACCOUNT"]}
+        AWS_REGION={IAM_VALUES["REGION"]}
+        BUCKET={IAM_VALUES["BUCKET"]}
+        BOOTSTRAP='{_MSK_BOOTSTRAP}'
+        KUBE_CONTEXT={SITE_AWS_FILLINGS["YOUR_KUBE_CONTEXT"]}
+        NAMESPACE=ingest-bench
+        HARNESS_SERVICE_ACCOUNT=ingest-bench-harness
+        FLINK_SERVICE_ACCOUNT=ingest-bench-flink
+        SPARK_SERVICE_ACCOUNT=ingest-bench-spark
+        NODE_SELECTOR='{{}}'
+        TOLERATIONS='[]'
+        WITH_SCHEMA_REGISTRY={"true" if registry else "false"}
+{_shell_function(AWS_SETUP, "write_site")}
+        write_site '{path}'
+    """
+    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("registry", [False, True], ids=["no-registry", "with-registry"])
+def test_the_site_setup_writes_holds_every_key_the_example_does(tmp_path: Path, registry: bool) -> None:
+    """Loaded rather than diffed against a fixture, and its keys held to the example.
+
+    A written file and a filled-in copy of `site.aws.example.yaml` have to be
+    the same document, so a key added to the example and not to the writer is a
+    failure here rather than a driver refusing a site months later. The
+    registry is written only for the setup that deployed one: the URL is the
+    in-cluster Service's, which resolves to nothing otherwise.
+    """
+    target = tmp_path / "site.yaml"
+    written = _write_site(target, registry=registry)
+    assert written.returncode == 0, written.stdout + written.stderr
+
+    document = _mapping(yaml.safe_load(target.read_text()))
+    example = _mapping(yaml.safe_load(SITE_AWS_EXAMPLE.read_text()))
+    assert set(document) == set(example), document
+    assert set(_mapping(document["catalog"])) == set(_mapping(example["catalog"]))
+    assert set(_mapping(document["kubernetes"])) == set(_mapping(example["kubernetes"]))
+    assert set(_mapping(document["pricing"])) == set(_mapping(example["pricing"]))
+    # The example carries the registry commented out, because a site that
+    # brings its own names that one instead.
+    expected_kafka = set(_mapping(example["kafka"])) | ({"schema_registry"} if registry else set())
+    assert set(_mapping(document["kafka"])) == expected_kafka
+
+    site = load_site(target)
+    assert site.kafka_bootstrap == _MSK_BOOTSTRAP
+    # Concatenated rather than interpolated: an f-string here reads as a URI
+    # naming a bucket to the leak scan in tests/test_public_surface.py.
+    assert site.corpus_root == "s3://" + IAM_VALUES["BUCKET"] + "/corpus"
+    assert site.catalog_props["warehouse"] == IAM_VALUES["ACCOUNT"]
+    assert site.kubernetes is not None and site.kubernetes.context == SITE_AWS_FILLINGS["YOUR_KUBE_CONTEXT"]
+    assert site.kubernetes.spark_service_account == "ingest-bench-spark"
+    # The one value no account can be asked for, so it is written at the zeros
+    # `validate-results.py` refuses and the operator fills it in.
+    assert (site.pricing_vcpu_hour_usd, site.pricing_gib_hour_usd) == (0.0, 0.0)
+    if registry:
+        assert site.schema_registry is not None and site.schema_registry.url.endswith("/apis/ccompat/v7")
+    else:
+        assert site.schema_registry is None
+
+
+@needs_shell_tools
+def test_the_written_site_is_never_an_overwrite(tmp_path: Path) -> None:
+    """A site config names the bucket a campaign's every run and result lives in."""
+    existing = tmp_path / "site.yaml"
+    kept = "corpus_root: s3://another-bucket/corpus\n"
+    existing.write_text(kept)
+    refused = _write_site(existing)
+    assert refused.returncode == 3, refused.stdout + refused.stderr
+    assert "already exists" in refused.stdout, refused.stdout
+    assert existing.read_text() == kept
+
+
+@needs_bash
+def test_setup_refuses_an_existing_site_before_it_touches_the_account(tmp_path: Path) -> None:
+    """The write is the last thing the script does, after a wait of half an hour.
+
+    So the whole script is run with `aws` stubbed to record and fail: the
+    refusal has to come out of it with nothing recorded, whatever the steps
+    between the argument and the write are.
+    """
+    existing = tmp_path / "site.yaml"
+    existing.write_text("corpus_root: s3://another-bucket/corpus\n")
+    calls = tmp_path / "aws-calls.log"
+    calls.touch()
+    stubs = _stub_bin(tmp_path / "bin", {"aws": f"printf '%s\\n' \"$*\" >>'{calls}'\nexit 1\n"})
+    refused = subprocess.run(
+        [str(AWS_SETUP), "--write-site", str(existing)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{stubs}:{os.environ['PATH']}",
+            "AWS_REGION": IAM_VALUES["REGION"],
+            "CLUSTER_NAME": SITE_AWS_FILLINGS["YOUR_KUBE_CONTEXT"],
+        },
+    )
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "already exists" in refused.stderr, refused.stderr
+    assert calls.read_text() == "", calls.read_text()
 
 
 def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pinned_version() -> None:

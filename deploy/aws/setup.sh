@@ -17,6 +17,39 @@ AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/_lib.sh
 source "$AWS_DIR/../../scripts/_lib.sh"
 
+usage() {
+	cat <<'USAGE'
+usage: deploy/aws/setup.sh [--write-site PATH]
+
+  --write-site PATH   also write a complete site.yaml at PATH, from the same
+                      values this prints at the end. Refuses rather than
+                      overwrite a file that is already there
+
+Environment: AWS_REGION and CLUSTER_NAME are required, and every other
+parameter is an environment variable as well — deploy/aws/README.md, under
+Environment, lists them all with their defaults.
+USAGE
+}
+
+WRITE_SITE=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--write-site)
+		WRITE_SITE="${2:?--write-site needs a path}"
+		shift 2
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		printf 'unknown argument %s\n\n' "$1" >&2
+		usage >&2
+		exit 2
+		;;
+	esac
+done
+
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
@@ -89,15 +122,21 @@ SPARK_SERVICE_ACCOUNT=ingest-bench-spark
 
 ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink lakehouse-ingest-bench/spark"
 
-(($# == 0)) || die "setup.sh takes no arguments; every parameter is an environment variable (see $PREREQ_DOC)"
 [[ $MSK_BROKERS =~ ^[1-9][0-9]*$ ]] || die "MSK_BROKERS must be a positive integer, got '$MSK_BROKERS'"
 [[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
+# Asked here as well as in `write_site`, because the write is the last thing
+# this script does and the wait before it is routinely half an hour long.
+[[ -z $WRITE_SITE || ! -e $WRITE_SITE ]] ||
+	die "$WRITE_SITE already exists, and --write-site never overwrites a site config; name another path or move that file"
 
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 
 require_host_tools aws kubectl helm jq envsubst
+# Only for --write-site, which parses the file back before it offers it as one
+# a driver can read — and `yq` is what every driver reads a site with.
+[[ -z $WRITE_SITE ]] || require_host_tools yq
 
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"; then
 	die "aws sts get-caller-identity failed: $ACCOUNT — sign in first (aws configure, or aws sso login --profile ...)"
@@ -555,6 +594,82 @@ fi
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
 
+# A complete site.yaml at `$1`, from the values this script resolved: the ones
+# the printout below names, plus the identities it created, the placement the
+# harness Jobs take and the pricing block every site carries. Every key
+# site.aws.example.yaml has, so a written file and a filled-in copy of the
+# example are the same document.
+#
+# Scalars are quoted because two of them are not the type they look like: a
+# bootstrap string is a comma-separated list of host:port, and the account id
+# `catalog.props.warehouse` takes is a number a site reads as a string.
+#
+# `pricing` is the one thing here that is not a property of the account, so it
+# is written at the zeros the example carries and validate-results.py refuses.
+write_site() {
+	local path=$1 parsed
+	[[ ! -e $path ]] ||
+		die "$path already exists, and --write-site never overwrites a site config; name another path or move that file"
+	{
+		cat <<-SITE
+			# Written by deploy/aws/setup.sh --write-site. What every key means, and
+			# which of them are optional, is in site.aws.example.yaml.
+			corpus_root: "s3://$BUCKET/corpus"
+			runs_root: "s3://$BUCKET/runs"
+			warehouse: "s3://$BUCKET/warehouse"
+			kafka:
+			  bootstrap_servers: "$BOOTSTRAP"
+			  security:
+			    security.protocol: SASL_SSL
+			    sasl.mechanism: OAUTHBEARER
+			    aws.region: "$AWS_REGION"
+		SITE
+		if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
+			cat <<-SITE
+				  schema_registry:
+				    url: "http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7"
+			SITE
+		fi
+		cat <<-SITE
+			catalog:
+			  props:
+			    uri: "https://glue.$AWS_REGION.amazonaws.com/iceberg"
+			    warehouse: "$ACCOUNT"
+			    rest.sigv4-enabled: "true"
+			    rest.signing-name: glue
+			    rest.signing-region: "$AWS_REGION"
+			    s3.region: "$AWS_REGION"
+			kubernetes:
+			  context: "$KUBE_CONTEXT"
+			  namespace: "$NAMESPACE"
+			  harness_service_account: "$HARNESS_SERVICE_ACCOUNT"
+			  flink_service_account: "$FLINK_SERVICE_ACCOUNT"
+			  spark_service_account: "$SPARK_SERVICE_ACCOUNT"
+			  service_account_annotations: {}
+			  registry: "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+			  aws_region: "$AWS_REGION"
+			  # The Secret in this namespace whose keys become environment variables
+			  # on every pod a run creates, for a property written \${env:NAME}.
+			  # secret_name: bench-env
+			  node_selector: $NODE_SELECTOR
+			  tolerations: $TOLERATIONS
+			# The hourly price of the instance type this fleet runs on, split across
+			# its vCPU and GiB. docs/methodology.md, under Cost, is the rule; a
+			# result published at these zeros is refused.
+			pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}
+		SITE
+	} >"$path"
+	# Read back rather than trusted: this is the file every driver reads, and a
+	# value that needed quoting is a refusal here instead of a stage Job that
+	# could not find the broker.
+	if ! parsed="$(yq -e '.kafka.bootstrap_servers' "$path" 2>&1)"; then
+		die "wrote $path, and yq could not read a site config out of it: $parsed"
+	fi
+	[[ $parsed == "$BOOTSTRAP" ]] ||
+		die "wrote $path, whose kafka.bootstrap_servers reads back as '$parsed' rather than '$BOOTSTRAP'"
+	log "wrote $path"
+}
+
 MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
 [[ $MSK_STATE == ACTIVE ]] || log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"
 waited=0
@@ -577,7 +692,11 @@ done
 BOOTSTRAP="$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \
 	--query BootstrapBrokerStringSaslIam --output text)"
 
-log "setup complete. Copy site.aws.example.yaml to site.yaml and fill it in with:"
+if [[ -n $WRITE_SITE ]]; then
+	log "setup complete. $WRITE_SITE is being written with these values:"
+else
+	log "setup complete. Copy site.aws.example.yaml to site.yaml and fill it in with:"
+fi
 cat <<SITE
   kafka.bootstrap_servers:        $BOOTSTRAP
   kafka.security.aws.region:      $AWS_REGION
@@ -595,5 +714,9 @@ if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	cat <<SITE
   kafka.schema_registry.url:      http://schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7
 SITE
+fi
+if [[ -n $WRITE_SITE ]]; then
+	write_site "$WRITE_SITE"
+	log "fill in $WRITE_SITE's pricing block before publishing a result from it; docs/methodology.md, under Cost, is the rule."
 fi
 log "MSK bills by the hour whether or not a run is using it — deploy/aws/teardown.sh when you are done."

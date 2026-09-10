@@ -44,6 +44,6 @@ kubernetes:
   node_selector: {}
   tolerations: []
 # Zeros are a placeholder, and validate-results.py refuses a result published at
-# them: fill in the hourly price of the instance types your fleet asks for, split
-# across their vCPU and GiB. docs/methodology.md, under Cost, is the formula.
+# them: for an instance of `vcpu` cores and `gib` GiB at P an hour, these two are
+# P/vcpu/2 and P/gib/2. docs/methodology.md, under Cost, is the rule.
 pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}
