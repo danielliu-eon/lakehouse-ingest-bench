@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ingest_bench.collect.table import render_results_table
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED
 from tests.test_collect import _build, _run_dir, _site
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "validate-results.py"
@@ -155,3 +156,27 @@ def test_validate_results_fails_on_a_null_derived_keepup(tmp_path: Path) -> None
     result = _run(_mutated(tmp_path, mutate))
     assert result.returncode == 1
     assert "derived.keepup" in result.stdout
+
+
+def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_path: Path) -> None:
+    """The empty string and the sentinel are the same non-disclosure.
+
+    `results/README.md` states that a published result discloses the machine
+    types behind its cost column, and the two engines had disagreed about what
+    "not stated" is — one an empty string, which the rule caught, the other a
+    word, which it waved through.
+    """
+    for absent in ("", MACHINE_TYPE_UNSPECIFIED):
+
+        def mutate(document: dict[str, object], absent: str = absent) -> None:
+            run = document["run"]
+            assert isinstance(run, dict)
+            fleet = run["fleet"]
+            assert isinstance(fleet, list)
+            for role in fleet:
+                assert isinstance(role, dict)
+                role["machine_type"] = absent
+
+        result = _run(_mutated(tmp_path / absent.replace("", "empty"), mutate))
+        assert result.returncode != 0, result.stdout
+        assert "no machine_type" in result.stdout, result.stdout

@@ -654,9 +654,12 @@ def test_the_pinned_spark_is_the_one_the_image_carries(meta: metadata.CorpusMeta
 
 
 def test_fleet(meta: metadata.CorpusMetadata) -> None:
+    # The word every engine reports for a spec that named no machine type, and
+    # the one `collect.validate` refuses: a published result discloses the
+    # machine behind its cost column or it is not publishable.
     assert fleet.fleet(_spec()) == (
-        model.FleetRole("driver", 1, 1.0, 2.0, ""),
-        model.FleetRole("executor", 2, 2.0, 2.0, ""),
+        model.FleetRole("driver", 1, 1.0, 2.0, model.MACHINE_TYPE_UNSPECIFIED),
+        model.FleetRole("executor", 2, 2.0, 2.0, model.MACHINE_TYPE_UNSPECIFIED),
     )
     pinned = replace(
         _spec(),

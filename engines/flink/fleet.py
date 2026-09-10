@@ -15,15 +15,10 @@ the cluster packed it onto two machines or twenty.
 from __future__ import annotations
 
 from engines.flink.knobs import read
-from ingest_bench.specs.model import FleetRole, RunSpec
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, FleetRole, RunSpec
 
 JOBMANAGER = "jobmanager"
 TASKMANAGER = "taskmanager"
-
-# What a run whose spec named no machine type reports. A published result has to
-# disclose the machine, and an empty string in that column would read as a
-# disclosure rather than as its absence.
-UNSPECIFIED = "unspecified"
 
 _MB_PER_GIB = 1024
 
@@ -31,7 +26,7 @@ _MB_PER_GIB = 1024
 def fleet(spec: RunSpec) -> list[FleetRole]:
     """The run's roles: one jobmanager, and the taskmanagers the knobs asked for."""
     knobs = read(spec.engine_block)
-    machine_type = knobs.machine_type or UNSPECIFIED
+    machine_type = knobs.machine_type or MACHINE_TYPE_UNSPECIFIED
     return [
         FleetRole(JOBMANAGER, 1, knobs.jm_cpu, knobs.jm_mem_mb / _MB_PER_GIB, machine_type),
         FleetRole(TASKMANAGER, knobs.taskmanagers, knobs.tm_cpu, knobs.tm_mem_mb / _MB_PER_GIB, machine_type),

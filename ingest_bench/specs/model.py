@@ -235,6 +235,13 @@ class ScoringSpec:
     gate_window_s: int | None
 
 
+# What a managed run whose knobs named no machine type reports in that column.
+# One word for every engine, because `collect.validate` refuses it by name: two
+# spellings meant one engine's non-disclosure failed the rule and the other's
+# passed it.
+MACHINE_TYPE_UNSPECIFIED = "unspecified"
+
+
 @dataclass(frozen=True)
 class FleetRole:
     """One role in the compute an engine was given, for the cost column.

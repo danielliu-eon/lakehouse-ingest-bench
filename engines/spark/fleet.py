@@ -9,7 +9,7 @@ is `verify.py`'s question.
 from __future__ import annotations
 
 from engines.spark.knobs import read
-from ingest_bench.specs.model import FleetRole, RunSpec
+from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, FleetRole, RunSpec
 
 _MB_PER_GIB = 1024
 
@@ -22,7 +22,9 @@ def fleet(spec: RunSpec) -> tuple[FleetRole, ...]:
     `--master local[N]` it is the only process there is.
     """
     knobs = read(spec.engine_block)
-    machine_type = "" if knobs.machine_type is None else knobs.machine_type
+    # The same word every engine reports, because a published result has to
+    # disclose the machine and `collect.validate` refuses this one by name.
+    machine_type = knobs.machine_type or MACHINE_TYPE_UNSPECIFIED
     return (
         FleetRole("driver", 1, knobs.driver_cores, knobs.driver_mem_mb / _MB_PER_GIB, machine_type),
         FleetRole("executor", knobs.executors, knobs.executor_cores, knobs.executor_mem_mb / _MB_PER_GIB, machine_type),

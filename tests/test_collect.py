@@ -666,7 +666,7 @@ def test_fleet_without_a_machine_type_knob_says_so(tmp_path: Path) -> None:
     assert isinstance(run, dict)
     fleet = run["fleet"]
     assert isinstance(fleet, list)
-    assert {role["machine_type"] for role in fleet} == {"unspecified"}
+    assert {role["machine_type"] for role in fleet} == {model.MACHINE_TYPE_UNSPECIFIED}
 
 
 def test_fleet_of_an_external_run_is_the_spec_s_own(tmp_path: Path) -> None:
