@@ -25,8 +25,6 @@ TABLE_NAMESPACE = "ingest_bench"
 
 @dataclass(frozen=True)
 class Derived:
-    """Everything about a run that follows from its name and the moment it began."""
-
     run_id: str
     topic: str
     table: str

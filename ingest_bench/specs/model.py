@@ -625,7 +625,6 @@ def _schema_registry_config(kafka: dict[str, object]) -> SchemaRegistryConfig | 
 
 
 def load_site(path: Path) -> SiteConfig:
-    """The site config at ``path``, or a refusal to read it."""
     raw = _load_yaml(path, "site config")
     _refuse_placeholders(raw, "site")
     _refuse_unknown(raw, _SITE_KEYS, "site")
