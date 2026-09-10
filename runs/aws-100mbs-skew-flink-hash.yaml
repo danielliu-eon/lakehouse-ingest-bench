@@ -1,0 +1,39 @@
+# One hour of offer at 100 MB/s over the skewed corpus, on a cluster.
+#
+# The fleet below is where the probe ladder starts, not a result: it is sized
+# from the corpus and the topic, and the run it produces is what says whether it
+# is enough. Raise `taskmanagers` and re-run until the gate stops reporting
+# UNDERSIZED, and publish the fleet that passed — a shipped spec's fleet is the
+# one that produced a committed result, so this file's is a starting point until
+# a result stands behind it.
+#
+# Topic partitions equal the fleet's slots, so every slot owns a lane; two
+# producer shards give the ~115 MB/s-per-process producer the headroom
+# "Sizing the producer" in docs/running.md asks for. `lz4` because an hour at
+# 100 MB/s is what crosses the link, and it is the cheapest codec that still
+# halves it.
+name: aws-100mbs-skew-flink-hash
+engine: flink
+corpus: events-100mbs-skew
+table:
+  partition: identity(partition_key)
+kafka:
+  partitions: 32
+  key: user_id
+producer:
+  shards: 2
+  compression: lz4
+scoring:
+  freshness_bound_s: 180
+  warmup_s: 120
+flink:
+  taskmanagers: 8
+  slots: 4
+  tm_cpu: 2
+  tm_mem_mb: 4096
+  jm_cpu: 1
+  jm_mem_mb: 2048
+  checkpoint_interval: 10s
+  min_pause: 2s
+  source_parallelism: 32
+  distribution_mode: hash

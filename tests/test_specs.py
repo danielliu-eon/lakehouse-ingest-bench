@@ -235,6 +235,45 @@ def test_every_shipped_run_spec_loads(path: Path) -> None:
         assert spec.engine_block, f"{path.name} names {spec.engine} and gives it no knobs"
 
 
+@pytest.mark.parametrize("path", sorted((ROOT / "runs").glob("*.yaml")), ids=lambda path: path.name)
+def test_every_shipped_run_spec_holds_knobs_its_engine_takes(path: Path, corpus: tuple[str, str]) -> None:
+    """A knob a shipped spec's engine refuses is a spec nobody can stage.
+
+    The loader carries the engine block through unread — the knobs belong to
+    the engine that declares them — so loading a spec says nothing about
+    whether the run it asks for is one the engine can be given. Neither
+    validator reads the corpus, so the smoke one stands in for whichever the
+    spec names.
+    """
+    spec = model.load_run_spec(path)
+    if spec.engine not in engines.MANAGED:
+        return
+    corpus_root, corpus_dir = corpus
+    engines.knobs_for(spec.engine).validate(spec.engine_block, spec, metadata.read(uri.join(corpus_root, corpus_dir)))
+
+
+def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
+    """The cloud sequence in docs/running.md generates a scale corpus and stages a spec.
+
+    With only smoke specs shipped, the first thing a stranger following it had
+    to do was author one and size a fleet with no example to copy. One spec per
+    managed engine over the same preset, so the two are comparable.
+    """
+    preset_name = "events-100mbs-skew"
+    assert (ROOT / "workloads" / "presets" / f"{preset_name}.yaml").exists()
+    scale = {
+        spec.engine: spec
+        for spec in (model.load_run_spec(path) for path in sorted((ROOT / "runs").glob("*.yaml")))
+        if spec.corpus == preset_name
+    }
+    assert set(scale) == set(engines.MANAGED), f"{preset_name} has no shipped spec for every managed engine"
+    for engine, spec in scale.items():
+        assert spec.kafka.partitions == 32, engine
+        assert spec.producer.shards == 2, engine
+        assert spec.producer.compression == "lz4", engine
+        assert spec.scoring.freshness_bound_s == 180.0 and spec.scoring.warmup_s == 120, engine
+
+
 def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(tmp_path: Path) -> None:
     """Defaulted, unlike the two beside it, so an older site config still loads.
 
