@@ -587,3 +587,111 @@ def test_a_failed_scorer_still_publishes_what_it_had(tmp_path: Path, corpus: met
     assert {path.name for path in mirror.iterdir()} == {path.name for path in out_dir.iterdir()}
     summary = json.loads((mirror / score.SUMMARY_FILE).read_text())
     assert summary["aborted"] is True and summary["reason"] == "scorer_failed: RuntimeError"
+
+
+def test_a_table_its_engine_has_not_created_yet_is_an_empty_baseline(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    """An engine that creates its table from its first record has none at the start.
+
+    And the scorer starts first, because its first reading is the run's
+    baseline — so with `managed_by: engine` the load fails on every poll, the
+    launch gives up waiting for that reading, the producer never starts, and the
+    engine never sees a record to create the table from. The baseline for an
+    absent table is the honest one: zero rows, no snapshots, and keep polling.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.never_created",
+        catalog_props=_props(tmp_path),
+        publish_logs_uri=str(logs),
+        epoch_ms=now_ms(),
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=5.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+        table_managed_by="engine",
+    )
+    log = tmp_path / "score.log"
+    # It ends at the idle stop, having never seen a commit — the engine really
+    # did write nothing — but it published a reading on every poll first.
+    assert score.run(args, StepClock(now_ms()), open(log, "w")) == 2
+    summary = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert summary["committed_rows"] == 0 and summary["snapshots"] == 0 and summary["prefix"] == -1
+    assert summary["aborted"] is True and summary["run_valid"] is False
+    printed = log.read_text()
+    assert "POLL t=" in printed, printed
+    assert "POLL_FAILED" not in printed, printed
+    assert "TABLE_ABSENT table=bench.never_created" in printed, printed
+    # Announced once and not per poll: it is one state, not one event a second.
+    assert printed.count("TABLE_ABSENT") == 1, printed
+    samples = score.read_keepup_samples(tmp_path / "out" / score.KEEPUP_SAMPLES_FILE)
+    assert samples and all(sample.committed_rows == 0 for sample in samples)
+
+
+def test_a_harness_managed_table_that_is_absent_is_still_a_failure(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    """Staging created it, so its absence is a fault rather than a phase.
+
+    The bounded retry is what keeps a five-second catalog fault from ending a
+    three-hour run; past that the scorer raises, because a run whose table is
+    gone is not a run that simply stopped receiving commits.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.never_created",
+        catalog_props=_props(tmp_path),
+        publish_logs_uri=str(logs),
+        epoch_ms=now_ms(),
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=5.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+    )
+    log = tmp_path / "score.log"
+    with pytest.raises(Exception, match="never_created"):
+        score.run(args, StepClock(now_ms()), open(log, "w"))
+    printed = log.read_text()
+    assert f"POLL_FAILED consecutive={score.MAX_CONSECUTIVE_READ_FAILURES}" in printed, printed
+
+
+def test_the_schema_is_checked_on_the_first_load_that_succeeds(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    """The check cannot run before the table exists, and must not be skipped either.
+
+    An engine that creates its own table chooses the column set, which is
+    exactly the case the check exists for — so it runs on the first load that
+    succeeds rather than on the first poll.
+    """
+    props = _props(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    args = score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table="bench.late_shape",
+        catalog_props=props,
+        publish_logs_uri=str(logs),
+        epoch_ms=now_ms(),
+        out_dir=tmp_path / "out",
+        poll_interval_s=1.0,
+        idle_stop_s=5.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+        table_managed_by="engine",
+    )
+    state = score._load_inputs(args, StepClock(now_ms()), io.StringIO())
+    clock = StepClock(now_ms())
+    assert score._poll_once(state, clock, io.StringIO()) is False
+    assert state.schema_mismatches is None, "there was no table to read a shape off"
+
+    # Now the engine creates one, with a column of its own and one of the
+    # corpus's missing.
+    _table_of(props, "late_shape", [NestedField(1, "id", LongType(), required=True)])
+    assert score._poll_once(state, clock, io.StringIO()) is False
+    assert state.schema_mismatches, "the first load that succeeded did not check the shape"

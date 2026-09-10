@@ -1300,6 +1300,14 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
 
 
 @pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
+def test_both_drivers_tell_the_scorer_who_runs_the_ddl(script: Path) -> None:
+    """An absent table is a phase of the run or a fault, and only the spec says which."""
+    text = script.read_text()
+    assert "yq '.table.managed_by'" in text, f"{script.name} never reads table.managed_by"
+    assert "--table-managed-by $MANAGED_BY" in text, f"{script.name} reads it but never passes it"
+
+
+@pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
 def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None:
     """The encoding and the schema id come off `facts.json`, not off the spec.
 
@@ -2007,6 +2015,39 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--kafka-prop 'aws.region=eu-west-1'" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("managed_by", ["engine", None])
+def test_launch_starts_the_producer_for_a_table_its_engine_will_create(tmp_path: Path, managed_by: str | None) -> None:
+    """The scorer is told who runs the DDL, so an absent table is a phase or a fault.
+
+    Under `managed_by: engine` the table does not exist until the offer starts,
+    and the scorer is applied first because its first reading is the baseline —
+    so unless it reads an absent table as empty, the launch waits out its whole
+    budget for a reading, the producer never starts, and the engine never sees
+    the record it would have created the table from. Left off where the spec
+    says nothing, so the scorer applies its own default.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    spec = yaml.safe_load((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    if managed_by is not None:
+        spec["table"] = {**spec["table"], "managed_by": managed_by}
+    (run_dir / "spec.yaml").write_text(yaml.safe_dump(spec))
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {})
+
+    assert run.result.returncode == 0, run.result.stderr
+    scorer = _job_command(_named_job(run, f"scorer-{RUN_OBJECT}"))
+    if managed_by is None:
+        assert "--table-managed-by" not in scorer, scorer
+    else:
+        assert f"--table-managed-by {managed_by}" in scorer, scorer
+    # And the producer is applied, which is the thing the deadlock stopped.
+    assert _job_command(_named_job(run, f"producer-{RUN_OBJECT}")).startswith("produce ")
 
 
 @needs_shell_tools

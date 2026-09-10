@@ -254,6 +254,10 @@ EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 SCORE="score --corpus $CORPUS_URI --table $TABLE --catalog-prop-file /catalog.props"
 SCORE="$SCORE --publish-logs s3://runs/$RUN_ID/producer --epoch $EPOCH --out /runs/$RUN_ID/scores"
 SCORE="$SCORE --idle-stop-s $IDLE_STOP_S"
+# Who created the table, for the same reason launch.sh passes it: an engine that
+# creates its own has none until its first record.
+MANAGED_BY="$(yq '.table.managed_by' "$SPEC_FILE")"
+[[ $MANAGED_BY == null ]] || SCORE="$SCORE --table-managed-by $MANAGED_BY"
 # A scoring key the spec leaves out is left out here too, so the scorer applies
 # its own default rather than one this script would have to keep in step.
 for key in warmup_s freshness_bound_s; do

@@ -27,6 +27,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO, cast
 
+from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
+from pyiceberg.table import Table
+
 from ingest_bench import uri
 from ingest_bench.clock import Clock
 from ingest_bench.corpus import metadata
@@ -42,6 +45,7 @@ from ingest_bench.scorer.snapshots import (
     snapshots_in_order,
 )
 from ingest_bench.scorer.tally import BatchTally, read_id_column
+from ingest_bench.specs.model import ENGINE_OWNED, HARNESS
 
 APPEND = "append"
 
@@ -89,6 +93,11 @@ class ScoreArgs:
     behind_max_ms: int = 5000
     expected_publish_shards: int = 1
     upload_prefix: str | None = None
+    # Who ran the DDL, in the run spec's own vocabulary. `engine` is the only
+    # value under which a table that is not there yet is a phase of the run
+    # rather than a fault: such an engine creates it from its first record, and
+    # the scorer starts before the producer does.
+    table_managed_by: str = HARNESS
 
 
 @dataclass
@@ -117,6 +126,10 @@ class ScoreState:
     # been loaded once. An engine-created table need not exist when the scorer
     # starts, so the check cannot happen before the first successful load.
     schema_mismatches: list[str] | None = None
+    # Whether the last poll found no table at all, so the absence is announced
+    # once rather than once per poll: it is one state of the run, not an event
+    # every few seconds.
+    table_absent: bool = False
     offer_ended: bool = False
     read_failures: int = 0
     state: str = RUNNING
@@ -350,7 +363,45 @@ def _load_inputs(args: ScoreArgs, clock: Clock, log: TextIO) -> ScoreState:
     return ScoreState(args=args, corpus=corpus, tally=tally, last_new_ms=clock.now_ms())
 
 
-def _read_inputs(state: ScoreState, clock: Clock) -> bool:
+def _load_table(state: ScoreState, log: TextIO) -> Table | None:
+    """The table under test, or ``None`` where its engine has not created it yet.
+
+    Only under `managed_by: engine`. Such an engine creates the table from its
+    first record, and the scorer is started first because its first reading is
+    the run's baseline — so the load fails on every poll until the offer has
+    begun, and a scorer that treated that as a fault would take no reading, the
+    launch would give up waiting for one, the producer would never start and the
+    engine would never see the record it creates the table from.
+
+    Under `harness` the table was created at staging, so its absence is a
+    fault: the bounded retry above keeps a brief catalog fault from ending a
+    run, and past that the load is left to raise.
+
+    A missing namespace is the same answer as a missing table: an engine that
+    creates its own table may create the namespace with it, and which of the
+    two a catalog reports is the catalog's choice.
+    """
+    try:
+        table = load_table(state.args.catalog_props, state.args.table)
+    except (NoSuchTableError, NoSuchNamespaceError):
+        if state.args.table_managed_by != ENGINE_OWNED:
+            raise
+        if not state.table_absent:
+            state.table_absent = True
+            print(
+                f"TABLE_ABSENT table={state.args.table} managed_by={ENGINE_OWNED}: reading it as empty until "
+                "the engine creates it",
+                file=log,
+                flush=True,
+            )
+        return None
+    if state.table_absent:
+        state.table_absent = False
+        print(f"TABLE_PRESENT table={state.args.table}", file=log, flush=True)
+    return table
+
+
+def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     """Read both sides of the run and apply every commit not yet seen.
 
     Only appends feed the tally. A rewrite re-adds rows the tally already holds
@@ -369,7 +420,11 @@ def _read_inputs(state: ScoreState, clock: Clock) -> bool:
     # Assigned only once the records it describes are in hand, so a failed read
     # cannot leave a finished offer paired with the previous poll's records.
     state.offer_ended = offer_ended
-    table = load_table(state.args.catalog_props, state.args.table)
+    table = _load_table(state, log)
+    if table is None:
+        # Zero rows and no snapshots, which is what the table holds. The sample
+        # `_poll_once` takes from this is the baseline the launch waits for.
+        return False
     if state.schema_mismatches is None:
         state.schema_mismatches = check_table_schema(table.schema(), state.corpus)
     if state.schema_mismatches:
@@ -424,7 +479,7 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     reader that stopped rather than as an empty backlog.
     """
     try:
-        seen_new = _read_inputs(state, clock)
+        seen_new = _read_inputs(state, clock, log)
     except Exception as error:
         state.read_failures += 1
         print(

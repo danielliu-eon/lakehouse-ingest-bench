@@ -30,7 +30,7 @@ from ingest_bench.scorer import geometry
 from ingest_bench.scorer import score as score_loop
 from ingest_bench.scorer.gate import PASS, UNDERSIZED, VOID, gate_verdict
 from ingest_bench.scorer.snapshots import load_table, read_metadata
-from ingest_bench.specs.model import DEFAULT_GEOMETRY_OFFSETS_S
+from ingest_bench.specs.model import DEFAULT_GEOMETRY_OFFSETS_S, ENGINE_OWNED, HARNESS
 from ingest_bench.table.cli import add_catalog_arguments
 
 FSSPEC_FILE_IO = "pyiceberg.io.fsspec.FsspecFileIO"
@@ -122,6 +122,14 @@ def build_score_parser() -> argparse.ArgumentParser:
         default=5000,
         help="a producer that fell this far behind its schedule voids the run",
     )
+    parser.add_argument(
+        "--table-managed-by",
+        choices=sorted({HARNESS, ENGINE_OWNED}),
+        default=HARNESS,
+        help=f"who ran the table's DDL, as the run spec's table.managed_by says. Under {ENGINE_OWNED!r} a table "
+        "that does not exist yet is read as empty and polling continues, because such an engine creates it from "
+        "its first record and this reader starts before the offer does",
+    )
     return parser
 
 
@@ -182,6 +190,7 @@ def score(argv: Sequence[str] | None = None) -> int:
             behind_max_ms=int(args.behind_max_ms),
             expected_publish_shards=int(args.publish_shards),
             upload_prefix=None if args.upload_prefix is None else str(args.upload_prefix),
+            table_managed_by=str(args.table_managed_by),
         ),
         SystemClock(),
         sys.stdout,

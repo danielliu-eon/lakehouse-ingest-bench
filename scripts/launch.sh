@@ -134,6 +134,12 @@ SCORE="$SCORE --publish-logs $RUNS_ROOT/$RUN_ID/producer --epoch $EPOCH"
 # filesystem goes with the pod.
 SCORE="$SCORE --out /work/scores --upload-prefix $RUNS_ROOT/$RUN_ID/scores"
 SCORE="$SCORE --idle-stop-s $IDLE_STOP_S --publish-shards $SHARDS"
+# Who created the table, because it decides what an absent one means: an engine
+# that creates its own has none until its first record, and this scorer starts
+# before the producer does. Left off where the spec says nothing, so the scorer
+# applies its own default rather than one this script would keep in step.
+MANAGED_BY="$(yq '.table.managed_by' "$SPEC")"
+[[ $MANAGED_BY == null ]] || SCORE="$SCORE --table-managed-by $MANAGED_BY"
 SCORE="$SCORE$(site_flags '.catalog.props' --catalog-prop)"
 # A scoring key the spec leaves out is left out here too.
 for key in warmup_s freshness_bound_s; do
