@@ -127,8 +127,8 @@ def fill_batch(
         sizes.append(block.encoded_sizes)
         ids.append(block.ids)
         keys.append(block_keys)
-        for name in key_values:
-            key_values[name].extend(v.column_strings(block, name))
+        for name, collected_values in key_values.items():
+            collected_values.extend(v.column_strings(block, name))
         counts += np.bincount(block_keys, minlength=preset.partition_count)
         # Residues are below P and a block holds at most row_block of them, so the
         # partial sums stay exact in int64 before the reduction.

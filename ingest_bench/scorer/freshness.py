@@ -120,7 +120,7 @@ def min_observation_lag_s(observations: list[Observation], emit_ms: dict[int, in
     clocks.
     """
     lags = _observation_lags_s(observations, emit_ms)
-    return min(lags) if lags else None
+    return min(lags, default=None)
 
 
 def clock_skew_suspected(observations: list[Observation], emit_ms: dict[int, int]) -> bool:

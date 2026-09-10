@@ -208,7 +208,7 @@ def run_end_ms(records: list[PublishRecord], snapshots: list[dict[str, object]])
     """
     candidates = [record.last_ack_ms for record in records]
     candidates.extend(int(cast(int, row["timestamp_ms"])) for row in snapshots)
-    return max(candidates) if candidates else None
+    return max(candidates, default=None)
 
 
 def cost_figures(

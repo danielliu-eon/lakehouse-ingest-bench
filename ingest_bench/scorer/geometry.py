@@ -124,8 +124,8 @@ def live_geometry(files: Sequence[DataFileInfo]) -> dict[str, object]:
         "bytes": sum(sizes),
         "size_quantiles": {
             **_quantiles(sizes),
-            "min": min(sizes) if sizes else None,
-            "max": max(sizes) if sizes else None,
+            "min": min(sizes, default=None),
+            "max": max(sizes, default=None),
         },
         # Report two small-file thresholds to expose per-file overhead.
         "small_file_share_32mib": _small_file_share(sizes, 32 * MIB),

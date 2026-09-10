@@ -2493,7 +2493,7 @@ def test_launch_refuses_a_site_whose_properties_it_cannot_read(tmp_path: Path) -
     run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {}, site=broken)
 
     assert run.result.returncode != 0
-    assert "could not read catalog.props out of ./site.yaml" in run.result.stderr
+    assert "could not read catalog.props from ./site.yaml" in run.result.stderr
     assert run.applied == [], "nothing may be applied once the site cannot be read"
 
 

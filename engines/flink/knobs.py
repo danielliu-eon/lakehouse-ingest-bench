@@ -442,7 +442,7 @@ def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusM
 
 def _catalog_key(key: str) -> str:
     """Translate a PyIceberg property name to its Iceberg Java equivalent."""
-    return _CATALOG_PROP_RENAMES[key] if key in _CATALOG_PROP_RENAMES else key
+    return _CATALOG_PROP_RENAMES.get(key, key)
 
 
 def _required_prop(props: dict[str, str], key: str) -> str:

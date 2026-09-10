@@ -66,6 +66,6 @@ def keepup_summary(
     return {
         "absorbed_at_offer_end": absorbed,
         "drain_s": (drained_ms - offer_end_ms) / 1000 if drained_ms is not None and offer_end_ms is not None else None,
-        "backlog_rows_max": max(backlogs) if backlogs else None,
+        "backlog_rows_max": max(backlogs, default=None),
         "backlog_rows_p50": float(np.percentile(np.array(backlogs, dtype=np.float64), 50)) if backlogs else None,
     }

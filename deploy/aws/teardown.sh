@@ -252,7 +252,7 @@ remove_bucket() {
 		return 0
 	fi
 	bucket_is_ours "$BUCKET" ||
-		die "cannot verify the $TAG_KEY=true tag on s3://$BUCKET; refusing to empty it.
+		die "cannot verify the $TAG_KEY=true tag on s3://$BUCKET: refusing to empty it.
      Check bucket access and BUCKET, or delete the bucket manually"
 	printf 'deleting %s permanently removes:\n' "s3://$BUCKET"
 	printf '  every corpus generated into it\n'

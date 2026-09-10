@@ -128,7 +128,7 @@ def produce_batch(
         state["last"] = now
 
     rows = 0
-    total = 0
+    total_bytes = 0
     key_iter = iter(keys) if keys is not None else None
     for frame in frames_iter:
         key: bytes | None = None
@@ -148,7 +148,7 @@ def produce_batch(
                 producer.poll(queue_full_backoff_s)
                 clock.sleep(queue_full_backoff_s)
         rows += 1
-        total += len(value)
+        total_bytes += len(value)
         if rows % POLL_EVERY_ROWS == 0:
             producer.poll(0)
     if key_iter is not None and next(key_iter, None) is not None:
@@ -156,7 +156,7 @@ def produce_batch(
     producer.flush(FLUSH_TIMEOUT_S)
     if state["acked"] + state["errors"] != rows:
         raise RuntimeError(f"{rows} frames sent but {state['acked'] + state['errors']} delivery reports received")
-    return BatchOutcome(state["first"], state["last"], rows, total, state["errors"])
+    return BatchOutcome(state["first"], state["last"], rows, total_bytes, state["errors"])
 
 
 def _batch_frames(reference: str) -> Iterator[bytes]:

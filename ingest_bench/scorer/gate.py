@@ -32,7 +32,7 @@ def _backlog_floors(samples: list[KeepupSample], *, now_ms: int, window_s: int, 
         upper_ms = now_ms - index * step_ms
         lower_ms = upper_ms - step_ms
         backlogs = [sample.backlog_rows for sample in samples if lower_ms <= sample.at_ms < upper_ms]
-        floors.append(min(backlogs) if backlogs else None)
+        floors.append(min(backlogs, default=None))
     return floors
 
 

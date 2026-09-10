@@ -77,9 +77,7 @@ def duration_ms(value: str, where: str) -> int:
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
     """Return the submitted setting, including extra_flink_conf overrides."""
-    if key in knobs.extra_flink_conf:
-        return knobs.extra_flink_conf[key]
-    return knob
+    return knobs.extra_flink_conf.get(key, knob)
 
 
 def _job(run_id: str, overview: object) -> tuple[str, str]:

@@ -297,7 +297,7 @@ def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> N
 
 def _catalog_key(key: str) -> str:
     """Translate a PyIceberg property name to its Iceberg Java equivalent."""
-    return _CATALOG_PROP_RENAMES[key] if key in _CATALOG_PROP_RENAMES else key
+    return _CATALOG_PROP_RENAMES.get(key, key)
 
 
 def _required_prop(props: dict[str, str], key: str, why: str) -> str:

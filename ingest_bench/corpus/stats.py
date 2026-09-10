@@ -135,9 +135,9 @@ class ColumnStats:
 
     @staticmethod
     def from_dict(raw: dict[str, object]) -> ColumnStats:
-        counts: Counter[int] = Counter()
-        for byte, count in cast(dict[str, object], raw["byte_counts"]).items():
-            counts[int(byte)] = _as_int_value(count)
+        counts = Counter(
+            {int(byte): _as_int_value(count) for byte, count in cast(dict[str, object], raw["byte_counts"]).items()}
+        )
         return ColumnStats(
             name=str(raw["name"]),
             sampled_rows=_as_int_value(raw["sampled_rows"]),

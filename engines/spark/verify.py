@@ -54,9 +54,7 @@ _TRIGGER_PREFIX = "spark.sql.streaming.trigger"
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
     """Return the submitted setting, including extra_spark_conf overrides."""
-    if key in knobs.extra_spark_conf:
-        return knobs.extra_spark_conf[key]
-    return knob
+    return knobs.extra_spark_conf.get(key, knob)
 
 
 def _application(run_id: str, answer: object) -> tuple[str, list[str]]:
@@ -111,7 +109,7 @@ def _conf_drift(knobs: Knobs, fetch: Callable[[str], object], application: str) 
     for what, key, knob in settings:
         expected = _effective(knobs, key, knob)
         # A missing setting is drift, not a malformed response.
-        actual = properties[key] if key in properties else NOT_REPORTED
+        actual = properties.get(key, NOT_REPORTED)
         if expected != actual:
             lines.append(line(what, expected, actual))
     pretended = sorted(key for key in properties if key.startswith(_TRIGGER_PREFIX))
