@@ -173,7 +173,7 @@ k8s_delete job "$DROP_JOB"
 SCORES="$RUN_DIR/scores"
 mkdir -p "$SCORES"
 log "fetching $RUNS_ROOT/$RUN_ID/scores/ into $SCORES"
-aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" >&2 ||
+aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" --only-show-errors >&2 ||
 	log "could not fetch $RUNS_ROOT/$RUN_ID/scores/; the document below will say which artifacts are missing"
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ if ((METADATA_STATUS == 0)); then
 	# one in the bucket is what outlives this machine's working directory.
 	log "copying $TABLE's metadata document to $LOCAL_FINAL and $FINAL"
 	if k8s_fetch_metadata_document "$METADATA" "$LOCAL_FINAL"; then
-		aws s3 cp "$LOCAL_FINAL" "$FINAL" >&2 || log "could not copy $LOCAL_FINAL to $FINAL; it is still on this machine"
+		aws s3 cp "$LOCAL_FINAL" "$FINAL" --only-show-errors >&2 || log "could not copy $LOCAL_FINAL to $FINAL; it is still on this machine"
 	else
 		log "could not copy $METADATA to $LOCAL_FINAL; the table still holds it"
 	fi
@@ -224,6 +224,7 @@ fi
 # A failure is reported and not fatal: everything destructive above has already
 # happened, so exiting non-zero here would report a teardown that did not
 # converge when in fact it did, and the fix is to rerun `collect` alone.
+log "collect will report scores/geometry.json and the publish logs missing until finish.sh fetches and measures them, so the missing: lines below are expected"
 log "collecting $RUN_ID"
 harness_local --extra aws collect --run-dir "$(abs_path "$RUN_DIR")" --site "$(abs_path "$SITE_FILE")" ||
 	log "could not collect $RUN_ID; rerun: collect --run-dir $RUN_DIR --site $SITE_FILE"

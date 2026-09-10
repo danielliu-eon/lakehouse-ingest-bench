@@ -81,7 +81,7 @@ TABLE_ABSENT=3
 # property and the suffix is only the convention that usually follows it.
 k8s_fetch_metadata_document() {
 	local source=$1 path=$2
-	aws s3 cp "$source" "$path" >&2 || return 1
+	aws s3 cp "$source" "$path" --only-show-errors >&2 || return 1
 	local magic=""
 	magic="$(od -An -tx1 -N2 -- "$path" | tr -d ' \n')" ||
 		die "could not read the first bytes of $path to tell whether it is compressed"

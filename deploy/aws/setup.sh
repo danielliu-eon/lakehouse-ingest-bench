@@ -555,13 +555,10 @@ fi
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
 
-log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"
+MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
+[[ $MSK_STATE == ACTIVE ]] || log "waiting for $MSK_NAME to reach ACTIVE (typically 15-30 minutes on a first run)"
 waited=0
-while :; do
-	MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
-	if [[ $MSK_STATE == ACTIVE ]]; then
-		break
-	fi
+while [[ $MSK_STATE != ACTIVE ]]; do
 	case "$MSK_STATE" in
 	CREATING | UPDATING | MAINTENANCE) ;;
 	*) die "MSK cluster $MSK_NAME is $MSK_STATE, which it will not leave on its own; look at it in the MSK console" ;;
@@ -574,6 +571,7 @@ while :; do
 	fi
 	sleep 30
 	waited=$((waited + 30))
+	MSK_STATE="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" --query ClusterInfo.State --output text)"
 done
 
 BOOTSTRAP="$(aws kafka get-bootstrap-brokers --cluster-arn "$MSK_ARN" \

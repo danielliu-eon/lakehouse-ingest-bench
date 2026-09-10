@@ -270,7 +270,7 @@ log "waiting for the scorer to see the table drain"
 SCORER_STATUS="$(docker wait "scorer-$RUN_ID")"
 docker logs "scorer-$RUN_ID" 2>&1 | tail -n 20 >&2
 docker rm "scorer-$RUN_ID" >/dev/null
-log "the scorer exited $SCORER_STATUS (0 drained, 2 stopped idle)"
+log "the scorer exited $SCORER_STATUS (0 means drained, 2 means it stopped idle)"
 
 print_verdict "$RUN_DIR/scores/summary.json"
 log "run_valid: true — $RUN_ID, artifacts in $RUN_DIR"

@@ -2027,7 +2027,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
 
     fetched = tmp_path / "work" / "runs" / RUN_ID
     assert json.loads((fetched / "facts.json").read_text())["topic"] == RUN_ID
-    assert run.aws_calls.strip() == f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/"
+    assert run.aws_calls.strip() == f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/ --only-show-errors"
 
     # Every call names the cluster and the namespace the site declares: a
     # `kubectl` that fell back to the caller's current context would apply a
@@ -2682,9 +2682,9 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
     # and no others: fetching the whole set every minute would pay for a run's
     # record to answer one question.
     assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == [
-        "summary.json",
-        "keepup_samples.jsonl",
-        "spec.yaml",
+        "summary.json --only-show-errors",
+        "keepup_samples.jsonl --only-show-errors",
+        "spec.yaml --only-show-errors",
     ]
 
 
@@ -2718,7 +2718,11 @@ def test_the_gate_reads_the_runs_own_windows_out_of_the_bucket(tmp_path: Path) -
     assert "--adaptation-s 300" in gate_calls.read_text(), gate_calls.read_text()
     assert "--window-s 90" in gate_calls.read_text(), gate_calls.read_text()
     fetched = [line.split("/")[-1] for line in run.aws_calls.splitlines()]
-    assert fetched == ["summary.json", "keepup_samples.jsonl", "spec.yaml"], run.aws_calls
+    assert fetched == [
+        "summary.json --only-show-errors",
+        "keepup_samples.jsonl --only-show-errors",
+        "spec.yaml --only-show-errors",
+    ], run.aws_calls
 
 
 @needs_shell_tools

@@ -98,7 +98,7 @@ trap 'rm -rf "$SCRATCH"' EXIT
 # the record of the run, and downloading it every minute would pay for the whole
 # artifact set to answer one question.
 for name in summary.json keepup_samples.jsonl; do
-	aws s3 cp "$RUNS_ROOT/$RUN_ID/scores/$name" "$SCRATCH/$name" >&2 ||
+	aws s3 cp "$RUNS_ROOT/$RUN_ID/scores/$name" "$SCRATCH/$name" --only-show-errors >&2 ||
 		die "the scorer has published no $name under $RUNS_ROOT/$RUN_ID/scores/; it may not have read the table yet"
 done
 
@@ -113,7 +113,7 @@ GATE=(gate --out "$SCRATCH")
 # its cold start would then be judged at the default and torn down. So a spec
 # that cannot be read is a refusal, never a fallback to windows nobody chose.
 SPEC="$SCRATCH/spec.yaml"
-aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/spec.yaml" "$SPEC" >&2 ||
+aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/spec.yaml" "$SPEC" --only-show-errors >&2 ||
 	die "could not read $RUNS_ROOT/$RUN_ID/stage/spec.yaml, and the run's own gate windows are in it"
 ADAPTATION_S="$(yq '.scoring.gate_adaptation_s' "$SPEC")"
 [[ $ADAPTATION_S == null ]] || GATE+=(--adaptation-s "$ADAPTATION_S")

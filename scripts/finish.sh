@@ -103,7 +103,7 @@ GEOMETRY="$SCORES/geometry.json"
 
 mkdir -p "$SCORES"
 log "fetching $RUNS_ROOT/$RUN_ID/scores/ into $SCORES"
-aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" >&2 ||
+aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" --only-show-errors >&2 ||
 	die "could not fetch $RUNS_ROOT/$RUN_ID/scores/; check that the run was launched and that you can read the bucket"
 
 # The publish logs as well, because they are the offered side of the run: every
@@ -114,7 +114,7 @@ aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" >&2 ||
 PRODUCER="$RUN_DIR/producer"
 mkdir -p "$PRODUCER"
 log "fetching $RUNS_ROOT/$RUN_ID/producer/ into $PRODUCER"
-aws s3 sync "$RUNS_ROOT/$RUN_ID/producer/" "$PRODUCER/" >&2 ||
+aws s3 sync "$RUNS_ROOT/$RUN_ID/producer/" "$PRODUCER/" --only-show-errors >&2 ||
 	log "could not fetch $RUNS_ROOT/$RUN_ID/producer/; the document will name the publish logs as missing"
 
 # ---------------------------------------------------------------------------

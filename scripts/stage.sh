@@ -143,7 +143,7 @@ RUN_DIR="$RUNS_DIR/$RUN_ID"
 RUN_OBJECT="$(k8s_object_name "$RUN_ID")"
 mkdir -p "$RUN_DIR"
 log "fetching the run directory into $RUN_DIR"
-aws s3 sync "$RUNS_ROOT/$RUN_ID/stage/" "$RUN_DIR/" >&2 ||
+aws s3 sync "$RUNS_ROOT/$RUN_ID/stage/" "$RUN_DIR/" --only-show-errors >&2 ||
 	die "could not fetch $RUNS_ROOT/$RUN_ID/stage/; job/$STAGE_JOB published it, so check your own credentials"
 [[ -f $RUN_DIR/facts.json ]] || die "$RUNS_ROOT/$RUN_ID/stage/ holds no facts.json"
 
