@@ -112,7 +112,7 @@ the run is offered a corpus.
 
 | Driver | What it does |
 |---|---|
-| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state, holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
+| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state *and for its fleet to be placed* — an operator reports running before every pod has an image to start from — holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
 | `launch.sh <run_id>` | applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
 | `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing |
 | `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, copies the table's last metadata document beside the run's artifacts, and collects the run |

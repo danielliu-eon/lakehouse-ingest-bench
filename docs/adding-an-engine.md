@@ -77,17 +77,15 @@ Staging writes `runs/<run_id>/facts.json`. It is the whole interface:
 | `key_column` | the corpus column sent as the message key, or `null` for unkeyed records |
 | `epoch` | `null` until the run is launched; the time origin is chosen when the producer starts |
 
-Configure your consumer's decompression from `compression` before anything
-else: a client that cannot decode the codec reads no records at all, which
-looks like an engine that never started rather than like a wire it cannot read.
-
-The catalog credentials are redacted because `facts.json` is meant to be
-publishable; your own come from wherever you keep them.
+Configure your consumer's decompression from `compression` before anything else:
+a client that cannot decode the codec reads no records at all, which looks like
+an engine that never started rather than a wire it cannot read. Catalog
+credentials are redacted because `facts.json` is meant to be publishable; your
+own come from wherever you keep them.
 
 ### Confluent values
 
 The framing contract; each engine's README carries only its own consequence.
-
 `value_encoding` is `avro` unless the run's spec says otherwise, and then the
 four keys after it are `null`: every value is the Avro binary of one record
 against `schema.avsc`, with nothing in front of it.
@@ -111,13 +109,11 @@ walk-through below is a raw-Avro run.
 
 This runs the local stack, stages an external run, and starts Flink by hand as
 the stand-in for "your engine". Nothing after staging knows what is consuming
-the topic.
-
-The engine config in `docs/examples/external-flink/` is the config a Flink user
-would write from the facts above: a Kafka source declaring the corpus columns,
-a catalog pointed at the local stack, and one `INSERT`. The run's names are
-left as `@PLACEHOLDER@` tokens. If your engine is not Flink, this directory is
-the shape of the thing you have to produce for it — not something to copy.
+the topic. The config in `docs/examples/external-flink/` is what a Flink user
+would write from the facts above — a Kafka source declaring the corpus columns,
+a catalog pointed at the local stack, and one `INSERT` — with the run's names
+left as `@PLACEHOLDER@` tokens. If your engine is not Flink, that directory is
+the shape of the thing you have to produce, not something to copy.
 
 In the first shell, stage the run and wait for a file to appear:
 
@@ -173,28 +169,32 @@ engine branches outside it, and both shipped engines carry all seven files:
 | `verify.py` | reads effective state from the running engine and fails staging on drift from the spec |
 | `fleet.py` | requested vCPU and GiB per role from the spec, for `run.json` |
 
-Two rules in them are worth copying:
-
-- **Render, never reach.** Nothing in `knobs.py` touches a cluster, so a run's
-  whole configuration can be read, and diffed against another run's, before any
-  compute is paid for.
-- **Refuse unknown keys.** A misspelled knob costs one error message instead of
-  a published result whose tuning silently did not apply.
+Two rules in them are worth copying. **Render, never reach:** nothing in
+`knobs.py` touches a cluster, so a run's whole configuration can be read, and
+diffed against another run's, before any compute is paid for. **Refuse unknown
+keys:** a misspelled knob costs one error message instead of a published result
+whose tuning silently did not apply.
 
 Register it by adding its knobs module to `MANAGED` in
 `ingest_bench/specs/engines.py`; `engine: <name>` plus a `<name>:` block of
-knobs is then a usable spec. That module owes two functions:
-`validate(block, spec, meta)`, which refuses a block that cannot describe a
-runnable engine, and `render(spec, site, derived, meta, *, image_tag)`, which
-returns the files to write into the run directory keyed by filename. `image_tag`
-is keyword-only: it is the tag of the images a run on a cluster starts, and is
-`None` for a site that declares no cluster.
+knobs is then a usable spec. Three modules are read by name, and an engine whose
+module does not import is refused as unregistered rather than failing later as a
+missing verdict or a missing cost:
 
-For a run on a cluster it owes one more thing: `KUBERNETES`, an
+- `knobs.py` owes `validate(block, spec, meta)`, which refuses a block that
+  cannot describe a runnable engine, and
+  `render(spec, site, derived, meta, *, image_tag)`, which returns the files to
+  write into the run directory keyed by filename. `image_tag` is keyword-only,
+  names the images a cluster run starts, and is `None` for a site with no
+  cluster.
+- `fleet.py` owes `fleet(spec)`: the compute the run asked for, in the vCPU and
+  GiB a published result is costed in.
+- `verify.py` owes `verify(spec, run_id, fetch, ...)`: one line per setting the
+  running engine does not honour, and an empty list for a run it does.
+
+For a run on a cluster `knobs.py` owes one more thing: `KUBERNETES`, an
 `EngineKubernetes` naming the kind of object a run is, where its state sits in
 the status, what running is called there, the Service that carries its HTTP API
 and the labels its pods carry. The cluster drivers read those through
 `engine-k8s` and hold no engine's names of their own, so a third engine adds no
-line to `scripts/`. `fleet.py` and `verify.py` are required as well: a managed
-engine whose fleet or verify module does not import is refused when a spec
-naming it is loaded.
+line to `scripts/`.

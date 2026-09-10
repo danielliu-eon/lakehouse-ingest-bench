@@ -1,7 +1,8 @@
 # `aws-smoke-flink.yaml` with every value behind the five-byte Confluent header:
-# the first cloud exercise of the registry path — registration at stage from the
-# harness Job, and a stock Flink reading writer schemas back by id — on the
-# registry `WITH_SCHEMA_REGISTRY=true deploy/aws/setup.sh` deploys.
+# this exercises the registry path on a cluster — registration at stage from the
+# harness Job, and a stock Flink reading writer schemas back by id — against the
+# registry `WITH_SCHEMA_REGISTRY=true deploy/aws/setup.sh` deploys into the
+# namespace. The site has to name it under `kafka.schema_registry`.
 name: aws-smoke-flink-confluent
 engine: flink
 corpus: smoke

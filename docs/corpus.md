@@ -172,6 +172,7 @@ factor, not a property of the code. A batch is
 
 | Preset | Batch | Peak memory |
 |---|---|---|
+| `smoke` | 5 MB | tens of MB |
 | `events-100mbs-{uniform,skew}` | 100 MB | about 1 GB |
 | `events-600mbs-{uniform,skew}` | 600 MB | about 6 GB |
 
@@ -207,6 +208,13 @@ Size a shard count from the figure it prints:
 shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
 ```
 
-Run it on the machine that will offer. A laptop's figure is a per-process ceiling
-against a one-broker local stack sharing its cores with the harness, and putting
-it into this formula sizes a cluster from a laptop.
+For a sense of the order: the median of three runs on one arm64 laptop, nothing
+emulated, was 115.6 MB/s encoded and 449,182 rows/s — so offering 500 MB/s from
+a machine like that needs `ceil(500 / 115.6 * 1.5) = 7` shards. That is a
+per-process ceiling against a one-broker local stack sharing its cores with the
+harness, and it clears by a wide margin the 30 MB/s below which a compiled
+producer would be worth building instead.
+
+**Re-run it on the machine that will offer.** Putting a laptop's number into the
+formula sizes a cluster from a laptop, and the figure also moves whenever the
+producer or the encoder changes.

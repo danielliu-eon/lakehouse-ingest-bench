@@ -1,12 +1,13 @@
 # lakehouse-ingest-bench
 
-Benchmark for streaming ingest from Apache Kafka into Apache Iceberg. It
-measures three things about any engine that consumes a Kafka topic and appends
-to an Iceberg table — freshness (contiguous-prefix lag), exactness (loss,
-duplication, corruption) and keep-up — plus the file geometry the engine left
-behind. Apache Flink and Apache Spark ship as managed engines; anything else
-runs on the external tier, where the harness prepares the run and never touches
-your engine.
+Benchmark for streaming ingest from Apache Kafka into Apache Iceberg. It scores
+any engine that consumes a Kafka topic and appends to an Iceberg table on four
+measures: **keep-up**, whether it holds the rate it is offered; **freshness**,
+how long a row waits between being offered and being readable in the table;
+**exactness**, whether every row arrives once and intact; and **file geometry**,
+the size and shape of the files it leaves behind. Apache Flink and Apache Spark
+ship as managed engines; any other engine joins on the external tier, which the
+harness prepares a run for and never touches.
 
 **Status.** Both engines run two ways: on Docker Compose locally, and on AWS
 (EKS, Amazon MSK, one S3 bucket, the Glue Iceberg REST catalog). Three recorded

@@ -93,7 +93,9 @@ version is printed either way). Then:
   run's ConfigMap volume onto the driver and executor pods — a `SparkApplication`
   carries the volume and the CRD alone does not apply it, so a driver on an
   install without it starts with no `/opt/bench/run` and dies opening the run's
-  job document. With `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry`
+  job document. A cluster that already had the operator installed *without* the
+  webhook is the one shape this preflight cannot fix for you.
+  With `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry`
   Deployment and Service (Apicurio, in-memory storage), waited on until its
   rollout completes.
 

@@ -13,7 +13,8 @@ loss, 0 duplicates, 300 scored batches), post-warmup freshness p50 9.682 s /
 p95 22.943 s / max 36.01 s against a 60 s p95 bound and a 120 s max bound,
 ~96.5% absorbed at offer end, 8.418 s to drain, backlog max 272,384 rows, 32
 snapshots. Those are the `freshness.window` quantiles, which is the series the
-verdict is drawn from; `freshness.full` covers the warmup too and reads lower.
+verdict is drawn from; `freshness.full`, over the warmup as well, reads p50
+9.695 s / p95 19.943 s.
 
 `geometry.json` is what `finish.sh` measured from the table's final
 metadata document: 1,984 data files, 719,577,266 bytes (~686 MiB), p50 file

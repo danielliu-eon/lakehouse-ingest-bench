@@ -180,9 +180,10 @@ exactness an upper one.
 `producer_bound` is true when a batch was acknowledged more than
 `producer.behind_max_ms` after it was due, or a delivery errored. Such a run says
 nothing about how fresh an engine kept the table. It usually means the producer
-was starved of CPU by everything else on the machine, so the fixes are a smaller
-corpus (`--set duration_s=…` on the local smoke), a spec with a lower
-`producer.speed`, or more `producer.shards` on a cluster. A void outranks a bound
+was starved of CPU by everything else on the machine, so offer less: a shorter
+corpus with `--set duration_s=…`, a spec whose `producer.speed` is below 1, or
+more `producer.shards` on a cluster. The first two are different dials — `--set`
+reaches the corpus, and only the spec reaches the offer. A void outranks a bound
 producer: the table is not the one the corpus describes, so no figure from either
 side describes anything.
 
