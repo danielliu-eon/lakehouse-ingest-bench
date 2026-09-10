@@ -14,11 +14,15 @@ requires four nodes; see [cluster sizing](../../../deploy/aws/README.md#sizing-t
 
 ## Run and verdict
 
-`runs/aws-smoke-flink.yaml`: 2 taskmanagers x 4 slots, 4 GiB each, 4
-partitions, one producer shard. Verdict `run_valid: true`, drained,
-5,840,896 rows exact (0 loss, 0 duplicates), freshness p50 6.745 s / p95
-18.12 s / max 31.645 s vs a 60 s bound, ~95.7% absorbed at offer end, 6.598 s
-to drain, backlog max 214,016 rows.
+The run used two TaskManagers with four slots and 4 GiB each, four Kafka
+partitions, and one producer shard. The final verdict was `run_valid: true`:
+
+- The run drained with 5,840,896 rows; count and checksum checks passed.
+- Freshness was 6.745 s at p50, 18.12 s at p95, and 31.645 s maximum.
+  The p95 bound was 60 s.
+- About 95.7% of offered rows were absorbed at offer end; the rest drained
+  in 6.598 s.
+- Backlog peaked at 214,016 rows.
 
 ## File geometry
 

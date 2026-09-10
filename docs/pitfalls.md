@@ -95,8 +95,7 @@ available for diagnosis. Clean up explicitly:
 
 The Java SDK reads `AWS_REGION`; botocore uses `AWS_DEFAULT_REGION`. Pods receive
 both so the MSK token signer and table FileIO use the intended region. Missing
-region configuration can cause S3 signing and redirect failures far from the
-configuration that caused them.
+region configuration can surface as S3 signing or redirect failures.
 
 ## Lowercase run ids for Kubernetes objects
 

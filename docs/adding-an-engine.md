@@ -23,8 +23,8 @@ Comparable runs must satisfy these six rules.
    declare every corpus column `NOT NULL`. Extra columns are allowed and may be
    nullable; a corpus column that is dropped, renamed, retyped or optional voids
    the run. `corpus.json` publishes the Iceberg type of every column, and the
-   scorer checks the table's columns, their types and their required-ness
-   against it when first loading the table. Convert the event-time column from
+   scorer checks column names, types and nullability against this metadata
+   when first loading the table. Convert the event-time column from
    Avro `timestamp-millis` to Iceberg `timestamp` (microsecond precision, without
    a time zone) without rounding. Nullability affects encoding and file geometry,
    so it must match even when the engine creates the table.
@@ -82,10 +82,10 @@ With `confluent`, a five-byte header precedes that record: one zero byte, then
 run. Consumers can either resolve the schema through the Confluent API or strip
 the header and use `schema.avsc`. Supply any registry credentials separately.
 
-Nothing else about the run changes: the rows, the keys, the table and the
-scoring are what a raw-Avro run's are. `runs/smoke-external-confluent.yaml` and
-its `aws-` sibling are the shipped external specs, and both managed engines read
-the framing too. The walk-through below is a raw-Avro run.
+Confluent framing leaves the rows, keys, table and scoring unchanged. Use
+`runs/smoke-external-confluent.yaml` locally or
+`runs/aws-smoke-external-confluent.yaml` on a cluster. Both managed engines also
+support this framing. The walk-through below uses raw Avro.
 
 ## Walk-through: an engine the harness does not manage
 
@@ -126,20 +126,23 @@ $COMPOSE --profile flink-job run --rm flink-job
 touch /tmp/engine-ready
 ```
 
-The first shell then offers the corpus, scores what lands in the table, and
-prints the verdict. Drop `--external-ready-file` and it waits on a newline from
-stdin instead — `scripts/run.sh <spec> --external-ready-file <path>` is the same
-contract for a run on a cluster. `runs/<run_id>/scores/summary.json` is the whole
-answer, and [`methodology.md`](methodology.md) §The verdict says what each field
-means and when a result may be published from it.
+The first shell then replays the corpus, scores the table and prints the
+verdict. Without `--external-ready-file`, it waits for a newline on stdin.
+For cluster runs, `scripts/run.sh <spec> --external-ready-file <path>` provides
+the same readiness check.
+
+The scorer writes `runs/<run_id>/scores/summary.json`. See
+[the verdict](methodology.md#the-verdict) for field definitions and
+[publication rules](../results/README.md) before publishing a result.
 
 ## On a cluster
 
-The same contract, driven by `scripts/` rather than the local stack.
-`runs/aws-smoke-external.yaml` and its `-confluent` sibling are the specs to
-copy; the `fleet` rows in them are placeholders, and a fleet is what the result
-is costed on. The confluent one needs `site.kafka.schema_registry`, and staging
-refuses it before it touches the cluster otherwise.
+Cluster runs use the same engine contract through the shell drivers. Copy
+`runs/aws-smoke-external.yaml` or `runs/aws-smoke-external-confluent.yaml` and
+replace the placeholder `fleet` entries with the resources your engine requests;
+they determine the reported cost. The Confluent spec also requires
+`site.kafka.schema_registry`. Staging rejects a missing registry before changing
+cluster resources.
 
 ```bash
 RUN_ID=$(scripts/stage.sh runs/aws-smoke-external-confluent.yaml | awk -F': ' '/^run_id: /{print $2}')
@@ -147,11 +150,11 @@ jq . "runs/$RUN_ID/facts.json"    # start your engine against these
 scripts/launch.sh "$RUN_ID"       # once it is consuming: the scorer, then the offer
 ```
 
-`scripts/run.sh <spec> --external-ready-file <path>` is the same sequence
-unattended: it waits for `<path>` to appear rather than for you, and
-[`running.md`](running.md) has every driver. Either way the ordering is the
-invariant — staging creates the topic and the table, so an engine that resolves
-either at startup cannot start until `stage.sh` has returned.
+To automate this sequence, use
+`scripts/run.sh <spec> --external-ready-file <path>` and create `<path>` when the
+engine is ready. See [running a benchmark](running.md) for the other drivers.
+Always wait for `stage.sh` to return before starting an engine that resolves the
+topic or table at startup: staging creates those resources.
 
 ## Tier 2: a managed engine
 
@@ -160,34 +163,33 @@ these files and generated artifacts:
 
 | File | Purpose |
 |---|---|
-| `README.md` | what the engine runs, knobs it honours, known traps |
+| `README.md` | runtime, supported settings and known limitations |
 | `Dockerfile` | stock upstream image plus connector jars, pinned; built locally, and pushed to the operator's own registry by `scripts/push-images.sh` |
-| `compose.yaml`, `compose.sh` | the engine's services for the local stack, and the four `engine_compose_*` hooks `smoke.sh` starts, readies and reads them through |
+| `compose.yaml`, `compose.sh` | local services and the four `engine_compose_*` hooks used by `smoke.sh` |
 | job source | the job the engine runs (SQL or Python) |
 | `knobs.py` | run-spec keys the engine accepts, validation, rendering into the template and the DDL |
 | `verify.py` | reads effective state from the running engine and fails staging on drift from the spec |
 | `fleet.py` | requested vCPU and GiB per role from the spec, for `run.json` |
-| *the cluster documents* | not a file here: the custom resource a run is, and the ConfigMap its pods mount, are `knobs.py`'s render output into the run directory |
+| cluster manifests | custom resource and ConfigMap generated by `knobs.py` in the run directory |
 
 Keep `knobs.py` independent of cluster access so operators can inspect and
 compare rendered configuration before starting resources. Reject unknown keys
 so misspelled settings cannot silently change a measured run.
 
-Register it by adding its knobs module to `MANAGED` in
-`ingest_bench/specs/engines.py`; `engine: <name>` plus a `<name>:` block of
-knobs is then a usable spec. The harness imports three modules by name and rejects the engine if any is
-unavailable:
+Register the engine's knobs module in `MANAGED` in
+`ingest_bench/specs/engines.py`. Run specs can then select it with
+`engine: <name>` and a `<name>:` block of settings. The harness requires three
+modules:
 
-- `knobs.py` provides `validate(block, spec, meta)`, which refuses a block that
-  cannot describe a runnable engine, and
-  `render(spec, site, derived, meta, *, image_tag)`, which returns the files to
-  write into the run directory keyed by filename. `image_tag` is keyword-only,
-  names the images a cluster run starts, and is `None` for a site with no
-  cluster.
-- `fleet.py` provides `fleet(spec)`: the compute the run asked for, in the vCPU and
-  GiB a published result is costed in.
-- `verify.py` provides `verify(spec, run_id, fetch, ...)`: one line per setting the
-  running engine does not honour, empty for a run it does.
+- `knobs.py` provides `validate(block, spec, meta)` to reject invalid settings
+  and `render(spec, site, derived, meta, *, image_tag)` to return generated files
+  keyed by filename. The keyword-only `image_tag` identifies the images for
+  cluster runs and is `None` for a site with no cluster.
+- `fleet.py` provides `fleet(spec)` to report requested vCPU and GiB for cost
+  calculations.
+- `verify.py` provides `verify(spec, run_id, fetch, ...)` to report one line per
+  mismatch between the spec and the running engine, or an empty result when
+  they agree.
 
 For cluster runs, `knobs.py` also provides `KUBERNETES`, an `EngineKubernetes`
 descriptor. It defines the resource kind, status and error paths, lifecycle and

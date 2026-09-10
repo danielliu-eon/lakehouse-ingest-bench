@@ -138,7 +138,7 @@ only when:
 5. the producer meets its schedule.
 
 Running and abandoned runs are invalid even if their current measurements pass.
-Publication also requires the checks in [`../results/README.md`](../results/README.md).
+Publication also requires the [results checks](../results/README.md).
 
 `reason` explains an invalid result. It is null for a valid or still-running run.
 A schema violation names each mismatched column; an abandoned run reports
@@ -163,7 +163,7 @@ relevant values, for example:
 | `void` | table columns differ from the corpus schema; `reason` names missing columns, wrong types or optional corpus columns |
 
 `producer_bound` is true when a batch acknowledgement exceeds
-`producer.behind_max_ms` after its due time, or a delivery errors. The run cannot
+`producer.behind_max_ms` after its due time, or a delivery fails. The run cannot
 establish engine capacity at the intended rate. Check producer CPU and shard
 count. A shorter corpus (`--set duration_s=…`) can reduce a local probe's resource
 needs; `producer.speed` below 1 lowers the replay rate. Corpus overrides and

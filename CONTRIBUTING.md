@@ -13,8 +13,8 @@ uv run pytest -q -m "not integration"
 uv run python scripts/validate-results.py
 ```
 
-Install `jq` and `yq` (mikefarah v4) on PATH. Cluster-driver tests skip when
-these tools are unavailable.
+Install `jq` and `yq` (mikefarah v4) and make them available on `PATH`.
+Cluster-driver tests skip when these tools are unavailable.
 
 Integration tests require the local Compose stack and are excluded above.
 Run `scripts/smoke.sh` for each affected engine when changing
@@ -59,7 +59,7 @@ Start with the external contract in
 code in the harness: staging prepares the run and prints connection facts.
 
 A managed engine needs the files listed in that guide under `engines/<name>/`
-and a knobs-module registration. Keep engine-specific behavior in that
+and a knobs-module registration. Keep engine-specific behavior in the engine
 package.
 
 ## Add a preset key or engine knob

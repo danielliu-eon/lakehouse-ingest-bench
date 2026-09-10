@@ -9,13 +9,13 @@ the PyFlink Table API.
 | Piece | What it is |
 |---|---|
 | Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
-| Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`), Avro via `flink-sql-avro-confluent-registry:1.20.1` — one shaded jar registering both the `avro` and the `avro-confluent` format |
-| Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
+| Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`) |
+| Avro | `flink-sql-avro-confluent-registry:1.20.1`; one shaded jar registers both `avro` and `avro-confluent` |
+| Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier includes AWS SDK v2) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — the shaded client pair, not `hadoop-common` and siblings |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
 | PyFlink | `apache-flink==1.20.1`, `pyyaml==6.0.2` |
-
 
 The pinned PyFlink release requires amd64, so local arm64 runs use emulation.
 The shaded Hadoop client jars supply Flink's Hadoop dependencies. Kafka must
@@ -51,8 +51,8 @@ requires `kubernetes.io/arch: amd64`, overriding any conflicting site selector.
 
 | Knob | Default | Effect |
 |---|---|---|
-| `taskmanagers` | required | taskmanager count |
-| `slots` | required | slots per taskmanager |
+| `taskmanagers` | required | TaskManager count |
+| `slots` | required | slots per TaskManager |
 | `tm_cpu` | required | vCPU per TaskManager; Kubernetes CPU request |
 | `tm_mem_mb` | required | `taskmanager.memory.process.size` |
 | `jm_cpu` | `1` | JobManager vCPU; Kubernetes CPU request |
@@ -66,15 +66,14 @@ requires `kubernetes.io/arch: amd64`, overriding any conflicting site selector.
 | `machine_type` | unset | cost column and placement |
 | `extra_flink_conf` | `{}` | applied last, so it overrides anything above |
 
-
 The benchmark requires `EXACTLY_ONCE` checkpointing. Verification rejects a
 weaker mode, including one set through `extra_flink_conf`. CPU knobs size
 Kubernetes requests and contribute to cost; local Compose does not apply them.
 
 ## Reader and writer parallelism
 
-The pinned Kafka connector has no `scan.parallelism` option. Set
-`parallelism.default` to `source_parallelism` so readers inherit it, then apply
+The pinned Kafka connector has no `scan.parallelism` option. The renderer sets
+`parallelism.default` to `source_parallelism` so readers inherit it, then applies
 the Iceberg sink hint `'write-parallelism' = taskmanagers * slots` when the
 writer count differs. Flink 1.20.1 enables dynamic table options by default,
 allowing the hint to take effect.
@@ -104,13 +103,12 @@ and `'catalog-type' = 'rest'`. Kafka security properties become `properties.*`
 options, with MSK IAM translation. See the
 [run specification](../../docs/run-spec.md) for translated keys.
 
-Both wire encodings use the same source DDL:
+The source DDL uses these format options for each wire encoding:
 
 | `kafka.value_encoding` | `'format'` | Options rendered beside it |
 |---|---|---|
 | `avro` (the default) | `avro` | `'avro.timestamp_mapping.legacy' = 'false'` |
 | `confluent` | `avro-confluent` | `'avro-confluent.url'` from `site.kafka.schema_registry.url`, plus `'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'` and `'avro-confluent.basic-auth.user-info'` where the site names a credential |
-
 
 Confluent decoding looks up writer schemas by the ID in each five-byte header,
 so both staging and the renderer require a registry. The shipped

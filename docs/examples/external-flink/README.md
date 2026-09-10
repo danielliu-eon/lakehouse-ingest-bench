@@ -1,8 +1,9 @@
 # Flink configuration for the external-engine walkthrough
 
-These files configure Flink to consume a staged run: the SQL job, submission
-settings and cluster size. Follow the [walkthrough](../../adding-an-engine.md)
-to replace the `@PLACEHOLDER@` tokens and start the job.
+This directory contains the SQL job, submission settings, and cluster sizing
+needed for Flink to consume a staged run. Follow the
+[walkthrough](../../adding-an-engine.md) to replace the `@PLACEHOLDER@` tokens
+and start the job.
 
 The example is rendered for the local stack and checked against the managed
 Flink renderer in a unit test. To build a managed integration, use

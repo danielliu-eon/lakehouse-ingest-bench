@@ -1,6 +1,6 @@
 # Running a benchmark
 
-Use the Docker Compose smoke to check changes end to end on one machine.
+Use the Docker Compose smoke test to check changes end to end on one machine.
 Publishable measurements require a cluster; see [On a cloud](#on-a-cloud).
 See [`methodology.md`](methodology.md) for measurement definitions and
 [`run-spec.md`](run-spec.md) for configuration keys.
@@ -10,20 +10,22 @@ See [`methodology.md`](methodology.md) for measurement definitions and
 - **Docker** with Compose v2 (`docker compose version`).
 - **`jq`**, **`yq`** (mikefarah, v4) and **`curl`** on the host: the scripts read
   the run's facts, the spec's scoring keys and the engine's readiness with them.
-- **16 GB RAM** available to Docker, and a few GB of its disk. The default smoke
-  corpus is about 1.5 GB encoded (300 s at 5 MB/s) and under a gigabyte stored —
+- **16 GB RAM** available to Docker, and several GB of free disk space. The default
+  smoke corpus is about 1.5 GB encoded (300 s at 5 MB/s) and under a gigabyte stored —
   its payload is incompressible by construction — and it lives in the
   object-store container until teardown.
 - Free ports: 9000 / 9001 (object store), 8181 (catalog), 9092 / 29092 (broker),
   and the engine's own — 8081 for Flink's REST, 4040 for the Spark driver's UI.
   Only one engine runs at a time.
-- On an arm64 host, whatever your Docker runs amd64 images with: the Flink image
-  is amd64-only.
+- On an arm64 host, enable amd64 emulation in Docker; the Flink image is
+  amd64-only.
 
 `uv sync` is only needed to run the tests and the tools outside a container; the
 smoke builds its own image from the checkout.
 
 ## The smoke
+
+Run these commands from the repository root:
 
 ```bash
 scripts/smoke.sh                          # the full 300 s corpus, stock Flink
@@ -45,8 +47,8 @@ scripts/smoke.sh --engine external        # stage and score; you start the engin
 `SPARK_APP_WAIT_S`, `SPARK_QUERY_WAIT_S` override where an engine is polled and
 for how long.
 
-It exits 0 only when the scorer published `run_valid: true`, printing the verdict
-block first; on a failure it dumps the tail of the scorer's and the engine's logs
+The script prints the verdict and exits 0 only if the scorer reports
+`run_valid: true`. On failure, it prints the end of the scorer and engine logs
 before teardown.
 
 For Flink, the smoke waits for slots, submits the job and runs `verify-flink`
@@ -55,8 +57,8 @@ driver runs the whole workload. The smoke waits for the named application and
 one active streaming query; it cannot use the pod-based `verify-spark` check.
 `executor_mem_mb` does not allocate executor memory in this mode.
 
-`kafka.value_encoding: confluent` on a spec offers every value behind the
-five-byte Confluent header and registers the corpus's schema at staging. The
+Setting `kafka.value_encoding: confluent` prefixes each value with the five-byte
+Confluent header and registers the corpus schema during staging. The
 local stack runs a registry, so
 `scripts/smoke.sh --engine flink --spec runs/smoke-flink-confluent.yaml`
 needs nothing extra; the framing itself is in
@@ -95,23 +97,24 @@ scripts/run.sh runs/aws-100mbs-skew-flink-hash.yaml --publish results/
 scripts/purge.sh <the run id it printed> --artifacts   # once you are done with the table
 ```
 
-`run.sh` prints `run_id: <id>` as soon as staging returns and then runs the
-sequence below: it judges the run every `--gate-interval-s` seconds (60) until
-the scorer's `state` stops being `running`, tears it down, and exits with
-`finish.sh`'s status — or 6, a code no other driver uses, when the teardown did
-not converge and the fleet may still be running. `RUN_MAX_S` bounds how long it
-waits from the launch — two hours, after which it tears the run down, prints
-what the artifacts say and refuses.
+`run.sh` prints `run_id: <id>` after staging. It checks the gate every
+`--gate-interval-s` seconds (default 60) until the scorer leaves the `running`
+state or the gate triggers teardown. It then tears down any remaining fleet and
+runs `finish.sh`.
 
-It always gates with `--teardown`, so a fleet that has not passed for
-`--breaches` ticks (3) is destroyed mid-run; `run.sh` then reads the verdict
-instead of tearing the run down a second time. A launch that fails leaves the
-fleet up on purpose — `launch.sh`'s refusals point at pod events a teardown
-would delete — and the line it prints names `scripts/teardown.sh <run_id>`.
+The script normally returns `finish.sh`'s exit status. It returns 6 if teardown
+fails and the fleet may still be running. `RUN_MAX_S` limits the wait after
+launch to two hours by default; on timeout, the script tears down the run,
+collects its verdict and exits with an error.
 
-`--publish` and `--variant` are `finish.sh`'s; `--breaches` is `gate.sh`'s. An
-`engine: external` spec waits after staging for `--external-ready-file <path>`
-to appear, or for a newline on stdin.
+The gate always uses `--teardown`. After `--breaches` consecutive non-passing
+checks (default 3), it tears down the fleet. A launch failure leaves the fleet
+running so you can inspect pod events; the error output includes the command
+to tear it down afterward.
+
+`--publish` and `--variant` are passed to `finish.sh`; `--breaches` configures
+`gate.sh`. For `engine: external`, the driver waits after staging for the file specified by
+`--external-ready-file <path>` to appear, or for a newline on stdin.
 
 To run or recover individual steps, use the run id printed by staging:
 
@@ -135,31 +138,27 @@ copied spec before production starts.
 
 | Driver | What it does |
 |---|---|
-| `run.sh <spec>` | stages, launches, gates, tears down and finishes one run, in the order below. Prints `run_id: <id>`, then the verdict block. Exits with `finish.sh`'s status, or 6 when the teardown did not converge and the fleet may still be running |
-| `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state *and for its fleet to be placed* — an operator reports running before every pod has an image to start from — holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
-| `launch.sh <run_id>` | counts the nodes with 2 CPU free and warns when the scorer and the shards will not all fit — see [`pitfalls.md`](pitfalls.md) — applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
-| `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing, once the verdict has repeated — three ticks, or `--breaches N` |
-| `teardown.sh <run_id>` | deletes the engine, the producer and the scorer, drops the topic as a Job, copies the table's last metadata document beside the run's artifacts, and collects the run |
-| `finish.sh <run_id>` | measures the file geometry, collects the run again, prints the verdict block and the geometry line. `--publish <dir>` also writes the result. Exits 0 only on `run_valid: true` |
-| `purge.sh <run_id>` | drops the table and removes its files, and with `--artifacts` the run's own prefix. Names everything first and asks; `--yes` answers |
+| `run.sh <spec>` | Runs the sequence below, excluding purge. Prints the run ID and verdict; returns the finish status, or 6 if teardown fails. |
+| `stage.sh <spec>` | Stages the run as a Job and downloads its artifacts. For managed engines, applies the rendered manifests, waits for the fleet, verifies the running configuration and records the image. Prints the run ID. |
+| `launch.sh <run_id>` | Checks available node capacity, starts the scorer and waits for its first reading, then starts producer shards. Records the run epoch. See [placement pitfalls](pitfalls.md). |
+| `gate.sh <run_id>` | Reports `PASS`, `UNDERSIZED` or `VOID` from scorer artifacts, with exit codes 0, 3 or 5. With `--teardown`, stops the fleet after three consecutive non-passing checks, configurable with `--breaches N`. |
+| `teardown.sh <run_id>` | Deletes engine, producer and scorer resources; drops the topic; copies the final table metadata; and collects run artifacts. |
+| `finish.sh <run_id>` | Measures file geometry, collects artifacts and prints the verdict and geometry. `--publish <dir>` also writes a result. Exits 0 only for `run_valid: true`. |
+| `purge.sh <run_id>` | Drops the table and deletes its files. `--artifacts` also deletes the run's storage prefix. Lists deletion targets and asks for confirmation; `--yes` skips the prompt. |
 
-Each driver takes `--site` (default `./site.yaml`) and reads the cluster, the
-registry, the identities and the roots out of it. Each also takes its own waits
-and pod sizes as environment variables, listed in its `--help`;
-`SCORER_READ_WORKERS` on `launch.sh` is the one that changes what the scorer
-does rather than how long a driver waits for it.
+Each driver accepts `--site` (default `./site.yaml`) for cluster, registry,
+identity and storage settings. Its `--help` lists environment variables for
+wait limits and pod sizes. `SCORER_READ_WORKERS` on `launch.sh` controls scorer
+read concurrency.
 
-Teardown releases compute before `finish.sh` reads the artifacts from storage.
-The table and warehouse files remain available until you run `purge.sh`.
+Teardown releases compute before `finish.sh` reads the stored artifacts. The
+table and warehouse files remain until you run `purge.sh`.
 
-`purge.sh` is the only script that deletes measured data. It reads the table's
-location out of the metadata document teardown copied rather than deriving it
-from the table's name, refuses while the run's scorer is still in the namespace,
-prints the table, the prefix and — with `--artifacts` — the run's prefix, and
-then asks. Nothing is removed without `--yes` or a `y` at the prompt. A run that
-left no such document — torn down by hand, or not torn down at all — has its
-table looked up in the catalog instead, and a catalog that cannot be reached is
-a refusal rather than an absent table.
+`purge.sh` deletes measured data only after `--yes` or an interactive `y`.
+It refuses to run while the scorer is still in the namespace. It reads the
+table location from the metadata saved during teardown; if that document is
+missing, it queries the catalog. An unreachable catalog causes an error,
+not an assumption that the table is absent.
 
 ### Publishing a result
 
@@ -169,10 +168,9 @@ a refusal rather than an absent table.
 tuning the run stands for; any engine-specific tuning beyond the run-spec knobs
 is a separately named variant rather than a second version of one file.
 
-A run whose `run_valid` is false is refused unless `--publish-invalid` says to
-keep it labelled by its validity state. The rules a published result has to meet
-are in [`../results/README.md`](../results/README.md), and the document's own
-schema is in [`results-format.md`](results-format.md).
+Publishing a run with `run_valid: false` requires `--publish-invalid`; the
+result retains its validity label. See [publication requirements](../results/README.md)
+and the [result schema](results-format.md).
 
 ### In-cluster stack
 
@@ -196,12 +194,10 @@ and evaluates verdicts. The harness image needs no Kubernetes client. Install
 `aws`, `kubectl`, `yq`, `jq`, `git`, `curl` and `gzip` locally; `push-images.sh`
 also requires `docker`.
 
-Install the harness itself with its `aws` extra — `uv sync --extra aws` in a
-checkout, or `pip install '.[aws]'` — because three of the drivers reach the
-catalog or the bucket through it: `teardown.sh` reads the table's last metadata
-document, `finish.sh` walks its manifests for the geometry, and `purge.sh` drops
-the table. pyiceberg imports `boto3` only when it comes to sign a Glue request,
-so a default install reaches the catalog and then fails on that import.
+Install the harness with its `aws` extra: `uv sync --extra aws` in a checkout,
+or `pip install '.[aws]'`. Local drivers use it to read final table metadata,
+measure file geometry and drop tables. Without the extra, Glue request signing
+fails because `boto3` is missing.
 
 ### What the site declares about a cluster
 
@@ -215,12 +211,11 @@ apply to every Job and engine pod. Flink overrides the architecture selector
 with `kubernetes.io/arch: amd64` because its image lacks aarch64 PyFlink. Spark
 uses the site selector unchanged.
 
-**Where files go.** `stage.sh` fetches the run directory into `./runs/<run_id>/`
-beside your `site.yaml`, and `RUNS_DIR` moves that. The pods write to
-`site.runs_root` in the bucket instead, because a pod's filesystem goes with the
-pod: staging publishes its run directory, each producer shard its publish log,
-and the scorer mirrors every artifact on each poll. That is also why `gate.sh`
-and `finish.sh` read from the bucket rather than from anything still running.
+**Where files go.** `stage.sh` downloads artifacts to `./runs/<run_id>/` beside
+`site.yaml`; set `RUNS_DIR` to change that directory. Pods publish artifacts to
+`site.runs_root` in object storage so they survive pod deletion. Staging uploads
+the run directory, producers upload publish logs, and the scorer mirrors its
+artifacts on each poll. `gate.sh` and `finish.sh` read these stored artifacts.
 
 ## The run directory
 
@@ -233,17 +228,17 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | `timeline.log` | stage | one line per phase transition |
 | `job.sql`, `flink-conf.yaml`, `flink.env` | stage | a Flink run's script, the settings it is submitted with, and the cluster shape the local stack sizes containers from |
 | `spark-defaults.conf` | stage | a Spark run's settings, and `job.json`, `reader-schema.avsc`, `job.env` beside it |
-| `flinkdeployment.yaml` / `sparkapplication.yaml` | stage | the engine as its operator takes it, for a run on a cluster |
-| `flink-job-configmap.yaml` / `spark-job-configmap.yaml` | stage | those rendered files, as the ConfigMap the engine's pods mount |
+| `flinkdeployment.yaml` / `sparkapplication.yaml` | stage | the engine resource applied to its Kubernetes operator |
+| `flink-job-configmap.yaml` / `spark-job-configmap.yaml` | stage | rendered files packaged as a ConfigMap for engine pods |
 | `engine-image.json` | stage | the image the engine ran and the digest the node pulled |
 | `publish_log-<i>.jsonl` | producer | one record per batch: rows, bytes, when it was due, when it was acked. Beside the spec locally, under `producer/` on a cluster |
 | `scores/summary.json` | scorer | the verdict, rewritten on every poll |
 | `scores/freshness.json` | scorer | the lag quantiles and the whole lag curve, on both clocks |
 | `scores/exactness.json` | scorer | loss, duplication, corruption, and the first violations |
 | `scores/keepup.json` | scorer | the keep-up scalars |
-| `scores/geometry.json` | `file-sizes` | the file geometry along the run and at its end |
-| `scores/snapshots.jsonl` | scorer | one line per commit the table took |
-| `scores/keepup_samples.jsonl` | scorer | offered against committed, once per poll |
+| `scores/geometry.json` | `file-sizes` | file geometry over time and at the end of the run |
+| `scores/snapshots.jsonl` | scorer | one record per table commit |
+| `scores/keepup_samples.jsonl` | scorer | offered and committed counts, once per poll |
 | `table-metadata.final.json` | teardown | the table's last metadata document, copied |
 | `run.json` | `collect` | the whole result, redacted — see [`results-format.md`](results-format.md) |
 
@@ -256,7 +251,7 @@ scorer reads the offered side from there rather than from the local disk.
 fields; see definitions of `run_valid`, `reason` and `state` in
 [`methodology.md`](methodology.md) §The verdict.
 
-Two commands read the same artifacts on their own:
+To inspect artifacts directly, run:
 
 ```bash
 gate --out runs/<run_id>/scores                  # PASS / UNDERSIZED / VOID, mid-run

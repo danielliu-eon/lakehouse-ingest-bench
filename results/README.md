@@ -2,7 +2,8 @@
 
 Run `scripts/finish.sh <run_id> --publish results/` to write a redacted
 `run.json` (`schema_version: 2`) under `results/<engine>/` and regenerate
-`RESULTS.md`. Commit both together; do not edit them by hand.
+`RESULTS.md`. Commit the result and regenerated table together; do not edit them
+by hand.
 
 Publishing requires `run_valid: true` unless you pass `--publish-invalid`.
 Invalid runs remain labelled by validity state and must not be presented as

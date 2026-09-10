@@ -1,30 +1,30 @@
 # Running the benchmark on AWS
 
 `setup.sh` provisions the shared AWS resources needed by benchmark runs.
-`teardown.sh` removes them. Both check existing resources so an interrupted
-operation can be rerun. Manage the EKS cluster separately; neither script
-creates, reconfigures, or deletes it.
+`teardown.sh` removes them. Both check existing resources, so you can rerun an
+interrupted operation. Manage the EKS cluster separately; neither script creates,
+reconfigures, or deletes it.
 
 ## Prerequisites
 
 - **EKS cluster.** Flink requires an amd64 node. Setup warns if none exists,
-  allowing Spark-only campaigns on arm64. For a new cluster, use the example
-  at the end of this guide.
+  allowing Spark-only campaigns on arm64. For a new cluster, use the
+  [EKS example](#create-an-eks-cluster).
 - **Host tools.** Scripts check required tools before proceeding. `run.sh`
   checks the tools needed by all five drivers it invokes.
 
   | Tool | Needed by |
   |---|---|
-  | `aws` CLI v2 | these two scripts, and every driver that reads the bucket or the registry — all of them but `launch.sh` |
+  | `aws` CLI v2 | setup, teardown, and all run drivers except `launch.sh` |
   | `kubectl` | setup, teardown, and run drivers that access Kubernetes; `finish.sh` also requires it for catalog tunnels |
   | `helm` | `setup.sh` / `teardown.sh`, for the two operators |
   | `envsubst` (GNU gettext) | `setup.sh`, for the IAM and namespace templates |
-  | `yq` (mikefarah v4) | every driver, to read the site and the copied spec |
+  | `yq` (mikefarah v4) | every driver, to read the site configuration and copied run spec |
   | `jq` | every driver that reads a run's facts or an object's status |
-  | `git` | every driver that names an image, since the tag is a commit |
+  | `git` | drivers that resolve image tags from the Git commit |
   | `curl` | `stage.sh` for engine verification; catalog tunnels also probe readiness with it |
   | `docker` | `push-images.sh` |
-  | `gzip` | `teardown.sh` and `purge.sh`, since a table may write its metadata document compressed |
+  | `gzip` | `teardown.sh` and `purge.sh`, to read compressed table metadata |
 - **AWS credentials.** Use an identity in the cluster's account with permission
   to manage S3, ECR, MSK, security groups, IAM roles, EKS add-ons, and Pod Identity
   associations. Scripts use the AWS CLI's ambient credentials without setting
@@ -42,13 +42,12 @@ Kubernetes schedules pods by resource requests. Budget for these requests:
 | Scorer | one per run | `2` | `2Gi` |
 | Producer shard | `producer.shards` | `2` | `PRODUCER_MEMORY` (`2Gi`) |
 | Corpus generator | `gen-corpus.sh --shards` | `1` | `GEN_MEMORY` (`2Gi`) |
-| Stage, and every other harness Job | one at a time | `500m` | `1Gi` |
-| Schema registry | one, under `WITH_SCHEMA_REGISTRY=true` | `200m` | `512Mi` |
+| Staging and other harness Jobs | one at a time | `500m` | `1Gi` |
+| Schema registry | one when `WITH_SCHEMA_REGISTRY=true` | `200m` | `512Mi` |
 | Flink jobmanager | one | `jm_cpu` (`1`) | `jm_mem_mb` |
 | Flink taskmanager | `taskmanagers` | `tm_cpu` | `tm_mem_mb` |
 | Spark driver | one | `driver_cores` (`1`) | `driver_mem_mb` |
 | Spark executor | `executors` | `executor_cores` | `executor_mem_mb` |
-
 
 Harness requests come from `deploy/k8s/` templates. Engine requests come from
 run knobs, rendered by [Flink](../../engines/flink/knobs.py) and
@@ -90,10 +89,10 @@ Pass site-specific values through environment variables:
 | `CLUSTER_NAME` | *required* | The EKS cluster's name |
 | `KUBE_CONTEXT` | `$CLUSTER_NAME` | The kubeconfig context. Written with `aws eks update-kubeconfig --alias` if it is missing |
 | `BUCKET` | `lakehouse-ingest-bench-<account id>` | Bucket for `corpus/`, `runs/`, and `warehouse/`; the account ID helps avoid global name collisions |
-| `MSK_NAME` | `lakehouse-ingest-bench` | The MSK cluster's name; its security group is `<name>-msk` |
+| `MSK_NAME` | `lakehouse-ingest-bench` | MSK cluster name; its security group is `<name>-msk` |
 | `MSK_BROKER_TYPE` | `kafka.m5.large` | Broker instance type |
 | `MSK_BROKERS` | `2` | Broker count; requires this many availability zones with private subnets |
-| `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version, printed either way |
+| `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version; setup prints the selected version |
 | `MSK_VOLUME_GIB` | `100` | EBS GiB per broker. Increase for longer offers or larger backlogs. Existing volumes can grow with `update-broker-storage`, but cannot shrink |
 | `FLINK_OPERATOR_VERSION` | `1.15.0` | Flink operator chart installed from `archive.apache.org` when its CRD is absent |
 | `SPARK_OPERATOR_VERSION` | `2.5.2` | Kubeflow operator chart installed when its CRD is absent; configured to watch `$NAMESPACE` and use the benchmark's Spark identity |
@@ -102,7 +101,6 @@ Pass site-specific values through environment variables:
 | `NODE_SELECTOR` / `TOLERATIONS` | `{}` / `[]` | One-line JSON for registry placement. Harness Jobs read placement from `site.yaml` |
 | `MSK_ACTIVE_WAIT_S` | `3600` | How long `setup.sh` waits for MSK to reach `ACTIVE` |
 | `MSK_DELETED_WAIT_S` | `1800` | How long `teardown.sh` waits for MSK to disappear before deleting its security group |
-
 
 ## Provision shared resources
 
@@ -179,8 +177,9 @@ campaign or other workloads.
 
 With `--all`, bucket deletion happens last and requires the benchmark ownership
 tag plus confirmation. It removes every corpus, run artifact, and warehouse
-object. `--yes` supplies confirmation for unattended use. Declining the prompt
-leaves the images and operators already removed.
+object. `--yes` supplies confirmation for unattended use. By the time the prompt
+appears, the images and operators have already been removed. Declining keeps
+the bucket but does not restore those resources.
 
 The EKS cluster and `eks-pod-identity-agent` add-on remain installed.
 

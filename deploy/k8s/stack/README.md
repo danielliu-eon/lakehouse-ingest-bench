@@ -2,8 +2,8 @@
 
 `setup.sh` installs Kafka through Strimzi and an Iceberg REST catalog through
 Lakekeeper with Postgres. It prints the values needed for `site.yaml`;
-`teardown.sh` removes the stack. Both check existing resources so interrupted
-operations can be rerun.
+`teardown.sh` removes the stack. Both check existing resources, so you can rerun
+interrupted operations.
 
 Use [site.k8s.example.yaml](../../../site.k8s.example.yaml) for this deployment.
 The run drivers, engines, and scorer use the same interfaces as the managed
@@ -42,18 +42,17 @@ separately.
 | `KUBE_CONTEXT` | `$CLUSTER_NAME` | The kubeconfig context |
 | `NAMESPACE` | `ingest-bench` | Namespace for the stack and runs; use a separate namespace when also running the managed-broker deployment |
 | `BUCKET` | *required* | The bucket with `corpus/`, `runs/` and `warehouse/` |
-| `AWS_REGION`, `CLUSTER_NAME` | *required with `CLOUD=aws`* | The region, and the EKS cluster for the pod identity associations |
+| `AWS_REGION`, `CLUSTER_NAME` | *required with `CLOUD=aws`* | AWS region and EKS cluster for Pod Identity associations |
 | `KAFKA_BROKERS` | `3` | Dual-role broker/controller replicas. Replication is `min(3, brokers)`; minimum in-sync replicas is `max(1, replication − 1)` |
-| `KAFKA_VOLUME_GI` | `500` | Volume per broker. Grown on a re-run when raised, never shrunk |
+| `KAFKA_VOLUME_GI` | `500` | GiB per broker volume; rerunning setup with a larger value grows volumes, but a smaller value does not shrink them |
 | `KAFKA_VOLUME_THROUGHPUT_MIBS` / `KAFKA_VOLUME_IOPS` | `250` / `6000` | Provisioned gp3 throughput and IOPS |
 | `KAFKA_CPU` / `KAFKA_MEM_GI` | `4` / `16` | Broker requests and limits; the heap is `KAFKA_JVM_HEAP` (`6g`) and the rest is page cache |
-| `KAFKA_NODE_SELECTOR` / `KAFKA_TOLERATIONS` | `{}` / `[]` | One-line JSON placing the brokers on their node group |
+| `KAFKA_NODE_SELECTOR` / `KAFKA_TOLERATIONS` | `{}` / `[]` | One-line JSON for broker placement |
 | `CATALOG_NODE_SELECTOR` / `CATALOG_TOLERATIONS` | `{}` / `[]` | Placement for Lakekeeper, Postgres, and the schema registry |
 | `STRIMZI_VERSION` | `1.2.0` | The operator chart, `oci://quay.io/strimzi-helm/strimzi-kafka-operator` |
 | `LAKEKEEPER_CHART_VERSION` | `0.12.0` | From `https://lakekeeper.github.io/lakekeeper-charts/` |
 | `WITH_SCHEMA_REGISTRY` | `false` | `true` also applies `deploy/k8s/schema-registry.yaml.tmpl`, for a run whose spec says `kafka.value_encoding: confluent` |
-| `KAFKA_READY_WAIT_S` / `CATALOG_READY_WAIT_S` | `900` / `600` | How long the Kafka CR and the catalog may take to be ready |
-
+| `KAFKA_READY_WAIT_S` / `CATALOG_READY_WAIT_S` | `900` / `600` | Maximum readiness wait in seconds for Kafka and the catalog |
 
 ## What setup creates
 
@@ -63,7 +62,7 @@ separately.
    three prefixes. Pod Identity binds it to the run accounts and
    `ingest-bench-catalog`. This role is independent of MSK permissions.
 3. On AWS, the expandable gp3 StorageClass `ingest-bench-kafka`, with provisioned
-   throughput and binding in the scheduled pod's availability zone.
+   throughput. Volumes are created in the scheduled pod's availability zone.
 4. The `ingest-bench-catalog-keys` Secret: encryption key, database passwords,
    and warehouse credential external ID. Setup creates it once and preserves it
    on reruns so stored secrets remain readable.

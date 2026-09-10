@@ -10,11 +10,10 @@ and job document; `stream_to_iceberg.py` reads them and starts one query.
 |---|---|
 | Image | `apache/spark:3.5.9-scala2.12-java17-python3-ubuntu`, multi-arch |
 | Source | `spark-sql-kafka-0-10_2.12:3.5.9` + `spark-token-provider-kafka-0-10_2.12:3.5.9`, an unshaded `kafka-clients:3.4.1` and `commons-pool2:2.11.1` |
-| Avro | `spark-avro_2.12:3.5.9` — `from_avro` is here, not in the Avro core jar the image ships |
-| Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier, so its AWS SDK v2 comes with it) |
+| Avro | `spark-avro_2.12:3.5.9`; provides `from_avro`, which the image's Avro core jar lacks |
+| Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier includes AWS SDK v2) |
 | Sink | `iceberg-spark-runtime-3.5_2.12:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Checkpoints | `hadoop-aws:3.3.4` + `aws-java-sdk-bundle:1.12.779` |
-
 
 Spark already includes Kafka's zstd, lz4, and snappy codecs. The image adds
 `commons-pool2` because the bundled `commons-pool` 1.x uses a different package.
@@ -69,7 +68,6 @@ the trigger interval during staging; see [pitfalls](../../docs/pitfalls.md).
 | `machine_type` | unset | cost column and placement |
 | `extra_spark_conf` | `{}` | applied last, so it overrides anything above |
 
-
 Shuffle partitions default to `executors × executor_cores`, avoiding Spark's
 200-way default shuffle and excess small files on smaller fleets.
 
@@ -83,10 +81,10 @@ which makes `from_avro` return `TimestampNTZ`. Both annotations encode the same
 table's microsecond precision.
 
 With `kafka.value_encoding: confluent`, the job removes the five-byte header
-using `substring(value, 6, length(value) - 5)` before the same decode. It needs
-no registry client: each run registers one schema and already has the matching
-reader schema. Staging still requires `site.kafka.schema_registry` to obtain the
-schema ID. See [wire framing](../../docs/adding-an-engine.md).
+using `substring(value, 6, length(value) - 5)` before decoding the payload with
+`from_avro`. It needs no registry client: each run registers one schema and
+already has the matching reader schema. Staging still requires
+`site.kafka.schema_registry` to obtain the schema ID. See [wire framing](../../docs/adding-an-engine.md).
 
 ## Configuration constraints
 

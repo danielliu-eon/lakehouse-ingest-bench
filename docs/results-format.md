@@ -44,7 +44,7 @@ available for comparison.
 | `harness_version` | the installed `lakehouse-ingest-bench` version |
 | `run` | run identity and configuration |
 | `artifacts` | input paths, snapshot history and publish-log summaries |
-| `data` | the scorer's documents verbatim |
+| `data` | the scorer's documents, with redaction |
 | `derived` | comparison metrics derived from recorded artifacts |
 | `geometry` | `geometry.json` as `file-sizes` wrote it, or `null` |
 | `missing` | absent optional inputs |
@@ -73,7 +73,7 @@ Relative paths for the inputs `collect` found: `spec`, `facts`, `timeline`,
 `keepup_samples`. A path is absent exactly when the file is named in `missing`.
 
 `snapshots` embeds the parsed `snapshots.jsonl`, with one record per commit.
-Keeping this history in the result supports inspection of the measurements.
+This history lets readers inspect the commits behind the measurements.
 
 `publish_logs` contains a **summary per shard** to avoid embedding thousands of
 per-batch records. There is one entry per
@@ -86,7 +86,7 @@ per-batch records. There is one entry per
 | `first_scheduled_ms` | when the shard's earliest batch was due |
 | `first_ack_ms`, `last_ack_ms` | first and last acknowledgement times |
 | `bytes`, `rows` | total published bytes and rows |
-| `behind_ms_max` | the worst gap between a batch being due and first acked |
+| `behind_ms_max` | maximum delay from a batch's due time to its first acknowledgement |
 | `errors` | delivery errors across the shard |
 | `done` | whether the log has a completion trailer. Every shard must be done to establish a complete offer |
 
@@ -117,7 +117,7 @@ acknowledgement interval. Without publish logs, `behind_ms_max` and `errors`
 come from the scorer and rate is `null`. `producer_bound` always comes from the
 scorer to remain consistent with `run_valid`.
 
-**`cost`.** The fleet's hourly cost, run duration and their product. Duration
+**`cost`.** Records the fleet's hourly cost, run duration and total cost. Duration
 and total cost are `null` without both an epoch and an end time. See
 [Cost](methodology.md#cost) for the formula.
 
@@ -127,9 +127,8 @@ This list names absent optional inputs by relative path, such as
 `engine-image.json`, `scores/geometry.json` or `producer/publish_log-*.jsonl`.
 `spec.yaml` and `facts.json` are required; collection fails if either is missing.
 
-Missing inputs can be expected: `teardown.sh` collects before geometry is
+Some inputs may arrive later: `teardown.sh` collects before geometry is
 measured, and publish logs may not yet have been fetched from object storage.
 A later collection can include them. Publication requires valid scores but
-permits missing geometry. See `data.summary.run_valid` in
-[`methodology.md`](methodology.md) §The verdict, and the rules in
-[`../results/README.md`](../results/README.md).
+permits missing geometry. See [the verdict](methodology.md#the-verdict) for
+`data.summary.run_valid` and the [publication rules](../results/README.md).

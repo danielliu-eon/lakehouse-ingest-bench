@@ -14,15 +14,20 @@ requires four nodes; see [cluster sizing](../../../deploy/aws/README.md#sizing-t
 
 ## Run and verdict
 
-`runs/aws-smoke-spark.yaml`: 2 executors x 2 cores, 4 GiB each, 2 GiB driver,
-a 10 s trigger interval, hash distribution mode, 4 Kafka partitions, one
-producer shard. Verdict `run_valid: true`, drained, 5,840,896 rows exact (0
-loss, 0 duplicates, 300 scored batches), post-warmup freshness p50 9.682 s /
-p95 22.943 s / max 36.01 s against a 60 s p95 bound and a 120 s max bound,
-~96.5% absorbed at offer end, 8.418 s to drain, backlog max 272,384 rows, 32
-snapshots.
-These are the `freshness.window` quantiles used for the verdict. Including
-warmup, `freshness.full` reports p50 9.695 s and p95 19.943 s.
+The run used two executors with two cores and 4 GiB each, a 2 GiB driver,
+a 10 s trigger interval, hash distribution, four Kafka partitions, and one
+producer shard. The final verdict was `run_valid: true`:
+
+- The run drained with 5,840,896 rows across 300 scored batches; count and
+  checksum checks passed.
+- Post-warmup freshness was 9.682 s at p50, 22.943 s at p95, and 36.01 s
+  maximum, within the 60 s p95 and 120 s maximum bounds.
+- About 96.5% of offered rows were absorbed at offer end; the rest drained
+  in 8.418 s.
+- Backlog peaked at 272,384 rows, and the table had 32 snapshots.
+
+The verdict uses the `freshness.window` quantiles above. Including warmup,
+`freshness.full` reports p50 9.695 s and p95 19.943 s.
 
 ## File geometry
 
@@ -37,5 +42,5 @@ small-file threshold.
 roots, the image registry and the Glue warehouse account id are replaced with
 placeholders. It predates the `run.compression` field.
 
-`scripts/gate.sh` reported `PASS` on every tick, lag never exceeding 36 s
-against the 120 s max bound.
+`scripts/gate.sh` reported `PASS` on every tick. Lag stayed at or below 36 s,
+within the 120 s maximum bound.

@@ -77,9 +77,8 @@ checks, freshness met the 60-second bound, and the producer kept to schedule.
 the offer ended. Full output also includes `reason` and backlog figures.
 Artifacts remain in `runs/<run_id>/`.
 
-For a shorter check, add `--set duration_s=30`, as CI does. The shortened offer
-is shorter than the freshness warmup and may finish before the first commit;
-see [`docs/running.md`](docs/running.md) for how to interpret its verdict.
+For a shorter check, add `--set duration_s=30`, as CI does. The offer may end
+before the freshness warmup ends or the first commit occurs; see [`docs/running.md`](docs/running.md) for how to interpret its verdict.
 
 **Local smoke tests are integration checks, not performance results.**
 The harness, broker, object store and engine share one machine's resources.

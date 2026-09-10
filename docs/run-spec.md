@@ -7,7 +7,7 @@ operator's storage, broker, catalog, cluster and prices. It is not published.
 
 Both loaders reject unknown keys so misspelled settings cannot be silently ignored.
 
-Terms below are defined in [`methodology.md`](methodology.md).
+See the [methodology glossary](methodology.md#glossary) for measurement terms.
 
 ## Run spec
 
@@ -50,11 +50,11 @@ Terms below are defined in [`methodology.md`](methodology.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `freshness_bound_s` | `180` | the window p95 the run is judged against; twice it is the max bound |
+| `freshness_bound_s` | `180` | maximum window p95 lag; maximum window lag must not exceed twice this bound |
 | `warmup_s` | `120` | excluded from the freshness window after the epoch |
 | `geometry_offsets_s` | `[600, 1200, 1800, 2700, 3600]` | geometry snapshot offsets from the epoch; unreached offsets are `absent` |
-| `gate_adaptation_s` | the gate's own `120` | seconds after the epoch before capacity checks begin |
-| `gate_window_s` | the gate's own `60` | the width of the three backlog-floor windows |
+| `gate_adaptation_s` | `120` (gate default) | seconds after the epoch before capacity checks begin |
+| `gate_window_s` | `60` (gate default) | the width of the three backlog-floor windows |
 
 Omit the gate keys to use the gate's defaults.
 
@@ -64,7 +64,7 @@ Omit the gate keys to use the gate's defaults.
 |---|---|
 | `corpus_root`, `runs_root`, `warehouse` | *required*. Storage roots for corpora, run artifacts and table data; redacted in results. Shell drivers use the AWS CLI and require `s3://` URIs |
 | `kafka.bootstrap_servers` | *required* |
-| `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim. Never read into a result |
+| `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim; omitted from results |
 | `kafka.schema_registry` | `{url, basic_auth_user_info?}`; optional for raw Avro, required for Confluent framing |
 | `catalog.props` | *required*. PyIceberg catalog properties. Managed engines require a REST catalog; external runs may use any catalog PyIceberg can open |
 | `kubernetes` | empty for local runs. Cluster runs require `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
