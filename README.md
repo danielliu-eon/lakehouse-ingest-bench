@@ -12,10 +12,12 @@ harness prepares a run for and never touches.
 **Status.** Both engines run two ways: on Docker Compose locally, and on AWS
 (EKS, Amazon MSK, one S3 bucket, the Glue Iceberg REST catalog). Three recorded
 smoke runs are under [`docs/examples/`](docs/examples/). Not here yet: any
-published result in [`results/`](results/) — the hour-long 100 MB/s runs are
-what fills it — the 600 MB/s presets, tuned engine variants, and any GCP
-deployment. The harness reads and writes `gs://` paths, but nothing here stands
-a cluster up on GCP.
+published result in [`results/`](results/) — the hour-long 100 MB/s runs fill
+it, and `runs/aws-100mbs-skew-*.yaml` are their specs, sized as a probe ladder's
+start rather than as an answer — the 600 MB/s presets, tuned engine variants,
+and any GCP deployment. The harness reads and writes `gs://` paths, but the
+drivers refuse a root that is not `s3://` and nothing here stands a cluster up
+on GCP.
 
 ## What makes a result fair
 
@@ -25,10 +27,11 @@ encoder. The harness writes no source, sink or serializer for any engine, so a
 Flink result is Flink's. The scorer never asks a writer what it wrote: freshness
 and exactness come out of the table's own metadata and manifests, the surface
 any reader of the table sees. And `run_valid: true` is the only field that
-permits publishing a result — true only when the table held the corpus's
-columns, drained, kept its p95 lag inside the spec's bound, was exact, and the
-producer kept to its schedule. [`docs/methodology.md`](docs/methodology.md) is
-how each of those is defined, and why.
+permits publishing a result — true only when the scoring loop reached a verdict
+rather than abandoning the run, and the table held the corpus's columns,
+drained, kept its p95 lag inside the spec's bound, was exact, and the producer
+kept to its schedule. [`docs/methodology.md`](docs/methodology.md) is how each
+of those is defined, and why.
 
 ## Quickstart
 
@@ -139,3 +142,9 @@ five site roots redaction substitutes out of it, are in
   what it runs, its knobs, and its traps.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — the checks, and how to add a corpus
   shape, an engine or a result.
+
+## Licence
+
+Apache-2.0 — [`LICENSE`](LICENSE), with the copyright holder in
+[`NOTICE`](NOTICE), since the licence names no licensor of its own. Whoever
+publishes this fills its placeholders and the matching one in `pyproject.toml`.
