@@ -3752,6 +3752,10 @@ if [[ -n ${STUB_GATE_TEARS_DOWN:-} ]]; then
 	mkdir -p "$(dirname -- "$STUB_TEARDOWN_MARKER")"
 	: >"$STUB_TEARDOWN_MARKER"
 fi
+if [[ -n ${STUB_GATE_BREACHES:-} ]]; then
+	mkdir -p "$(dirname -- "$STUB_BREACH_FILE")"
+	printf '%s\\n' "$STUB_GATE_BREACHES" >"$STUB_BREACH_FILE"
+fi
 exit "${STUB_GATE_STATUS:-0}"
 """
 
@@ -3791,6 +3795,7 @@ def _run_chained(
     arguments: list[str],
     states: list[str],
     environment: dict[str, str] | None = None,
+    engine: str = "flink",
 ) -> ChainedRun:
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -3810,7 +3815,7 @@ def _run_chained(
     work.mkdir()
     (work / "site.yaml").write_text(_filled_site())
     spec = work / "a-run.yaml"
-    spec.write_text("engine: flink\n")
+    spec.write_text(f"engine: {engine}\n")
     published = tmp_path / "published"
     published.mkdir()
     state_file = tmp_path / "states"
@@ -3836,6 +3841,7 @@ def _run_chained(
             "STUB_S3_CP_DIR": str(published),
             "STUB_STATES": str(state_file),
             "STUB_TEARDOWN_MARKER": str(work / "runs" / RUN_ID / "table-metadata.final.json"),
+            "STUB_BREACH_FILE": str(work / "runs" / RUN_ID / "gate-breaches"),
             **(environment or {}),
         },
     )
@@ -3849,9 +3855,43 @@ def _run_chained(
         # The state the scorer publishes is what says a run has ended, so the
         # loop leaves on the first tick that reads one that is not `running`.
         (["running", "drained"], {}, ["stage", "launch", "gate", "gate", "teardown", "finish"], 0, None),
-        # A run the gate has already torn down is not torn down again: the
-        # second teardown would fail on a topic that is no longer there.
-        (["running"], {"STUB_GATE_TEARS_DOWN": "1"}, ["stage", "launch", "gate", "finish"], 0, None),
+        # `RUN_MAX_S` is short wherever one state is queued: the signal under
+        # test is then the only thing that can end the loop, so a regression
+        # fails in seconds rather than hanging out the two-hour default.
+        #
+        # A non-PASS tick is what a probe ladder's first leg is, so the loop
+        # carries on: only the state, the gate's own teardown or the bound ends
+        # it. This is also the case that pins `|| GATE_STATUS=$?`, without
+        # which `set -e` would end the run on the tick instead.
+        (
+            ["running", "drained"],
+            {"STUB_GATE_STATUS": "3"},
+            ["stage", "launch", "gate", "gate", "teardown", "finish"],
+            0,
+            None,
+        ),
+        # A run the gate has already torn down is not torn down again — a
+        # second one would converge, since the deletes ignore what is absent
+        # and `drop-topic` is idempotent, but it is a Job and a minute for
+        # nothing.
+        (
+            ["running"],
+            {"STUB_GATE_TEARS_DOWN": "1", "RUN_MAX_S": "5"},
+            ["stage", "launch", "gate", "finish"],
+            0,
+            None,
+        ),
+        # The marker is what says a teardown converged, and teardown.sh skips
+        # writing it for a table that was absent. So the breach count ends the
+        # loop too — and that path does tear down, because how the gate's own
+        # teardown ended is exactly what it does not say.
+        (
+            ["running"],
+            {"STUB_GATE_STATUS": "3", "STUB_GATE_BREACHES": "3", "RUN_MAX_S": "5"},
+            ["stage", "launch", "gate", "teardown", "finish"],
+            0,
+            "has not passed",
+        ),
         # `RUN_MAX_S` is the bound on a run that publishes nothing this can
         # read — and the verdict is still printed, because a run nobody waited
         # out has its artifacts as the only account of what it was doing.
@@ -3863,7 +3903,7 @@ def _run_chained(
             "still running after 2s",
         ),
     ],
-    ids=["drained", "gate-tore-it-down", "overran"],
+    ids=["drained", "undersized-then-drained", "gate-tore-it-down", "gate-breached", "overran"],
 )
 def test_a_chained_run_ends_when_the_run_does(
     tmp_path: Path, states: list[str], environment: dict[str, str], drivers: list[str], status: int, said: str | None
@@ -3891,6 +3931,58 @@ def test_a_teardown_that_did_not_converge_is_a_code_of_its_own(tmp_path: Path) -
     assert run.result.returncode == 6, run.result.stdout + run.result.stderr
     assert run.drivers() == ["stage", "launch", "gate", "teardown", "finish"], run.calls
     assert "scripts/teardown.sh " in run.result.stderr, run.result.stderr
+
+
+@needs_shell_tools
+def test_an_external_chained_run_waits_before_it_launches(tmp_path: Path) -> None:
+    """Both forms of the wait, on the tier that is the primary contract.
+
+    Launching before the engine is consuming loses the head of the offer, and
+    the run is then scored as having lost those rows — so an external run has
+    to hold between staging and the launch, and a file is what an unattended
+    one holds on.
+    """
+    ready = tmp_path / "engine-ready"
+    ready.touch()
+    waited = _run_chained(
+        tmp_path / "with-a-file",
+        ["--external-ready-file", str(ready)],
+        ["drained"],
+        engine="external",
+    )
+    assert waited.result.returncode == 0, waited.result.stdout + waited.result.stderr
+    assert waited.drivers() == ["stage", "launch", "gate", "teardown", "finish"], waited.calls
+    assert f"for {ready} to appear" in waited.result.stderr, waited.result.stderr
+
+    # Nothing attached to answer, which is the newline form's own end: staged
+    # and deliberately not launched, rather than launched into an engine that
+    # may not be there.
+    asked = _run_chained(tmp_path / "on-stdin", [], ["drained"], engine="external")
+    assert asked.result.returncode == 1, asked.result.stdout + asked.result.stderr
+    assert asked.drivers() == ["stage"], asked.calls
+    assert "--external-ready-file is the unattended form" in asked.result.stderr, asked.result.stderr
+
+
+@needs_shell_tools
+def test_external_ready_file_is_refused_before_a_managed_run_is_staged(tmp_path: Path) -> None:
+    """Because staging a managed run starts a fleet, which a refusal would leave up."""
+    run = _run_chained(tmp_path, ["--external-ready-file", str(tmp_path / "never")], ["drained"])
+    assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+    assert run.calls == [], "a fleet was started for a run that was refused"
+    assert "applies to an external run" in run.result.stderr, run.result.stderr
+
+
+def test_the_breach_count_run_defaults_to_is_the_one_the_gate_defaults_to() -> None:
+    """`run.sh` compares a breach count as well as passing one, so it resolves its own.
+
+    Left to `gate.sh`'s default, the number the loop reads the count against
+    would be a second copy of it, and a change to one would silently make the
+    loop wait for a threshold the gate had already acted on.
+    """
+    chained = re.search(r'^BREACHES="\$\{BREACHES:-(\d+)\}"$', RUN.read_text(), re.M)
+    gated = re.search(r"^BREACHES_REQUIRED=(\d+)$", GATE.read_text(), re.M)
+    assert chained and gated, "one of the two drivers no longer states a breach default"
+    assert chained.group(1) == gated.group(1), "run.sh and gate.sh disagree about how many breaches to wait for"
 
 
 @needs_shell_tools

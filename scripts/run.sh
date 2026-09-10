@@ -14,9 +14,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=scripts/_k8s.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 
-# How long the whole run may take before this stops waiting on it. Two hours:
-# the shipped runs offer for an hour, and the staging, placement and drain
-# around one add tens of minutes.
+# How long the offer may take before this stops waiting on it, counted from
+# the launch rather than from the start. Two hours: the shipped runs offer for
+# an hour, and the placement and the drain around one add tens of minutes.
 RUN_MAX_S="${RUN_MAX_S:-7200}"
 # How long `--external-ready-file` is waited on. Half an hour, three times the
 # smoke's, because standing a fleet up by hand on a cluster is slower than
@@ -49,7 +49,8 @@ drivers below take — each is in that driver's own --help.
 It prints `run_id: <id>` as soon as staging returns.
 
 Exit codes: finish.sh's own, 0 only on `run_valid: true`; 6 when the teardown
-did not converge, so the fleet may still be running; 2 for an argument error.
+did not converge, so the fleet may still be running; 2 for an argument error;
+1 for a refusal, an overrun among them.
 USAGE
 }
 
@@ -117,12 +118,16 @@ done
 }
 
 # Both counts are checked here rather than where they are used: the interval is
-# a `sleep` argument and the breach count is gate.sh's, so a typo in either
+# a `sleep` argument and the breach count reaches gate.sh, so a typo in either
 # would otherwise surface a minute after a fleet was already running.
 [[ $GATE_INTERVAL_S =~ ^[1-9][0-9]*$ ]] ||
 	die "--gate-interval-s takes a number of seconds, and was given '$GATE_INTERVAL_S'"
 [[ -z $BREACHES || $BREACHES =~ ^[1-9][0-9]*$ ]] ||
 	die "--breaches takes a count of consecutive verdicts, and was given '$BREACHES'"
+# Defaulted here and always passed, because the loop below compares against it
+# as well: left to gate.sh's own default, the number this reads a breach count
+# against would be a second copy of it. A test holds the two to each other.
+BREACHES="${BREACHES:-3}"
 
 # The union of what the five drivers need, so a missing one is refused before
 # anything is created.
@@ -185,14 +190,24 @@ fi
 # 2. Launch
 # ---------------------------------------------------------------------------
 
-"$REPO_ROOT/scripts/launch.sh" "$RUN_ID" "${COMMON[@]}"
+LAUNCH_STATUS=0
+"$REPO_ROOT/scripts/launch.sh" "$RUN_ID" "${COMMON[@]}" || LAUNCH_STATUS=$?
+if ((LAUNCH_STATUS != 0)); then
+	# Named rather than done: launch.sh's own refusals point at pod events, and
+	# a teardown deletes the pods carrying them.
+	log "$RUN_ID is staged and its fleet is billing; stop it with scripts/teardown.sh $RUN_ID once the lines above have been read"
+	exit "$LAUNCH_STATUS"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Judge it while it goes
 # ---------------------------------------------------------------------------
 
-GATE_ARGS=("$RUN_ID" "${COMMON[@]}" --teardown)
-[[ -z $BREACHES ]] || GATE_ARGS+=(--breaches "$BREACHES")
+GATE_ARGS=("$RUN_ID" "${COMMON[@]}" --teardown --breaches "$BREACHES")
+# gate.sh keeps its count of consecutive non-PASS verdicts beside the run,
+# because each tick is its own process, and rewrites it on every non-PASS tick
+# after checking that it holds a count — which is the tick this reads it on.
+BREACH_FILE="$RUN_DIR/gate-breaches"
 
 TORN_DOWN=0
 OVERRAN=0
@@ -213,14 +228,24 @@ while :; do
 	# repeat — a driver that exited on one tick would undo that.
 	GATE_STATUS=0
 	"$REPO_ROOT/scripts/gate.sh" "${GATE_ARGS[@]}" || GATE_STATUS=$?
-	log "the gate exited $GATE_STATUS (0 PASS, 3 UNDERSIZED, 5 VOID)"
+	log "the gate exited $GATE_STATUS (0 PASS, 3 UNDERSIZED, 5 VOID, 1 nothing published to judge yet)"
 
-	# Only teardown.sh writes this document, so it is the one local sign that
-	# the gate has torn the run down — and tearing it down twice would fail on
-	# a topic that is already dropped.
+	# Written only by teardown.sh, and only where it got as far as reading the
+	# table — so it is what says a second teardown would be a Job and a minute
+	# for nothing.
 	if [[ -f $RUN_DIR/$METADATA_FINAL_FILE ]]; then
 		log "the gate tore $RUN_ID down"
 		TORN_DOWN=1
+		break
+	fi
+
+	# That marker is sufficient but not necessary: teardown.sh skips it for a
+	# table that was absent or a metadata copy that failed. So a breach count at
+	# the threshold leaves the loop without claiming the teardown converged, and
+	# teardown.sh runs again below — its deletes ignore what is absent and
+	# drop-topic is idempotent, so a second one converges.
+	if ((GATE_STATUS != 0)) && [[ -f $BREACH_FILE ]] && (($(cat "$BREACH_FILE") >= BREACHES)); then
+		log "the gate has not passed $RUN_ID for $BREACHES ticks, so it has torn it down"
 		break
 	fi
 

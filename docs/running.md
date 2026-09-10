@@ -106,8 +106,15 @@ sequence below: it judges the run every `--gate-interval-s` seconds (60) until
 the scorer's `state` stops being `running`, tears it down, and exits with
 `finish.sh`'s status — or 6, a code no other driver uses, when the teardown did
 not converge and the fleet may still be running. `RUN_MAX_S` bounds how long it
-waits — two hours, after which it tears the run down, prints what the artifacts
-say and refuses.
+waits from the launch — two hours, after which it tears the run down, prints
+what the artifacts say and refuses.
+
+It always gates with `--teardown`, so a fleet that has not passed for
+`--breaches` ticks (3) is destroyed mid-run; `run.sh` then reads the verdict
+instead of tearing the run down a second time. A launch that fails leaves the
+fleet up on purpose — `launch.sh`'s refusals point at pod events a teardown
+would delete — and the line it prints names `scripts/teardown.sh <run_id>`.
+
 `--publish` and `--variant` are `finish.sh`'s; `--breaches` is `gate.sh`'s. An
 `engine: external` spec waits after staging for `--external-ready-file <path>`
 to appear, or for a newline on stdin.
