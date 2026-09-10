@@ -27,6 +27,7 @@ from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
+from ingest_bench.specs.env import PLACEHOLDER_FORM, has_placeholder
 from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
 from ingest_bench.specs.model import KubernetesConfig, RunSpec, SiteConfig
 
@@ -481,6 +482,18 @@ def render_conf(spec: RunSpec, site: SiteConfig, derived: Derived) -> dict[str, 
     # Last, so a run can override any setting above without this module growing
     # a knob for it.
     conf.update(knobs.extra_spark_conf)
+    # A Spark setting is read by the framework and never by this harness's own
+    # code, so nothing substitutes a reference in one: it would reach the
+    # catalog as the six literal characters `${env:`. The Kafka source's
+    # options are the resolvable half — they travel in `job.json`, which the
+    # job reads — so a credential belongs in site.kafka.security, and a
+    # reference anywhere in this conf is refused rather than rendered.
+    referenced = sorted(key for key, value in conf.items() if has_placeholder(value))
+    if referenced:
+        raise ValueError(
+            f"a Spark run renders {referenced} as Spark settings, and nothing resolves a "
+            f"{PLACEHOLDER_FORM} in one; a credential the job can resolve goes in site.kafka.security"
+        )
     return conf
 
 
@@ -651,6 +664,22 @@ def _region_env(cluster: KubernetesConfig) -> list[dict[str, str]]:
     return [{"name": name, "value": cluster.aws_region} for name in ("AWS_REGION", "AWS_DEFAULT_REGION")]
 
 
+def _secret_env_from(cluster: KubernetesConfig) -> list[dict[str, object]]:
+    """The Secret the fleet reads its environment from, as its own copy.
+
+    What the job resolves the rendered document's `${env:NAME}` references
+    against: `job.json` reaches a pod through a ConfigMap and the run's prefix
+    in the bucket, so it holds the reference and this Secret holds the value.
+    Both halves of the fleet get it — the executors open the Kafka source and
+    the driver commits — and a copy per caller, like the mount and the
+    placement above, because one list reached twice renders as an anchor and
+    an alias.
+    """
+    if cluster.secret_name is None:
+        return []
+    return [{"secretRef": {"name": cluster.secret_name}}]
+
+
 def render_sparkapplication(
     spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, image_tag: str
 ) -> str:
@@ -692,6 +721,9 @@ def render_sparkapplication(
     if cluster.aws_region is not None:
         driver["env"] = _region_env(cluster)
         executor["env"] = _region_env(cluster)
+    if cluster.secret_name is not None:
+        driver["envFrom"] = _secret_env_from(cluster)
+        executor["envFrom"] = _secret_env_from(cluster)
     document: dict[str, object] = {
         "apiVersion": "sparkoperator.k8s.io/v1beta2",
         "kind": "SparkApplication",

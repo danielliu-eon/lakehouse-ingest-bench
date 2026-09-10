@@ -388,6 +388,7 @@ def _cluster() -> model.KubernetesConfig:
         service_account_annotations={},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",
+        secret_name=None,
         node_selector={"bench-pool": "engine"},
         tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
     )
@@ -665,3 +666,57 @@ def test_fleet(meta: metadata.CorpusMetadata) -> None:
         model.FleetRole("driver", 1, 2.0, 4.0, "c7g.4xlarge"),
         model.FleetRole("executor", 2, 2.0, 2.0, "c7g.4xlarge"),
     )
+
+
+def test_the_fleet_reads_the_secret_the_site_names_and_the_job_document_keeps_the_reference(
+    meta: metadata.CorpusMetadata, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Kafka credential reaches the job through its own container's environment.
+
+    `job.json` travels: it is a ConfigMap both halves of the fleet mount and a
+    file in the run's prefix in the bucket. So it names the variable, both
+    halves are given the Secret that holds it, and the job resolves the one
+    against the other as it opens the source.
+    """
+    security = {**_MSK_SECURITY, "sasl.password": "${env:IB_KAFKA_PASSWORD}"}
+    site = replace(_aws_site(), kafka_security=security, kubernetes=replace(_cluster(), secret_name="bench-env"))
+    d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+
+    document = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))
+    for half in ("driver", "executor"):
+        assert document["spec"][half]["envFrom"] == [{"secretRef": {"name": "bench-env"}}], half
+
+    files = knobs.render(_spec(), site, d, meta, image_tag="t")
+    written = files[knobs.JOB_FILE]
+    assert '"kafka.sasl.password": "${env:IB_KAFKA_PASSWORD}"' in written
+    assert "hunter2" not in written
+    monkeypatch.setenv("IB_KAFKA_PASSWORD", "hunter2")
+    parsed = stream_to_iceberg.read_job(_written(files, knobs.JOB_FILE, tmp_path))
+    assert parsed.kafka_options["kafka.sasl.password"] == "hunter2"
+    # Nothing resolved is written back: the document on disk still names it.
+    assert '"kafka.sasl.password": "${env:IB_KAFKA_PASSWORD}"' in (tmp_path / knobs.JOB_FILE).read_text()
+
+
+def test_a_cluster_that_names_no_secret_gives_neither_half_an_env_from(meta: metadata.CorpusMetadata) -> None:
+    """Nothing referenced, nothing to mount: the key is absent rather than empty."""
+    site = _aws_site()
+    d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    document = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))
+    assert "envFrom" not in document["spec"]["driver"] and "envFrom" not in document["spec"]["executor"]
+
+
+def test_a_reference_spark_cannot_resolve_is_refused_rather_than_rendered(
+    meta: metadata.CorpusMetadata,
+) -> None:
+    """A Spark setting is read by the framework, and nothing substitutes one.
+
+    So a catalog credential written as a reference would reach the catalog as
+    the literal characters `${env:`. The resolvable half is the Kafka source's
+    options, which travel in `job.json` and which the job itself reads — and
+    the refusal says so.
+    """
+    props = {**_aws_site().catalog_props, "rest.token": "${env:IB_CATALOG_TOKEN}"}
+    site = replace(_aws_site(), catalog_props=props)
+    d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    with pytest.raises(ValueError, match=r"spark\.sql\.catalog\.ice\.rest\.token.*site\.kafka\.security"):
+        knobs.render_conf(_spec(), site, d)

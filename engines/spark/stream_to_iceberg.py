@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from engines.spark.env import substitute_env_values
+
 # Where the run's rendered files are mounted. Under `/opt/bench` beside the job
 # rather than at `/run`, which is the container's own runtime directory.
 RUN_DIR = Path("/opt/bench/run")
@@ -89,6 +91,9 @@ def read_job(path: Path) -> Job:
     Every key is read by name and none has a default: a key the renderer
     stopped writing has to surface here rather than as a job that quietly
     consumed from the wrong offset or committed to no table.
+
+    A ``${env:NAME}`` among the source's options is resolved against this
+    container's environment, which is where the Secret the site names arrives.
     """
     loaded = json.loads(path.read_text())
     if not isinstance(loaded, dict):
@@ -107,7 +112,12 @@ def read_job(path: Path) -> Job:
         value_encoding=_str_at(document, "value_encoding", path),
         table=_str_at(document, "table", path),
         columns=tuple(str(name) for name in cast(list[object], columns)),
-        kafka_options=_string_map_at(document, "kafka_options", path),
+        # The source's options are the ones a site can put a credential in, so
+        # the document holds `${env:NAME}` and the value is read here, from
+        # this container's own environment. Nothing resolved is written back:
+        # the document reached this pod through a ConfigMap and is in the run's
+        # prefix in the bucket, and both keep the reference.
+        kafka_options=substitute_env_values(_string_map_at(document, "kafka_options", path)),
         write_options=_string_map_at(document, "write_options", path),
         trigger_interval=_str_at(document, "trigger_interval", path),
         max_offsets_per_trigger=limit,

@@ -18,7 +18,10 @@ catalog:
 kubernetes: {}                      # empty means no cluster, and everything runs where it is started. A
                                     # cluster sets context, namespace, harness_service_account,
                                     # flink_service_account and registry, and may add aws_region,
+                                    # secret_name (the Secret every pod reads ${env:NAME} from),
                                     # service_account_annotations, node_selector and tolerations.
+                                    # A cluster refuses a written-out credential above; see
+                                    # "Credentials" in docs/running.md.
 pricing:
   vcpu_hour_usd: 0.0
   gib_hour_usd: 0.0

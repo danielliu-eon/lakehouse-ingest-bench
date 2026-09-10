@@ -37,6 +37,10 @@ kubernetes:
   service_account_annotations: {}      # only for IRSA users; Pod Identity needs none
   registry: YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
   aws_region: YOUR_REGION              # rendered as AWS_REGION on every pod
+  # The Secret in `namespace` whose keys become environment variables on every
+  # pod a run creates. Only needed where a property is written ${env:NAME};
+  # see "Credentials" in docs/running.md for the one command that creates it.
+  # secret_name: bench-env
   node_selector: {}
   tolerations: []
 pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}

@@ -24,9 +24,41 @@ from collections.abc import Mapping
 # exist, so it may import nothing but the standard library.
 PLACEHOLDER_RE = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 
+# The form a refusal points an operator at, spelled once so the message and
+# the pattern above cannot drift apart.
+PLACEHOLDER_FORM = "${env:NAME}"
+
+# A property whose name contains one of these carries a credential. The name
+# and not the value, because no rule over values can tell a token from a
+# hostname — and this is asked before anything has been done with either.
+SECRET_HINTS = ("token", "credential", "secret", "password", "auth_user_info")
+
 
 def has_placeholder(value: str) -> bool:
     return PLACEHOLDER_RE.search(value) is not None
+
+
+def names_a_secret(key: str) -> bool:
+    return any(hint in key.lower() for hint in SECRET_HINTS)
+
+
+def refuse_literal_secrets(values: Mapping[str, str], where: str) -> None:
+    """Refuse a credential written out where only a reference may go.
+
+    Client properties reach a pod as a rendered file or a command line, and
+    both of those are applied as a ConfigMap and uploaded to the run's prefix
+    in the bucket. A literal there is a credential in object storage and in a
+    namespace-readable object for as long as either lives, which no later
+    redaction undoes. A reference travels safely: it names the variable and the
+    process that uses the property reads it from its own environment.
+    """
+    literal = sorted(key for key, value in values.items() if names_a_secret(key) and not has_placeholder(value))
+    if literal:
+        raise ValueError(
+            f"{where} writes {literal} out in full, and a run on a cluster renders those into a ConfigMap and "
+            f"uploads them to the runs prefix; write {PLACEHOLDER_FORM} instead and put the value in the Secret "
+            "site.kubernetes.secret_name declares"
+        )
 
 
 def _substituted(key: str, value: str) -> str:

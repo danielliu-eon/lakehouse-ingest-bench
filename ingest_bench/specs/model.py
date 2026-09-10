@@ -20,6 +20,7 @@ import yaml
 
 from ingest_bench.kafka_auth import refuse_mechanism_alias
 from ingest_bench.specs import engines
+from ingest_bench.specs.env import refuse_literal_secrets
 
 # A run's name reaches a Kafka topic, an Iceberg table name and a Kubernetes
 # object name, so it is restricted to what all three accept.
@@ -69,6 +70,7 @@ _KUBERNETES_KEYS = frozenset(
         "service_account_annotations",
         "registry",
         "aws_region",
+        "secret_name",
         "node_selector",
         "tolerations",
     }
@@ -453,6 +455,13 @@ class KubernetesConfig:
     ``aws_region`` is absent on a cluster that is not on AWS. Where it is set it
     reaches every pod as ``AWS_REGION``, which is what an AWS SDK reads when
     nothing else names a region for it.
+
+    ``secret_name`` names a Kubernetes Secret in ``namespace`` whose every key
+    becomes an environment variable on every pod a run creates — the harness's
+    Jobs and the engine's fleet alike. It is how a ``${env:NAME}`` in this file
+    is answered: the reference travels through ConfigMaps and command lines,
+    and the value it names exists only in that Secret and in this file. Absent
+    where no property references a variable.
     """
 
     context: str
@@ -463,6 +472,7 @@ class KubernetesConfig:
     service_account_annotations: dict[str, str]
     registry: str
     aws_region: str | None
+    secret_name: str | None
     node_selector: dict[str, str]
     tolerations: list[dict[str, str]]
 
@@ -544,6 +554,14 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
         aws_region = _as_str(block["aws_region"], f"{where}.aws_region")
         if not aws_region:
             raise ValueError(f"{where}.aws_region is empty; leave the key out where there is no AWS region")
+    # Same shape, same reason: an empty name renders an `envFrom` naming no
+    # Secret, which the API server refuses when the Job is applied rather than
+    # here, where the file that asked for it is still in hand.
+    secret_name: str | None = None
+    if "secret_name" in block:
+        secret_name = _as_str(block["secret_name"], f"{where}.secret_name")
+        if not secret_name:
+            raise ValueError(f"{where}.secret_name is empty; leave the key out where no property names a variable")
     return KubernetesConfig(
         context=_as_str(_required(block, "context", where), f"{where}.context"),
         namespace=_as_str(_required(block, "namespace", where), f"{where}.namespace"),
@@ -561,6 +579,7 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
         else _as_string_map(block["service_account_annotations"], f"{where}.service_account_annotations"),
         registry=_as_str(_required(block, "registry", where), f"{where}.registry"),
         aws_region=aws_region,
+        secret_name=secret_name,
         node_selector={}
         if "node_selector" not in block
         else _as_string_map(block["node_selector"], f"{where}.node_selector"),
@@ -609,15 +628,30 @@ def load_site(path: Path) -> SiteConfig:
     pricing = _as_mapping(_required(raw, "pricing", "site"), "site.pricing")
     _refuse_unknown(pricing, frozenset({"vcpu_hour_usd", "gib_hour_usd"}), "site.pricing")
 
+    catalog_props = _as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props")
+    kubernetes = _kubernetes_config(raw)
+    registry = _schema_registry_config(kafka)
+    # Only where there is a cluster. A site with none is the local stack, whose
+    # credentials are a container image's published defaults and stay on the
+    # machine that ran it; a run on a cluster renders these into a ConfigMap
+    # and uploads them to the bucket, which a literal must not survive.
+    if kubernetes is not None:
+        refuse_literal_secrets(security, "site.kafka.security")
+        refuse_literal_secrets(catalog_props, "site.catalog.props")
+        if registry is not None and registry.basic_auth_user_info is not None:
+            refuse_literal_secrets(
+                {"basic_auth_user_info": registry.basic_auth_user_info}, "site.kafka.schema_registry"
+            )
+
     return SiteConfig(
         corpus_root=_as_str(_required(raw, "corpus_root", "site"), "site.corpus_root"),
         runs_root=_as_str(_required(raw, "runs_root", "site"), "site.runs_root"),
         warehouse=_as_str(_required(raw, "warehouse", "site"), "site.warehouse"),
         kafka_bootstrap=_as_str(_required(kafka, "bootstrap_servers", "site.kafka"), "site.kafka.bootstrap_servers"),
         kafka_security=security,
-        schema_registry=_schema_registry_config(kafka),
-        catalog_props=_as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props"),
-        kubernetes=_kubernetes_config(raw),
+        schema_registry=registry,
+        catalog_props=catalog_props,
+        kubernetes=kubernetes,
         pricing_vcpu_hour_usd=_as_float(
             _required(pricing, "vcpu_hour_usd", "site.pricing"), "site.pricing.vcpu_hour_usd"
         ),

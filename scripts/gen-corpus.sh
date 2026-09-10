@@ -138,6 +138,7 @@ k8s_render_apply deploy/k8s/corpus-gen-job.yaml.tmpl \
 	"COMMAND=$GEN_COMMAND" \
 	"COUNT=$SHARDS" \
 	"ENV=$JOB_ENV" \
+	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 k8s_wait_job "$GEN_JOB" "$GEN_WAIT_S"
@@ -200,6 +201,7 @@ k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"IMAGE=$IMAGE" \
 	"COMMAND=$MERGE_COMMAND" \
 	"ENV=$JOB_ENV" \
+	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 k8s_wait_job "$MERGE_JOB" "$MERGE_WAIT_S"

@@ -215,6 +215,7 @@ def test_the_kubernetes_block_loads_a_cluster(tmp_path: Path) -> None:
         service_account_annotations={"example.com/role": "arn"},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",
+        secret_name=None,
         node_selector={"kubernetes.io/arch": "amd64"},
         tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
     )
@@ -274,6 +275,83 @@ def test_the_kubernetes_block_refuses_what_it_does_not_recognise(tmp_path: Path)
     ):
         with pytest.raises(ValueError, match=message):
             model.load_site(_cluster_site(tmp_path, cluster))
+
+
+def test_the_cluster_names_the_secret_its_pods_read(tmp_path: Path) -> None:
+    """One optional name, which is how a `${env:NAME}` in the file is answered.
+
+    Absent where nothing references a variable; never empty, because an
+    `envFrom` naming no Secret is refused by the API server at apply time
+    instead of here, where the file that asked for it is still in hand.
+    """
+    absent = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
+    assert absent is not None and absent.secret_name is None
+    named = model.load_site(_cluster_site(tmp_path, {**CLUSTER, "secret_name": "ingest-bench-env"})).kubernetes
+    assert named is not None and named.secret_name == "ingest-bench-env"
+    with pytest.raises(ValueError, match="secret_name is empty"):
+        model.load_site(_cluster_site(tmp_path, {**CLUSTER, "secret_name": ""}))
+
+
+def test_a_cluster_site_refuses_a_credential_it_would_render_into_the_cluster(tmp_path: Path) -> None:
+    """A run on a cluster renders these properties into a ConfigMap and the bucket.
+
+    So a literal is refused where a reference is the only safe form, and the
+    refusal names the key and the form. A site with no cluster is the local
+    stack: its credentials are an image's published defaults and never leave
+    the machine, so the same value loads there.
+    """
+    path = tmp_path / "site.yaml"
+
+    def written(kafka: str = "", catalog: str = "", cluster: dict[str, object] | None = None) -> Path:
+        path.write_text(
+            "corpus_root: /tmp/c\nruns_root: /tmp/r\nwarehouse: /tmp/w\n"
+            f"kafka: {{bootstrap_servers: 'localhost:9092', security: {{{kafka}}}}}\n"
+            f"catalog: {{props: {{type: sql{catalog}}}}}\n"
+            "pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}\n"
+            + yaml.safe_dump({"kubernetes": {} if cluster is None else cluster})
+        )
+        return path
+
+    on_cluster = dict(CLUSTER)
+    with pytest.raises(ValueError, match=r"sasl\.password.*\$\{env:NAME\}"):
+        model.load_site(written(kafka="sasl.password: hunter2", cluster=on_cluster))
+    with pytest.raises(ValueError, match=r"rest\.token.*secret_name"):
+        model.load_site(written(catalog=", rest.token: abc123", cluster=on_cluster))
+    # A reference is what the cluster path takes, and it stays as it was written.
+    referenced = model.load_site(
+        written(kafka="sasl.password: '${env:IB_PASSWORD}'", cluster={**on_cluster, "secret_name": "env"})
+    )
+    assert referenced.kafka_security["sasl.password"] == "${env:IB_PASSWORD}"
+    # The same literal, with no cluster to render it into.
+    local = model.load_site(written(kafka="sasl.password: hunter2"))
+    assert local.kafka_security["sasl.password"] == "hunter2"
+
+
+def test_a_cluster_site_refuses_a_registry_credential_written_out(tmp_path: Path) -> None:
+    """The registry's `user:password` is the same rule, under a key of its own.
+
+    It reaches a Flink source as a format option and a Spark job as nothing at
+    all, so where it is written out in full it lands in the ConfigMap that
+    carries the rendered script.
+    """
+    path = tmp_path / "site.yaml"
+
+    def written(user_info: str, cluster: dict[str, object]) -> Path:
+        path.write_text(
+            "corpus_root: /tmp/c\nruns_root: /tmp/r\nwarehouse: /tmp/w\n"
+            "kafka:\n  bootstrap_servers: 'localhost:9092'\n  schema_registry:\n"
+            "    url: http://registry:8080/apis/ccompat/v7\n"
+            f"    basic_auth_user_info: '{user_info}'\n"
+            "catalog: {props: {type: sql}}\n"
+            "pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}\n" + yaml.safe_dump({"kubernetes": cluster})
+        )
+        return path
+
+    with pytest.raises(ValueError, match=r"basic_auth_user_info.*\$\{env:NAME\}"):
+        model.load_site(written("svc:hunter2", dict(CLUSTER)))
+    loaded = model.load_site(written("${env:IB_REGISTRY_AUTH}", {**CLUSTER, "secret_name": "env"}))
+    assert loaded.schema_registry is not None
+    assert loaded.schema_registry.basic_auth_user_info == "${env:IB_REGISTRY_AUTH}"
 
 
 def test_derive_ids() -> None:
@@ -633,7 +711,10 @@ def test_stage_refuses_a_cluster_run_with_no_image_tag(tmp_path: Path, corpus: t
     with pytest.raises(ValueError, match="image-tag"):
         stage.stage(
             ROOT / "runs" / "smoke-flink.yaml",
-            _site_file(tmp_path, corpus_root, cluster=dict(CLUSTER)),
+            # A reference and not the fixture's literal: a site declaring a
+            # cluster renders its properties into a ConfigMap, and a written-out
+            # credential is refused there before anything else is read.
+            _site_file(tmp_path, corpus_root, cluster=dict(CLUSTER), token="${env:IB_TEST_CATALOG_TOKEN}"),
             tmp_path / "runs",
             admin,
             stamp="20260908T191000Z",

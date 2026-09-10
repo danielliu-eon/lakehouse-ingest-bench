@@ -702,6 +702,12 @@ def render_flinkdeployment(
         container["env"] = [
             {"name": name, "value": cluster.aws_region} for name in ("AWS_REGION", "AWS_DEFAULT_REGION")
         ]
+    if cluster.secret_name is not None:
+        # What the submitter resolves the script's `${env:NAME}` references
+        # against. The rendered script and settings hold the reference — they
+        # travel through a ConfigMap and the run's prefix in the bucket — and
+        # the value exists only in this Secret.
+        container["envFrom"] = [{"secretRef": {"name": cluster.secret_name}}]
     pod_spec: dict[str, object] = {
         "nodeSelector": {**cluster.node_selector, **_ARCH_PIN},
         "tolerations": cluster.tolerations,

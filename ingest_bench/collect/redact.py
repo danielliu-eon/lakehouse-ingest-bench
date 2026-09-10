@@ -19,20 +19,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from ingest_bench.specs.env import has_placeholder
+from ingest_bench.specs.env import has_placeholder, names_a_secret
 from ingest_bench.specs.model import SiteConfig
 
 REDACTED = "<redacted>"
 
-# A property whose name contains one of these carries a credential. Matching on
-# the name rather than the value is what keeps a run directory publishable:
-# `facts.json` is meant to be pasted into an issue or an engine's config, and a
-# catalog token is the one thing in it that must not travel.
-_SECRET_HINTS = ("token", "credential", "secret", "password")
-
-
-def _names_a_secret(key: str) -> bool:
-    return any(hint in key.lower() for hint in _SECRET_HINTS)
+# Which property names carry a credential is `specs.env`'s answer, because the
+# refusal that keeps a literal off a cluster and the redaction that keeps one
+# out of a published document have to agree about what a credential is.
+# Matching on the name rather than the value is what keeps a run directory
+# publishable: `facts.json` is meant to be pasted into an issue or an engine's
+# config, and a catalog token is the one thing in it that must not travel.
 
 
 def _roots(site: SiteConfig) -> list[tuple[str, str]]:
@@ -93,7 +90,7 @@ def redact_props(props: Mapping[str, str], site: SiteConfig | None) -> dict[str,
     """
     redacted: dict[str, str] = {}
     for key, value in props.items():
-        if _names_a_secret(key) and not has_placeholder(value):
+        if names_a_secret(key) and not has_placeholder(value):
             redacted[key] = REDACTED
         else:
             redacted[key] = value if site is None else redact_uri(value, site)

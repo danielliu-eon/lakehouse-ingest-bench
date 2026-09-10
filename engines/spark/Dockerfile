@@ -59,6 +59,6 @@ RUN chown spark:spark /opt/spark/jars/*.jar && chmod 644 /opt/spark/jars/*.jar
 # carry.
 ENV PYTHONPATH=/opt/bench
 COPY engines/__init__.py /opt/bench/engines/
-COPY engines/spark/__init__.py engines/spark/stream_to_iceberg.py /opt/bench/engines/spark/
+COPY engines/spark/__init__.py engines/spark/env.py engines/spark/stream_to_iceberg.py /opt/bench/engines/spark/
 USER spark
 WORKDIR /opt/spark

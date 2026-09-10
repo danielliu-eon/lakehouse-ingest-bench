@@ -969,6 +969,7 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
         service_account_annotations={},
         registry="123456789012.dkr.ecr.eu-west-1.amazonaws.com",
         aws_region="eu-west-1",
+        secret_name=None,
         node_selector={},
         tolerations=[],
     )
@@ -1003,6 +1004,84 @@ def test_the_job_env_names_the_region_under_both_names_an_sdk_reads(tmp_path: Pa
     out = subprocess.run(["bash", "-c", program], cwd=REPO_ROOT, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     expected = [] if region is None else [{"name": name, "value": region} for name in REGION_ENV_NAMES]
+    assert json.loads(out.stdout) == expected
+
+
+def _site_reader(site_file: Path, call: str) -> subprocess.CompletedProcess[str]:
+    """One of `_k8s.sh`'s site readers, run against ``site_file``, its stdout captured."""
+    program = "\n".join(
+        [
+            "set -euo pipefail",
+            "PREREQ_DOC=deploy/aws/README.md",
+            "source scripts/_lib.sh",
+            f"SITE_FILE={site_file}",
+            "source scripts/_k8s.sh",
+            call,
+        ]
+    )
+    return subprocess.run(["bash", "-c", program], cwd=REPO_ROOT, capture_output=True, text=True)
+
+
+@needs_shell_tools
+def test_a_sites_reference_reaches_a_pods_python_as_the_site_wrote_it(tmp_path: Path) -> None:
+    """A `${env:NAME}` has to survive the shell that splits a Job's command line.
+
+    The image's entrypoint is `/bin/sh -c`, so the whole command reaches a pod
+    as one string that shell expands. Unquoted, dash refuses the form outright
+    and a POSIX-mode bash expands it to nothing — either way the process that
+    was meant to resolve it never sees it. Single-quoted, it arrives as the
+    characters the site wrote, which is what `resolve_env_placeholders` reads.
+    """
+    reference = "${env:IB_KAFKA_PASSWORD}"
+    site_file = tmp_path / "site.yaml"
+    site_file.write_text(
+        _filled_site().replace(
+            "    aws.region:",
+            f"    sasl.password: '{reference}'\n    sasl.username: 'a user with spaces'\n    aws.region:",
+        )
+    )
+    # A stand-in for the harness command, printing one argument per line, so
+    # what is asserted is what the Python process is handed.
+    stubs = _stub_bin(tmp_path / "bin", {"produce": 'printf "%s\\n" "$@"'})
+    # Built the way `launch.sh` builds it, then handed to `sh -c` as one
+    # string — which is how the image's entrypoint runs it.
+    built = _site_reader(
+        site_file,
+        f'PATH="{stubs}:$PATH"\nCOMMAND="produce$(site_flags \'.kafka.security\' --kafka-prop)"\nsh -c "$COMMAND"',
+    )
+    assert built.returncode == 0, built.stderr
+    printed = built.stdout.splitlines()
+    assert f"sasl.password={reference}" in printed, printed
+    assert "sasl.username=a user with spaces" in printed, printed
+
+
+@needs_shell_tools
+def test_a_property_a_single_quote_cannot_carry_is_refused_by_name(tmp_path: Path) -> None:
+    """The one value single-quoting cannot make opaque, refused where the file is read."""
+    site_file = tmp_path / "site.yaml"
+    site_file.write_text(_filled_site().replace("    aws.region:", '    sasl.password: "it\'s"\n    aws.region:'))
+    refused = _site_reader(site_file, "site_flags '.kafka.security' --kafka-prop")
+    assert refused.returncode != 0
+    assert "single quote" in refused.stderr, refused.stderr
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("secret", ["ingest-bench-env", None])
+def test_the_env_a_pod_reads_a_secret_from_is_the_one_the_site_names(tmp_path: Path, secret: str | None) -> None:
+    """One Secret for the site, or an empty list where the site names none.
+
+    A key per property would be a statement, in this harness, of which of an
+    operator's properties hold credentials. A Secret's keys are already a set
+    of variable names, which is exactly what a `${env:NAME}` names.
+    """
+    site_file = tmp_path / "site.yaml"
+    site = _filled_site()
+    if secret is not None:
+        site = site.replace("  aws_region:", f"  secret_name: {secret}\n  aws_region:")
+    site_file.write_text(site)
+    out = _site_reader(site_file, "site_env_from_json")
+    assert out.returncode == 0, out.stderr
+    expected = [] if secret is None else [{"secretRef": {"name": secret}}]
     assert json.loads(out.stdout) == expected
 
 
@@ -1742,8 +1821,10 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--idle-stop-s 600 --publish-shards 1" in scorer
     # Every catalog property the site declares, because the scorer reads the
     # table itself and no site config reaches a pod.
-    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in scorer
-    assert "--catalog-prop warehouse=123456789012" in scorer
+    # Quoted, because a pod's shell splits this line: an unquoted value
+    # would lose a `${env:NAME}` reference before Python could resolve it.
+    assert "--catalog-prop 'uri=https://glue.eu-west-1.amazonaws.com/iceberg'" in scorer
+    assert "--catalog-prop 'warehouse=123456789012'" in scorer
     # The spec's scoring keys, so the run scored is the run the spec asks for.
     assert "--warmup-s 60" in scorer and "--freshness-bound-s 60" in scorer
 
@@ -1753,8 +1834,8 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert f"--upload-prefix s3://a-bucket/runs/{RUN_ID}" in producer
     assert "--key-column user_id" in producer
     # The MSK IAM properties, the harness's own signing region among them.
-    assert "--kafka-prop security.protocol=SASL_SSL" in producer
-    assert "--kafka-prop aws.region=eu-west-1" in producer
+    assert "--kafka-prop 'security.protocol=SASL_SSL'" in producer
+    assert "--kafka-prop 'aws.region=eu-west-1'" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
 
@@ -1775,6 +1856,39 @@ def test_launch_offers_the_codec_the_spec_names(tmp_path: Path) -> None:
     assert run.result.returncode == 0, run.result.stderr
     producer = _job_command(run.applied[1])
     assert "--compression lz4" in producer
+
+
+@needs_shell_tools
+def test_the_jobs_a_launch_applies_name_a_credential_and_never_hold_one(tmp_path: Path) -> None:
+    """The whole of the secret path, end to end through the two Jobs a launch applies.
+
+    The site names a variable and the Secret that answers it. What is applied
+    has to carry the reference and the Secret's name and nothing else: the Job
+    documents are the objects a namespace-reader sees, and the same text is
+    what `stage` published into the run's prefix in the bucket.
+    """
+    reference = "${env:IB_KAFKA_PASSWORD}"
+    site = (
+        _filled_site()
+        .replace("    aws.region:", f"    sasl.password: '{reference}'\n    aws.region:")
+        .replace("  aws_region:", "  secret_name: bench-env\n  aws_region:")
+    )
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {}, site=site)
+
+    assert run.result.returncode == 0, run.result.stderr
+    for document in run.applied:
+        container = _mapping(_sequence(_pod_spec(document)["containers"])[0])
+        assert container["envFrom"] == [{"secretRef": {"name": "bench-env"}}]
+    producer = _job_command(_named_job(run, f"producer-{RUN_OBJECT}"))
+    assert f"--kafka-prop 'sasl.password={reference}'" in producer
+    # And nothing applied resolved it: only the pod's own process may.
+    assert "IB_KAFKA_PASSWORD}" in producer and "sasl.password=$" in producer
 
 
 @needs_shell_tools
@@ -1893,7 +2007,7 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     assert len(drop) == 1
     command = _job_command(drop[0])
     assert f"drop-topic --bootstrap {BOOTSTRAP} --topic {RUN_ID}" in command
-    assert "--kafka-prop security.protocol=SASL_SSL" in command
+    assert "--kafka-prop 'security.protocol=SASL_SSL'" in command
 
     # The catalog is addressed with every property the site declares.
     assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in metadata_calls.read_text()

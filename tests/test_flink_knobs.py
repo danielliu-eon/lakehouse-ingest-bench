@@ -337,6 +337,7 @@ def _cluster() -> model.KubernetesConfig:
         service_account_annotations={},
         registry="registry.example/ingest-bench",
         aws_region="eu-west-1",
+        secret_name=None,
         node_selector={"bench-pool": "engine"},
         tolerations=[{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
     )
@@ -609,3 +610,42 @@ def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.Corpu
         knobs.render_flinkdeployment(spec, local, d, meta, image_tag="t")
     with pytest.raises(ValueError, match="site.kubernetes"):
         knobs.render_job_configmap(spec, local, d, meta)
+
+
+def test_the_fleet_reads_the_secret_the_site_names_and_the_script_keeps_the_reference(
+    meta: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry credential reaches the engine through its container's environment.
+
+    The rendered script travels: it is a ConfigMap the pods mount and a file in
+    the run's prefix in the bucket. So it names the variable, the pod is given
+    the Secret that holds it, and the submitter resolves the one against the
+    other as it submits.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    spec = replace(spec, kafka=replace(spec.kafka, value_encoding="confluent"))
+    registry = model.SchemaRegistryConfig(url=REGISTRY_URL, basic_auth_user_info="${env:IB_REGISTRY_AUTH}")
+    site = replace(_aws_site(), schema_registry=registry, kubernetes=replace(_cluster(), secret_name="bench-env"))
+    d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+
+    document = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))
+    container = document["spec"]["podTemplate"]["spec"]["containers"][0]
+    assert container["envFrom"] == [{"secretRef": {"name": "bench-env"}}]
+
+    sql = knobs.render_sql(spec, site, d, meta)
+    assert "'avro-confluent.basic-auth.user-info' = '${env:IB_REGISTRY_AUTH}'" in sql
+    assert "'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'" in sql
+    # The submitter is what turns the reference into the value, and only in the
+    # text it submits: the file it read still names the variable.
+    monkeypatch.setenv("IB_REGISTRY_AUTH", "svc:hunter2")
+    assert "'avro-confluent.basic-auth.user-info' = 'svc:hunter2'" in script.substitute_env(sql)
+    assert "svc:hunter2" not in sql
+
+
+def test_a_cluster_that_names_no_secret_gives_its_container_no_env_from(meta: metadata.CorpusMetadata) -> None:
+    """Nothing referenced, nothing to mount: the key is absent rather than empty."""
+    spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
+    site = _aws_site()
+    d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
+    document = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))
+    assert "envFrom" not in document["spec"]["podTemplate"]["spec"]["containers"][0]

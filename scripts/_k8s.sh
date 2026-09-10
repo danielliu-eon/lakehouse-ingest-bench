@@ -102,11 +102,18 @@ site_pairs() {
 	printf '%s' "$entries"
 }
 
-# site_flags <yq path to a map> <flag> — ` <flag> key=value` per entry, on stdout.
+# site_flags <yq path to a map> <flag> — ` <flag> 'key=value'` per entry, on stdout.
 #
-# For a command line that reaches a Job as one string the image's shell splits,
-# so a value carrying whitespace would arrive as two arguments. Refused here
-# rather than reaching a client as a truncated property.
+# For a command line that reaches a Job as one string the image's shell splits.
+# Each pair is single-quoted, which is what makes it opaque to that shell:
+# whitespace arrives as one argument, and `${env:NAME}` arrives as the six
+# characters the site wrote rather than as a substitution. The second is the
+# point — a credential is a reference resolved by the Python process that uses
+# the property, and a shell that expanded or rejected the form first would
+# leave that process nothing to resolve.
+#
+# The one thing a single-quoted value cannot carry is a single quote, so that
+# is refused by name.
 site_flags() {
 	# Assigned before the loop reads it, and checked explicitly rather than
 	# through `set -e`. Two reasons, and both end the same way — an empty string
@@ -121,9 +128,9 @@ site_flags() {
 	local flags="" pair
 	while IFS= read -r pair; do
 		[[ -n $pair ]] || continue
-		[[ $pair != *[[:space:]]* ]] ||
-			die "$SITE_FILE sets ${1#.} entry '$pair', and whitespace in it cannot survive a Job's command line"
-		flags="$flags $2 $pair"
+		[[ $pair != *"'"* ]] ||
+			die "$SITE_FILE sets a ${1#.} entry holding a single quote, which cannot survive a Job's command line"
+		flags="$flags $2 '$pair'"
 	done <<<"$pairs"
 	printf '%s' "$flags"
 }
@@ -171,6 +178,23 @@ site_env_json() {
 	fi
 }
 
+# The Secret every Job's pod reads its environment from, as the `envFrom` list
+# the manifests take, or nothing where the site names none.
+#
+# One Secret for the whole site rather than a key per property: what a
+# `${env:NAME}` in the site config names is a variable, and a Secret's keys are
+# exactly a set of variable names. So the operator creates one Secret and the
+# harness carries no statement of which properties have credentials in them.
+site_env_from_json() {
+	local secret
+	secret="$(site_value '.kubernetes.secret_name')"
+	if [[ -z $secret ]]; then
+		printf '[]'
+	else
+		printf '[{"secretRef":{"name":"%s"}}]' "$secret"
+	fi
+}
+
 # Everything a Job-launching driver reads out of the site, as the globals the
 # render calls below take. One reader rather than one per driver: a driver that
 # read a different subset could apply a Job to one cluster and wait on another.
@@ -184,6 +208,7 @@ k8s_read_site() {
 	NODE_SELECTOR="$(site_json '.kubernetes.node_selector' '{}')"
 	TOLERATIONS="$(site_json '.kubernetes.tolerations' '[]')"
 	JOB_ENV="$(site_env_json)"
+	JOB_ENV_FROM="$(site_env_from_json)"
 }
 
 # The tag a driver's Jobs run at: the caller's, or this checkout's commit —

@@ -35,6 +35,7 @@ SAMPLE = {
     "IMAGE": "123456789012.dkr.ecr.eu-west-1.amazonaws.com/lakehouse-ingest-bench/harness:abc1234",
     "COMMAND": "gen-corpus --preset smoke --out s3://a-bucket/corpus/shards/$JOB_COMPLETION_INDEX --shard-count 4",
     "ENV": '[{"name": "AWS_REGION", "value": "eu-west-1"}, {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"}]',
+    "ENV_FROM": '[{"secretRef": {"name": "bench-env"}}]',
     "NODE_SELECTOR": '{"kubernetes.io/arch": "amd64"}',
     "TOLERATIONS": '[{"key": "a-taint", "operator": "Exists", "effect": "NoSchedule"}]',
     "COUNT": "4",
@@ -55,7 +56,17 @@ class Expectation:
 
 
 _ONE_OFF = frozenset(
-    {"NAME", "NAMESPACE", "SERVICE_ACCOUNT", "IMAGE", "COMMAND", "ENV", "NODE_SELECTOR", "TOLERATIONS"}
+    {
+        "NAME",
+        "NAMESPACE",
+        "SERVICE_ACCOUNT",
+        "IMAGE",
+        "COMMAND",
+        "ENV",
+        "ENV_FROM",
+        "NODE_SELECTOR",
+        "TOLERATIONS",
+    }
 )
 _INDEXED = _ONE_OFF | {"COUNT"}
 _MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
@@ -207,6 +218,9 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
         {"name": "AWS_REGION", "value": "eu-west-1"},
         {"name": "AWS_DEFAULT_REGION", "value": "eu-west-1"},
     ]
+    # Every key of the site's Secret, which is what a `${env:NAME}` in a
+    # property resolves against inside this pod.
+    assert container["envFrom"] == [{"secretRef": {"name": "bench-env"}}]
     requests = _mapping(_mapping(container["resources"])["requests"])
     assert requests["cpu"] == expectation.cpu and requests["memory"] == expectation.memory
 
@@ -262,8 +276,11 @@ def test_a_site_naming_no_region_renders_an_empty_env() -> None:
     """A cluster off AWS names no region, and the env list is then empty.
 
     An `AWS_REGION` rendered empty would reach an SDK as a region it cannot
-    resolve, which surfaces as a signing failure far from the site config.
+    resolve, which surfaces as a signing failure far from the site config. A
+    site naming no Secret is the same shape: an empty `envFrom` rather than one
+    naming nothing, which the API server would refuse at apply time.
     """
-    values = {key: SAMPLE[key] for key in EXPECTATIONS["harness-job.yaml.tmpl"].markers} | {"ENV": "[]"}
+    markers = EXPECTATIONS["harness-job.yaml.tmpl"].markers
+    values = {key: SAMPLE[key] for key in markers} | {"ENV": "[]", "ENV_FROM": "[]"}
     document = _mapping(yaml.safe_load(render_template(TEMPLATES / "harness-job.yaml.tmpl", values)))
-    assert _container(document)["env"] == []
+    assert _container(document)["env"] == [] and _container(document)["envFrom"] == []

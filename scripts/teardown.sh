@@ -162,6 +162,7 @@ k8s_render_apply deploy/k8s/harness-job.yaml.tmpl \
 	"IMAGE=$IMAGE" \
 	"COMMAND=$DROP_COMMAND" \
 	"ENV=$JOB_ENV" \
+	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 k8s_wait_job "$DROP_JOB" "$DROP_WAIT_S"

@@ -154,6 +154,7 @@ k8s_render_apply deploy/k8s/scorer-job.yaml.tmpl \
 	"IMAGE=$IMAGE" \
 	"COMMAND=$SCORE" \
 	"ENV=$JOB_ENV" \
+	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 
@@ -212,6 +213,7 @@ k8s_render_apply deploy/k8s/producer-job.yaml.tmpl \
 	"COMMAND=$PRODUCE" \
 	"COUNT=$SHARDS" \
 	"ENV=$JOB_ENV" \
+	"ENV_FROM=$JOB_ENV_FROM" \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 
