@@ -104,8 +104,10 @@ scripts/purge.sh <the run id it printed> --artifacts   # once you are done with 
 `run.sh` prints `run_id: <id>` as soon as staging returns and then runs the
 sequence below: it judges the run every `--gate-interval-s` seconds (60) until
 the scorer's `state` stops being `running`, tears it down, and exits with
-`finish.sh`'s status. `RUN_MAX_S` bounds how long it waits — two hours, after
-which it tears the run down, prints what the artifacts say and refuses.
+`finish.sh`'s status — or 6, a code no other driver uses, when the teardown did
+not converge and the fleet may still be running. `RUN_MAX_S` bounds how long it
+waits — two hours, after which it tears the run down, prints what the artifacts
+say and refuses.
 `--publish` and `--variant` are `finish.sh`'s; `--breaches` is `gate.sh`'s. An
 `engine: external` spec waits after staging for `--external-ready-file <path>`
 to appear, or for a newline on stdin.
@@ -135,7 +137,7 @@ the run is offered a corpus.
 
 | Driver | What it does |
 |---|---|
-| `run.sh <spec>` | stages, launches, gates, tears down and finishes one run, in the order below. Prints `run_id: <id>`, then the verdict block |
+| `run.sh <spec>` | stages, launches, gates, tears down and finishes one run, in the order below. Prints `run_id: <id>`, then the verdict block. Exits with `finish.sh`'s status, or 6 when the teardown did not converge and the fleet may still be running |
 | `stage.sh <spec>` | runs `stage` as a Job, fetches the run directory it published, and for either managed engine applies the two documents it rendered, waits for the engine to reach its running state *and for its fleet to be placed* — an operator reports running before every pod has an image to start from — holds it to the spec with `verify-<engine>` and records the image it is running. Prints `run_id: <id>` |
 | `launch.sh <run_id>` | counts the nodes with 2 CPU free and warns when the scorer and the shards will not all fit — see [`pitfalls.md`](pitfalls.md) — applies the scorer, waits for its first reading, then applies the producer shards. Records the run's epoch |
 | `gate.sh <run_id>` | `PASS`, `UNDERSIZED` or `VOID` from the scorer's published artifacts, as exit code 0, 3 or 5. `--teardown` stops paying for a fleet that is not passing, once the verdict has repeated — three ticks, or `--breaches N` |

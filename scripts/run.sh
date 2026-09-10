@@ -18,9 +18,16 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 # the shipped runs offer for an hour, and the staging, placement and drain
 # around one add tens of minutes.
 RUN_MAX_S="${RUN_MAX_S:-7200}"
-# How long `--external-ready-file` is waited on — the smoke's own wait, under
-# the same name, because it waits for the same thing.
-EXTERNAL_READY_WAIT_S="${EXTERNAL_READY_WAIT_S:-900}"
+# How long `--external-ready-file` is waited on. Half an hour, three times the
+# smoke's, because standing a fleet up by hand on a cluster is slower than
+# starting a container on this machine.
+EXTERNAL_READY_WAIT_S="${EXTERNAL_READY_WAIT_S:-1800}"
+
+# What this exits when a run was read but its teardown did not converge, so the
+# fleet may still be running. Distinct from every code the drivers it runs
+# define — gate.sh's 0, 3 and 5, a refusal's 1, an argument error's 2, the
+# harness's 4 — so a caller can tell a fleet to go and check from a verdict.
+TEARDOWN_FAILED=6
 
 usage() {
 	cat <<'USAGE'
@@ -39,8 +46,10 @@ usage: scripts/run.sh <spec> [options]
 Environment: RUN_MAX_S, EXTERNAL_READY_WAIT_S, RUNS_DIR, and every wait the
 drivers below take — each is in that driver's own --help.
 
-It prints `run_id: <id>` as soon as staging returns, and exits with finish.sh's
-status: 0 only on `run_valid: true`.
+It prints `run_id: <id>` as soon as staging returns.
+
+Exit codes: finish.sh's own, 0 only on `run_valid: true`; 6 when the teardown
+did not converge, so the fleet may still be running; 2 for an argument error.
 USAGE
 }
 
@@ -192,6 +201,7 @@ while :; do
 	# At the top of the loop, so a tick that could read no summary is still
 	# bounded by it.
 	if ((waited >= RUN_MAX_S)); then
+		log "$RUN_ID was still running after ${RUN_MAX_S}s, so it is being torn down unfinished"
 		OVERRAN=1
 		break
 	fi
@@ -235,10 +245,12 @@ done
 # 4. Tear down, and read it
 # ---------------------------------------------------------------------------
 
+# Declared outside the branch: a gate that already tore the run down converged,
+# and the refusal at the end reads this either way.
+TEARDOWN_STATUS=0
 if ((TORN_DOWN == 0)); then
-	# Reported and not fatal, for the reason gate.sh states where it does the
-	# same: the verdict below is this script's answer.
-	TEARDOWN_STATUS=0
+	# Not fatal here, so the verdict below is still read and published: a run
+	# whose fleet outlived its teardown is as measured as one whose did not.
 	"$REPO_ROOT/scripts/teardown.sh" "$RUN_ID" "${COMMON[@]}" || TEARDOWN_STATUS=$?
 	((TEARDOWN_STATUS == 0)) ||
 		log "tearing $RUN_ID down exited $TEARDOWN_STATUS, so its fleet may still be running: scripts/teardown.sh $RUN_ID"
@@ -250,8 +262,15 @@ FINISH_ARGS=("$RUN_ID" --site "$SITE_FILE")
 FINISH_STATUS=0
 "$REPO_ROOT/scripts/finish.sh" "${FINISH_ARGS[@]}" || FINISH_STATUS=$?
 
-# After the verdict block, because a run this stopped waiting on has its
-# artifacts as the only account of what it was doing.
+# Both refusals are after the verdict block, because a run this stopped waiting
+# on, or could not stop, has its artifacts as the only account of what it did.
+#
+# The teardown first: an overrun is a run to rerun at a longer `RUN_MAX_S`, and
+# a fleet still running is money being spent right now.
+if ((TEARDOWN_STATUS != 0)); then
+	log "exiting $TEARDOWN_FAILED: the teardown above did not converge, so check the cluster"
+	exit "$TEARDOWN_FAILED"
+fi
 ((OVERRAN == 0)) ||
 	die "$RUN_ID was still running after ${RUN_MAX_S}s, so it was torn down unfinished; raise RUN_MAX_S for a longer offer"
 exit "$FINISH_STATUS"

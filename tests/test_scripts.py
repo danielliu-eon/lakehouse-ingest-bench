@@ -3757,6 +3757,7 @@ exit "${STUB_GATE_STATUS:-0}"
 
 TEARDOWN_STUB = """
 printf 'teardown %s\\n' "$*" >>"$STUB_LOG"
+exit "${STUB_TEARDOWN_STATUS:-0}"
 """
 
 FINISH_STUB = """
@@ -3875,6 +3876,21 @@ def test_a_chained_run_ends_when_the_run_does(
     assert f"run_id: {RUN_ID}" in run.result.stdout, run.result.stdout
     if said is not None:
         assert said in run.result.stderr, run.result.stderr
+
+
+@needs_shell_tools
+def test_a_teardown_that_did_not_converge_is_a_code_of_its_own(tmp_path: Path) -> None:
+    """The verdict is still read and published, and then the fleet is reported.
+
+    A run whose fleet outlived its teardown is as measured as one whose did
+    not, so exiting before `finish.sh` would throw the run away. But exiting 0
+    afterwards would report a finished run to a caller that is still being
+    billed for the fleet, which is why the code is one no driver below defines.
+    """
+    run = _run_chained(tmp_path, [], ["drained"], {"STUB_TEARDOWN_STATUS": "1"})
+    assert run.result.returncode == 6, run.result.stdout + run.result.stderr
+    assert run.drivers() == ["stage", "launch", "gate", "teardown", "finish"], run.calls
+    assert "scripts/teardown.sh " in run.result.stderr, run.result.stderr
 
 
 @needs_shell_tools
