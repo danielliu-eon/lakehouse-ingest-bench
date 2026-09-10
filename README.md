@@ -82,7 +82,6 @@ before the freshness warmup ends or the first commit occurs; see [`docs/running.
 
 **Local smoke tests are integration checks, not performance results.**
 The harness, broker, object store and engine share one machine's resources.
-On arm64, images that require amd64 also run under emulation.
 
 ## Run on a cluster
 

@@ -85,10 +85,9 @@ files = ["ingest_bench", "engines", "tests"]
 module = ["confluent_kafka.*", "fastavro.*", "fsspec.*", "s3fs.*", "gcsfs.*", "pyarrow.*", "zstandard.*"]
 ignore_missing_imports = true
 
-# PyFlink and PySpark run in their engine images and are not installed in the harness
-# environment.
+# PySpark runs in its engine image and is not installed in the harness environment.
 [[tool.mypy.overrides]]
-module = ["pyflink.*", "pyspark.*"]
+module = ["pyspark.*"]
 ignore_missing_imports = true
 
 # confluent_kafka.admin re-exports typed extension names without __all__. Allow those

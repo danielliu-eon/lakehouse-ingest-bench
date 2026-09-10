@@ -160,7 +160,7 @@ def test_the_sweep_reads_the_whole_tracked_tree() -> None:
         "docs/examples/external-flink/job.sql",
         "docs/examples/smoke-flink/summary.json",
         "docs/results-format.md",
-        "engines/flink/job.py",
+        "engines/flink/sql-runner/pom.xml",
         "pyproject.toml",
         "results/RESULTS.md",
         "runs/smoke-flink.yaml",

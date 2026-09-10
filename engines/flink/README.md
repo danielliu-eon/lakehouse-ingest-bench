@@ -1,23 +1,22 @@
 # Flink engine
 
 The engine runs Apache Flink 1.20.1 SQL with released Kafka, Avro, and Iceberg
-connectors. `knobs.py` renders SQL and settings; `job.py` submits them through
-the PyFlink Table API.
+connectors. `knobs.py` renders SQL and settings; the [Java runner](sql-runner/src/main/java/org/ingestbench/flink/SqlRunner.java)
+submits them through the Flink Table API.
 
 ## Runtime dependencies
 
 | Piece | What it is |
 |---|---|
-| Image | `flink:1.20.1-scala_2.12-java17`, **`linux/amd64`** |
+| Image | `flink:1.20.1-scala_2.12-java17` |
+| SQL runner | `sql-runner.jar`, built and tested by the engine Dockerfile |
 | Source | `flink-connector-kafka:3.4.0-1.20` + `kafka-clients:3.4.0` and its codecs (`zstd-jni:1.5.2-1`, `lz4-java:1.8.0`, `snappy-java:1.1.8.4`) |
 | Avro | `flink-sql-avro-confluent-registry:1.20.1`; one shaded jar registers both `avro` and `avro-confluent` |
 | Kafka auth | `aws-msk-iam-auth:2.3.8` (`all` classifier includes AWS SDK v2) |
 | Sink | `iceberg-flink-runtime-1.20:1.9.2` plus the `iceberg-aws-bundle` / `iceberg-gcp-bundle` cloud SDKs |
 | Classpath | `hadoop-client-api:3.3.6` + `hadoop-client-runtime:3.3.6` — the shaded client pair, not `hadoop-common` and siblings |
 | Checkpoints | `ENABLE_BUILT_IN_PLUGINS=flink-s3-fs-hadoop-1.20.1.jar` |
-| PyFlink | `apache-flink==1.20.1`, `pyyaml==6.0.2` |
 
-The pinned PyFlink release requires amd64, so local arm64 runs use emulation.
 The shaded Hadoop client jars supply Flink's Hadoop dependencies. Kafka must
 remain unshaded so MSK's `IAMClientCallbackHandler` can load the expected
 interface. See `Dockerfile` for the classpath constraints.
@@ -32,6 +31,12 @@ credentials so the submitter resolves them from the container environment
 instead of writing values into the rendered file. See
 [pitfalls](../../docs/pitfalls.md).
 
+The runner requires `--sql PATH` and `--conf PATH`. SQL and settings are read
+at submission time; changing them does not require rebuilding the image.
+Scripts use a semicolon followed by a newline to separate statements and end
+with the ingestion `INSERT`. Compose submits detached (`flink run -d`); use
+`--wait` with an attached submission to wait for the final statement to finish.
+
 Local runs validate integration, not engine performance. The
 [recorded smoke run](../../docs/examples/smoke-flink/) absorbed 96.9% of the
 5 MB/s offer, with 17.6 s p95 freshness and a 4.87 s drain. It used eight slots
@@ -44,8 +49,8 @@ Sites with a `kubernetes` block also render `flinkdeployment.yaml` and
 mounts `job.sql` and `flink-conf.yaml` at `/opt/bench/run`.
 
 The deployment uses `mode: standalone` to honor the `taskmanagers` count.
-Native mode would derive that count from job parallelism. The pod selector
-requires `kubernetes.io/arch: amd64`, overriding any conflicting site selector.
+Native mode would derive that count from job parallelism. Engine pods preserve
+the site's node selector, including any architecture selection.
 
 ## Knobs
 
@@ -95,6 +100,15 @@ or the Compose network locally. It checks:
 
 Exit code 3 reports drift. Exit code 2 means the response could not be read;
 cluster staging retries it three times.
+
+## Runner tests
+
+With JDK 17 and Maven installed, run the tests and build the JAR from the
+repository root:
+
+```bash
+mvn -f engines/flink/sql-runner/pom.xml verify
+```
 
 ## Catalog and wire encoding
 

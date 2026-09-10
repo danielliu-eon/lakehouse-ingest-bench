@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Run the full benchmark locally: generate, stage, start the engine, produce and score.
 # Exit 0 only when run_valid is true.
-# This checks integration, not engine performance: the stack shares one machine, and
-# images may require emulation on arm64.
+# This checks integration, not engine performance: the stack shares one machine.
 set -euo pipefail
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

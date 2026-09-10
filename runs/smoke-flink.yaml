@@ -12,7 +12,7 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 flink:
-  # Allow eight slots so the smoke can keep up even when the engine requires emulation.
+  # Allow eight slots so the smoke has enough writer capacity on a shared host.
   taskmanagers: 2
   slots: 4
   tm_cpu: 2

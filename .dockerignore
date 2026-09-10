@@ -7,3 +7,4 @@ docs
 .mypy_cache
 .pytest_cache
 .ruff_cache
+engines/flink/sql-runner/target

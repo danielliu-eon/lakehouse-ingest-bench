@@ -7,8 +7,8 @@
 #   spark       local Spark driver; requires RUN_DIR
 #   tools       harness commands via docker compose run --rm harness "<cmd>"
 #
-# Use local runs for correctness checks. Flink uses amd64 emulation on arm64;
-# Spark runs natively on either architecture.
+# Use local runs for correctness checks; do not treat local throughput as a
+# capacity result.
 #
 # Compose interpolates all profiles before filtering, so engine files give
 # RUN_DIR a nonexistent default. Only submissions that mount it require a value.

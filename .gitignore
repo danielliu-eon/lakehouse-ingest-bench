@@ -9,3 +9,4 @@ __pycache__/
 runs/*/
 !runs/*.yaml
 dist/
+/engines/flink/sql-runner/target/

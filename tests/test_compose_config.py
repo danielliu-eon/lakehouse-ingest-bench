@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from engines.flink import knobs as flink_knobs
 from engines.spark import knobs, stream_to_iceberg
 from ingest_bench.catalog import load_catalog_props
 from ingest_bench.specs.model import load_site
@@ -69,6 +70,18 @@ def test_the_spark_service_submits_the_files_the_renderer_writes() -> None:
     rendered = " ".join(command)
     for variable in (knobs.LOCAL_CORES_VAR, knobs.DRIVER_MEM_VAR):
         assert f"${{{variable}:-" in rendered
+
+
+def test_the_flink_service_submits_the_files_the_renderer_writes() -> None:
+    service = yaml.safe_load((REPO_ROOT / "engines" / "flink" / "compose.yaml").read_text())["services"]["flink-job"]
+    mount = "/opt/bench/run"
+    assert service["volumes"] == [f"${{RUN_DIR:-/nonexistent/run}}:{mount}:ro"]
+    command = service["command"]
+    assert command[:4] == ["flink", "run", "-d", "-m"]
+    assert command[command.index("-c") + 1] == "org.ingestbench.flink.SqlRunner"
+    assert command[command.index("-c") + 2] == "/opt/bench/sql-runner.jar"
+    assert command[command.index("--sql") + 1] == f"{mount}/{flink_knobs.SQL_FILE}"
+    assert command[command.index("--conf") + 1] == f"{mount}/{flink_knobs.CONF_FILE}"
 
 
 def test_catalog_props_file_matches_the_site_catalog_block() -> None:

@@ -912,6 +912,42 @@ def test_every_engine_s_image_is_pushed_and_has_a_repository_to_be_pushed_to() -
     assert rendered == created - {f"{prefix.group(1)}/harness"}
 
 
+@needs_bash
+def test_image_pushes_use_the_requested_platform_for_every_image(tmp_path: Path) -> None:
+    site = tmp_path / "site.yaml"
+    site.write_text(_filled_site())
+    calls = tmp_path / "calls"
+    stubs = _stub_bin(
+        tmp_path / "bin",
+        {
+            "yq": """
+case "$1" in
+  .kubernetes.registry) printf '%s\\n' registry.example ;;
+  .kubernetes.aws_region) printf '%s\\n' eu-west-1 ;;
+  *) exit 1 ;;
+esac
+""",
+            "git": """
+if [[ $* == *'rev-parse --short HEAD' ]]; then printf '%s\\n' abc1234; else exit 0; fi
+""",
+            "aws": "printf '%s\\n' password",
+            "docker": f"printf '%s\\n' \"$*\" >>'{calls}'\n[[ $1 != login ]] || read -r _",
+        },
+    )
+    result = subprocess.run(
+        [str(PUSH_IMAGES), "--site", str(site), "--platform", "linux/arm64"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = calls.read_text().splitlines()
+    builds = [command for command in commands if command.startswith("build ")]
+    assert len(builds) == 3, commands
+    assert all("--platform linux/arm64" in command for command in builds), builds
+    assert any("engines/flink/Dockerfile" in command for command in builds), builds
+
+
 def test_the_setup_script_renders_only_the_placeholders_it_exports() -> None:
     setup = AWS_SETUP.read_text()
     for path in _iam_documents():

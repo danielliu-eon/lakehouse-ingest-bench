@@ -9,7 +9,7 @@
 # JobManager REST endpoint published by Compose.
 FLINK_REST="${FLINK_REST:-http://localhost:8081}"
 
-# Allow extra startup time for amd64 emulation on arm64 hosts.
+# Allow time for a cold local cluster to register its slots and job.
 FLINK_SLOT_WAIT_S="${FLINK_SLOT_WAIT_S:-180}"
 FLINK_JOB_WAIT_S="${FLINK_JOB_WAIT_S:-180}"
 
@@ -58,7 +58,7 @@ wait_for_flink_job_running() {
 }
 
 engine_compose_build() {
-	log "building the engine image (amd64; emulated on an arm64 machine)"
+	log "building the engine image"
 	compose build flink-jobmanager
 }
 

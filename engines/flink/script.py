@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Join and split rendered SQL, and resolve environment references.
 
-This standard-library-only module is shared by the harness renderer and the
-submitter inside the Flink image.
+The Java SQL runner follows the same delimiter and environment-reference
+conventions when submitting these scripts.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ STATEMENT_TERMINATOR = ";\n"
 _STATEMENT_GAP = "\n"
 
 
-# Keep aligned with ingest_bench.specs.env. The image lacks that package.
+# Keep aligned with ingest_bench.specs.env and the Java SQL runner.
 _ENV_PLACEHOLDER = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 
 

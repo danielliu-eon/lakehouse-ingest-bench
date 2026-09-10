@@ -132,11 +132,6 @@ if ! NODES_JSON="$(kubectl --context "$KUBE_CONTEXT" get nodes -o json 2>&1)"; t
      Your principal needs an EKS access entry (or an aws-auth mapping) on the cluster."
 fi
 ARCHITECTURES="$(jq -r '[.items[].status.nodeInfo.architecture] | unique | join(" ")' <<<"$NODES_JSON")"
-# Warn if Flink's required amd64 nodes are absent. Spark-only campaigns can
-# use an arm64 cluster with matching harness and Spark images.
-grep -qw amd64 <<<"$ARCHITECTURES" ||
-	log "warning: $CLUSTER_NAME has no amd64 nodes (found: ${ARCHITECTURES:-none}); Flink requires amd64. Spark runs can proceed.
-     Add an amd64 node group — deploy/aws/eksctl-cluster.example.yaml has one."
 log "node architectures: $ARCHITECTURES"
 
 if aws eks describe-addon --cluster-name "$CLUSTER_NAME" --addon-name eks-pod-identity-agent >/dev/null 2>&1; then

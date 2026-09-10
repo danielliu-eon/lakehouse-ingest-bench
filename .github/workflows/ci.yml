@@ -21,6 +21,13 @@ jobs:
           sudo chmod +x /usr/local/bin/yq
           yq --version
       - run: uv sync --frozen
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: engines/flink/sql-runner/pom.xml
+      - run: mvn -B -f engines/flink/sql-runner/pom.xml verify
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run mypy
       # Includes documentation budgets, licence headers and private-data scans.

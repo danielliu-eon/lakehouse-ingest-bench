@@ -17,8 +17,6 @@ See [`methodology.md`](methodology.md) for measurement definitions and
 - Free ports: 9000 / 9001 (object store), 8181 (catalog), 9092 / 29092 (broker),
   and the engine's own — 8081 for Flink's REST, 4040 for the Spark driver's UI.
   Only one engine runs at a time.
-- On an arm64 host, enable amd64 emulation in Docker; the Flink image is
-  amd64-only.
 
 `uv sync` is only needed to run the tests and the tools outside a container; the
 smoke builds its own image from the checkout.
@@ -207,9 +205,8 @@ EKS Pod Identity. SDKs obtain credentials from the agent. Set
 in [`pitfalls.md`](pitfalls.md). Omit this key for non-AWS clusters.
 
 **Placement.** `site.kubernetes.node_selector` and `site.kubernetes.tolerations`
-apply to every Job and engine pod. Flink overrides the architecture selector
-with `kubernetes.io/arch: amd64` because its image lacks aarch64 PyFlink. Spark
-uses the site selector unchanged.
+apply to every Job and engine pod. Build all images for the selected nodes with
+`push-images.sh --platform`; the default is `linux/amd64`.
 
 **Where files go.** `stage.sh` downloads artifacts to `./runs/<run_id>/` beside
 `site.yaml`; set `RUNS_DIR` to change that directory. Pods publish artifacts to

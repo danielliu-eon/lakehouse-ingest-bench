@@ -15,9 +15,8 @@ usage() {
 usage: scripts/push-images.sh [options]
 
   --site PATH        site config for the registry (default: ./site.yaml)
-  --platform PLAT    target platforms for harness and Spark images (default: linux/amd64).
+  --platform PLAT    target platforms for all images (default: linux/amd64).
                      Use comma-separated values for a buildx manifest list.
-                     The Flink image always targets amd64
   --allow-dirty      include uncommitted changes in images tagged with the current commit
 
 Prints only the pushed image references to stdout.
@@ -25,7 +24,7 @@ USAGE
 }
 
 ALLOW_DIRTY=0
-# Default to amd64 for cluster nodes; the Flink image requires it.
+# Default to amd64 for the shipped cluster example.
 PLATFORM=linux/amd64
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -90,9 +89,7 @@ build_and_push() {
 }
 
 build_and_push "$REPO_ROOT/Dockerfile" "$HARNESS_REF" "$PLATFORM"
-# The pinned PyFlink dependency requires amd64.
-build_and_push "$REPO_ROOT/engines/flink/Dockerfile" "$FLINK_REF" linux/amd64
-# Build Spark for the same target platform as the harness.
+build_and_push "$REPO_ROOT/engines/flink/Dockerfile" "$FLINK_REF" "$PLATFORM"
 build_and_push "$REPO_ROOT/engines/spark/Dockerfile" "$SPARK_REF" "$PLATFORM"
 
 log "pushed all images with tag $TAG"

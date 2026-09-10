@@ -46,11 +46,10 @@ DISTRIBUTION_MODES = frozenset({NONE, HASH, RANGE})
 # Keep this repository name aligned with push-images.sh and AWS setup.sh.
 IMAGE_REPOSITORY = "lakehouse-ingest-bench/flink"
 
-# Pinned Flink version in the operator's label and Python driver jar formats.
+# Pinned Flink version in the operator's label format.
 _FLINK_VERSION_LABEL = "v1_20"
-_PYFLINK_JAR = "local:///opt/flink/opt/flink-python-1.20.1.jar"
-_PYTHON_DRIVER = "org.apache.flink.client.python.PythonDriver"
-_JOB_SCRIPT = "/opt/bench/engines/flink/job.py"
+_SQL_RUNNER_JAR = "local:///opt/bench/sql-runner.jar"
+_SQL_RUNNER_ENTRY_CLASS = "org.ingestbench.flink.SqlRunner"
 
 # Mount beside the submitter; /run is reserved for container runtime files.
 _RUN_MOUNT = "/opt/bench/run"
@@ -59,9 +58,6 @@ _JOB_VOLUME = "job"
 # The operator merges this container name into its Flink container. Any other
 # name would create a sidecar.
 _FLINK_CONTAINER = "flink-main-container"
-
-# The pinned PyFlink image requires amd64. Override conflicting site selectors.
-_ARCH_PIN = {"kubernetes.io/arch": "amd64"}
 
 REST = "rest"
 
@@ -517,7 +513,7 @@ def render_flinkdeployment(
         # archived run files retain only the references.
         container["envFrom"] = [{"secretRef": {"name": cluster.secret_name}}]
     pod_spec: dict[str, object] = {
-        "nodeSelector": {**cluster.node_selector, **_ARCH_PIN},
+        "nodeSelector": cluster.node_selector,
         "tolerations": cluster.tolerations,
         "volumes": [{"name": _JOB_VOLUME, "configMap": {"name": configmap_name(derived)}}],
         "containers": [container],
@@ -543,12 +539,9 @@ def render_flinkdeployment(
                 "replicas": knobs.taskmanagers,
             },
             "job": {
-                # Use PyFlink's bundled driver; each run supplies a script, not a custom jar.
-                "jarURI": _PYFLINK_JAR,
-                "entryClass": _PYTHON_DRIVER,
+                "jarURI": _SQL_RUNNER_JAR,
+                "entryClass": _SQL_RUNNER_ENTRY_CLASS,
                 "args": [
-                    "-py",
-                    _JOB_SCRIPT,
                     "--sql",
                     f"{_RUN_MOUNT}/{SQL_FILE}",
                     "--conf",

@@ -7,9 +7,8 @@ reconfigures, or deletes it.
 
 ## Prerequisites
 
-- **EKS cluster.** Flink requires an amd64 node. Setup warns if none exists,
-  allowing Spark-only campaigns on arm64. For a new cluster, use the
-  [EKS example](#create-an-eks-cluster).
+- **EKS cluster.** Build the benchmark images for the cluster's node
+  architecture. For a new cluster, use the [EKS example](#create-an-eks-cluster).
 - **Host tools.** Scripts check required tools before proceeding. `run.sh`
   checks the tools needed by all five drivers it invokes.
 
@@ -150,10 +149,10 @@ Fill in `site.yaml` pricing before publishing results; validation rejects zero
 prices. Without `--write-site`, copy `site.aws.example.yaml` to `site.yaml` and
 fill it using the printed values.
 
-`push-images.sh` builds the harness and Spark images for `linux/amd64` by
-default. Use `--platform linux/arm64` or a comma-separated platform list to
-change this. Flink remains amd64. Image tags identify commits, so the script
-rejects uncommitted changes unless `--allow-dirty` is set.
+`push-images.sh` builds all images for `linux/amd64` by default. Use
+`--platform linux/arm64` or a comma-separated platform list to change this.
+Image tags identify commits, so the script rejects uncommitted changes unless
+`--allow-dirty` is set.
 
 Choose corpus presets and shard counts using the [corpus guide](../../docs/corpus.md),
 then follow the [per-run workflow](../../docs/running.md).

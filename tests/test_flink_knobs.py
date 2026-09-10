@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from engines.flink import job, knobs, script
+from engines.flink import knobs, script
 from ingest_bench import uri
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.specs import derive, model
@@ -210,10 +210,10 @@ def test_quotes_in_a_value_stay_inside_their_literal(meta: metadata.CorpusMetada
     assert "'properties.sasl.password' = 'pa''s''s'" in knobs.render_sql(spec, site, d, meta)
 
 
-def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMetadata) -> None:
+def test_rendered_sql_uses_the_statement_delimiter(meta: metadata.CorpusMetadata) -> None:
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, _site(), stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
-    statements = job.split_statements(knobs.render_sql(spec, _site(), d, meta))
+    statements = script.split_statements(knobs.render_sql(spec, _site(), d, meta))
     assert len(statements) == 3
     assert all(statement and not statement.endswith(";") for statement in statements)
     assert statements[0].startswith("CREATE TABLE kafka_source")
@@ -221,7 +221,7 @@ def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMeta
     assert statements[2].startswith("INSERT INTO ice.")
     # A `;` inside a property value must not be read as a statement end.
     with_semicolons = replace(_site(), kafka_security={"sasl.jaas.config": "a=b;c=d;"})
-    assert len(job.split_statements(knobs.render_sql(spec, with_semicolons, d, meta))) == 3
+    assert len(script.split_statements(knobs.render_sql(spec, with_semicolons, d, meta))) == 3
 
 
 def test_the_external_example_is_what_the_renderer_produces(meta: metadata.CorpusMetadata) -> None:
@@ -242,8 +242,8 @@ def test_the_external_example_is_what_the_renderer_produces(meta: metadata.Corpu
         assert (example / name).read_text() == content, f"{example / name} is stale; re-render it"
 
 
-def test_a_secret_is_named_in_the_rendered_files_and_read_in_the_container(
-    meta: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_rendered_secret_references_follow_the_substitution_convention(
+    meta: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     spec = replace(
@@ -261,12 +261,9 @@ def test_a_secret_is_named_in_the_rendered_files_and_read_in_the_container(
     assert "'properties.sasl.password' = '${env:IB_TEST_FLINK_SECRET}'" in rendered[knobs.SQL_FILE]
     assert "custom.secret: ${env:IB_TEST_FLINK_SECRET}" in rendered[knobs.CONF_FILE]
 
-    conf_path = tmp_path / knobs.CONF_FILE
-    conf_path.write_text(rendered[knobs.CONF_FILE])
     monkeypatch.setenv("IB_TEST_FLINK_SECRET", "s3cret")
     assert "'properties.sasl.password' = 's3cret'" in script.substitute_env(rendered[knobs.SQL_FILE])
-    assert job.read_conf(conf_path)["custom.secret"] == "${env:IB_TEST_FLINK_SECRET}"
-    assert script.substitute_env(job.read_conf(conf_path)["custom.secret"]) == "s3cret"
+    assert script.substitute_env("${env:IB_TEST_FLINK_SECRET}") == "s3cret"
 
     monkeypatch.delenv("IB_TEST_FLINK_SECRET")
     with pytest.raises(ValueError, match=r"\$\{env:IB_TEST_FLINK_SECRET\} is not set in the environment"):
@@ -336,7 +333,7 @@ def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetad
     # A key that is not part of the signal still reaches the client.
     assert "'properties.ssl.endpoint.identification.algorithm' = 'https'" in sql
     # The login module's own `;` must not end the statement that carries it.
-    assert len(job.split_statements(sql)) == 3
+    assert len(script.split_statements(sql)) == 3
     # Do not emit duplicate WITH keys after translating properties.
     doubled = replace(_aws_site(), kafka_security={**_MSK_SECURITY, "sasl.jaas.config": "handmade;"})
     assert knobs.render_sql(spec, doubled, d, meta).count("'properties.sasl.jaas.config'") == 1
@@ -393,11 +390,9 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
             "jobManager": {"resource": {"memory": "1024m", "cpu": 1.0}},
             "taskManager": {"resource": {"memory": "2048m", "cpu": 2.0}, "replicas": 2},
             "job": {
-                "jarURI": "local:///opt/flink/opt/flink-python-1.20.1.jar",
-                "entryClass": "org.apache.flink.client.python.PythonDriver",
+                "jarURI": "local:///opt/bench/sql-runner.jar",
+                "entryClass": "org.ingestbench.flink.SqlRunner",
                 "args": [
-                    "-py",
-                    "/opt/bench/engines/flink/job.py",
                     "--sql",
                     "/opt/bench/run/job.sql",
                     "--conf",
@@ -411,7 +406,7 @@ def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
                 "apiVersion": "v1",
                 "kind": "Pod",
                 "spec": {
-                    "nodeSelector": {"bench-pool": "engine", "kubernetes.io/arch": "amd64"},
+                    "nodeSelector": {"bench-pool": "engine"},
                     "tolerations": [{"key": "bench", "operator": "Exists", "effect": "NoSchedule"}],
                     "volumes": [
                         {
@@ -451,14 +446,15 @@ def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> 
     assert f"'topic' = '{d.run_id}'" in knobs.render_sql(spec, site, d, meta)
 
 
-def test_the_amd64_pin_wins_and_a_cluster_off_aws_names_no_region(meta: metadata.CorpusMetadata) -> None:
-    """PyFlink lacks an aarch64 wheel, so the site cannot override its amd64 pin."""
+def test_the_site_architecture_is_preserved_and_a_cluster_off_aws_names_no_region(
+    meta: metadata.CorpusMetadata,
+) -> None:
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     cluster = replace(_cluster(), aws_region=None, node_selector={"kubernetes.io/arch": "arm64"}, tolerations=[])
     site = replace(_aws_site(), kubernetes=cluster)
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     pod = yaml.safe_load(knobs.render_flinkdeployment(spec, site, d, meta, image_tag="t"))["spec"]["podTemplate"]
-    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+    assert pod["spec"]["nodeSelector"] == {"kubernetes.io/arch": "arm64"}
     assert pod["spec"]["tolerations"] == []
     assert "env" not in pod["spec"]["containers"][0]
 
