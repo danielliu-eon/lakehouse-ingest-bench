@@ -93,7 +93,7 @@ EXPECTATIONS = {
     "stage-job.yaml.tmpl": Expectation(_MOUNTED, "500m", "1Gi", indexed=False, work_volume=True),
     "corpus-gen-job.yaml.tmpl": Expectation(_BATCH_SIZED, "1", "6Gi", indexed=True, work_volume=False),
     "producer-job.yaml.tmpl": Expectation(_BATCH_SIZED, "1", "6Gi", indexed=True, work_volume=True),
-    "scorer-job.yaml.tmpl": Expectation(_ONE_OFF, "1", "2Gi", indexed=False, work_volume=True),
+    "scorer-job.yaml.tmpl": Expectation(_ONE_OFF, "2", "2Gi", indexed=False, work_volume=True),
 }
 
 

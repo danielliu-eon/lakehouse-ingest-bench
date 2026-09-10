@@ -35,9 +35,14 @@ spec:
           # resolves against: the manifest and the command line carry the
           # reference, and the value exists only in that Secret.
           envFrom: __ENV_FROM__
+          # Two cores because a poll reads a whole commit's id columns at once,
+          # and each of those reads decodes a Parquet footer and a column chunk
+          # through a bridge that holds the interpreter for every request it
+          # makes. Memory is not what the width costs: only the id column of a
+          # file is read, and at most `--read-workers` of them are in flight.
           resources:
             requests:
-              cpu: "1"
+              cpu: "2"
               memory: "2Gi"
           volumeMounts:
             - name: work
