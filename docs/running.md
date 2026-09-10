@@ -97,7 +97,7 @@ and the once-per-account sequence that ends with a corpus in the bucket. This
 section is the order the drivers run in, once per run.
 
 ```bash
-RUN_ID=$(scripts/stage.sh runs/my-run.yaml | awk -F': ' '/^run_id: /{print $2}')
+RUN_ID=$(scripts/stage.sh runs/aws-100mbs-skew-flink-hash.yaml | awk -F': ' '/^run_id: /{print $2}')
 scripts/launch.sh "$RUN_ID"
 scripts/gate.sh "$RUN_ID" --teardown       # every minute or so, while the run goes
 scripts/teardown.sh "$RUN_ID"              # once the offer has drained
@@ -161,7 +161,7 @@ schema is in [`results-format.md`](results-format.md).
 
 ### Which steps run in the cluster, and why
 
-Four harness commands run as Jobs, for three reasons. `stage` and `drop-topic`
+Six harness commands run as Jobs, for three reasons. `stage` and `drop-topic`
 have to reach the broker, and MSK brokers listen inside the VPC where your laptop
 is not. The producer shards and the scorer are there because the offer is
 hundreds of megabytes a second into that same VPC and the scorer reads the table
@@ -172,7 +172,7 @@ for.
 Everything else is your machine's: rendering manifests, applying them, waiting on
 a Job, fetching artifacts, judging a verdict. So the harness image carries no
 `kubectl` and no Kubernetes client, and the drivers need `aws`, `kubectl`, `yq`,
-`jq`, `git` and `curl` locally (`push-images.sh` also needs `docker`).
+`jq`, `git`, `curl` and `gzip` locally (`push-images.sh` also needs `docker`).
 
 Install the harness itself with its `aws` extra — `uv sync --extra aws` in a
 checkout, or `pip install '.[aws]'` — because three of the drivers reach the

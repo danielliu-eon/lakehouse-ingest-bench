@@ -17,7 +17,8 @@ catalog:
     warehouse: s3://YOUR_BUCKET/warehouse
 kubernetes: {}                      # empty means no cluster, and everything runs where it is started. A
                                     # cluster sets context, namespace, harness_service_account,
-                                    # flink_service_account and registry, and may add aws_region,
+                                    # flink_service_account and registry, and may add
+                                    # spark_service_account (default ingest-bench-spark), aws_region,
                                     # secret_name (the Secret every pod reads ${env:NAME} from),
                                     # service_account_annotations, node_selector and tolerations.
                                     # A cluster refuses a written-out credential above; see

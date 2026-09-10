@@ -69,7 +69,7 @@ own defaults rather than having them restated in every spec.
 | `kafka.bootstrap_servers` | *required* |
 | `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim. Never read into a result |
 | `kafka.schema_registry` | `{url, basic_auth_user_info?}`. Absent is the answer for a site whose runs are all raw Avro; a `confluent` run against such a site is refused at staging |
-| `catalog.props` | *required*. pyiceberg catalog properties. An Iceberg **REST** catalog: any other `type` is refused at stage time |
+| `catalog.props` | *required*. pyiceberg catalog properties. An Iceberg **REST** catalog for a managed engine: either renderer refuses any other `type` at stage time. An external run reaches whatever catalog pyiceberg can open from these properties |
 | `kubernetes` | empty means no cluster and everything runs where it is started. A cluster sets `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
 | `pricing` | *required*. `{vcpu_hour_usd, gib_hour_usd}`, the two rates a run's cost is computed from |
 

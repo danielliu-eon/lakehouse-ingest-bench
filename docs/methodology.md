@@ -202,8 +202,10 @@ artifacts rather than the table, because the scorer has already paid for that
 read and two readers of one table would disagree about when a commit became
 visible.
 
-It reads two signals. The first is the lag right now, against twice the bound.
-The second is whether the backlog's **floor** is climbing: backlog is sawtoothed,
+It reads three signals. The first is whether anything is still measuring: past
+the staleness bound the newest keep-up sample is not a reading, whatever the
+summary says. Then the lag right now, against twice the bound. The third is
+whether the backlog's **floor** is climbing: backlog is sawtoothed,
 filling between commits and emptying at each one, so its instantaneous value says
 almost nothing, while the minimum over a window is the debt the fleet failed to
 clear. A minimum that climbs window over window is a fleet falling behind however

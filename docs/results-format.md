@@ -31,9 +31,9 @@ grows a new field carrying a path is covered without an edit here.
    (`corpus-archive` beside `corpus`) is left alone. Paths under nobody's root
    are published as they stand.
 2. **Credential-shaped properties are replaced** by `"<redacted>"`: any
-   catalog property whose key contains `token`, `credential`, `secret` or
-   `password`. A value written as `${env:NAME}` survives — it names a variable
-   rather than holding a secret, and a reader needs to know which one to set.
+   catalog property whose key contains `token`, `credential`, `secret`,
+   `password` or `auth_user_info`. A `${env:NAME}` value survives — it names a
+   variable rather than a secret, and a reader needs to know which one to set.
 3. **`site.kafka.security` is never read**, so neither its keys nor its values
    reach the document under any name.
 
