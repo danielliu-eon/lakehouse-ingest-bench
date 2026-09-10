@@ -2091,6 +2091,27 @@ def test_a_failed_stage_takes_its_configmaps_with_it(tmp_path: Path) -> None:
 
 
 @needs_shell_tools
+def test_launch_passes_the_scorers_read_width_only_when_it_is_set(tmp_path: Path) -> None:
+    """A knob this driver does not default: set it and it reaches the scorer.
+
+    How many of a commit's data files are read at once is the scorer's own
+    default, and a second default here would be a number to keep in step with
+    that one — so the flag is appended when an operator names a width and left
+    off entirely otherwise.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    run = _run_driver(LAUNCH, [RUN_ID, "--image-tag", "abc1234"], tmp_path, {"SCORER_READ_WORKERS": "8"})
+    assert run.result.returncode == 0, run.result.stderr
+    scorer = _job_command(run.applied[0])
+    assert "--read-workers 8" in scorer
+
+
+@needs_shell_tools
 @pytest.mark.parametrize("lead", [None, 42])
 def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, lead: int | None) -> None:
     """The epoch is in the future by the lead, and the run directory says which.
@@ -2134,6 +2155,8 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert f"--publish-logs s3://a-bucket/runs/{RUN_ID}/producer" in scorer
     assert f"--out /work/scores --upload-prefix s3://a-bucket/runs/{RUN_ID}/scores" in scorer
     assert "--idle-stop-s 600 --publish-shards 1" in scorer
+    # Unset, so the scorer's own default stands rather than one this driver restates.
+    assert "--read-workers" not in scorer
     # Every catalog property the site declares, because the scorer reads the
     # table itself and no site config reaches a pod.
     # Quoted, because a pod's shell splits this line: an unquoted value

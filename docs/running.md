@@ -126,7 +126,10 @@ the run is offered a corpus.
 | `purge.sh <run_id>` | drops the table and removes its files, and with `--artifacts` the run's own prefix. Names everything first and asks; `--yes` answers |
 
 Each driver takes `--site` (default `./site.yaml`) and reads the cluster, the
-registry, the identities and the roots out of it.
+registry, the identities and the roots out of it. Each also takes its own waits
+and pod sizes as environment variables, listed in its `--help`;
+`SCORER_READ_WORKERS` on `launch.sh` is the one that changes what the scorer
+does rather than how long a driver waits for it.
 
 Teardown comes before `finish.sh` because the score is in the bucket either way,
 and every minute a drained run's fleet stays up is a minute paid for nothing.

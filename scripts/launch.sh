@@ -34,6 +34,10 @@ FIRST_POLL_S="${FIRST_POLL_S:-5}"
 # count. The default fits the smoke preset; see "Generating a corpus" in
 # docs/running.md for what the larger ones need.
 PRODUCER_MEMORY="${PRODUCER_MEMORY:-2Gi}"
+# How many of a commit's data files the scorer reads at once. Unset here on
+# purpose: it is the scorer's own default, and stating a second one in this
+# script would be a number to keep in step with that one.
+SCORER_READ_WORKERS="${SCORER_READ_WORKERS:-}"
 
 usage() {
 	cat <<'USAGE'
@@ -44,7 +48,7 @@ usage: scripts/launch.sh <run_id> [options]
   --image-tag TAG    the harness image tag the producer and the scorer run (default: this checkout's commit)
 
 Environment: EPOCH_LEAD_S, IDLE_STOP_S, FIRST_POLL_WAIT_S, FIRST_POLL_S,
-PRODUCER_MEMORY, RUNS_DIR.
+PRODUCER_MEMORY, SCORER_READ_WORKERS, RUNS_DIR.
 USAGE
 }
 
@@ -156,6 +160,9 @@ done
 # The scorer decides whether the producer, rather than the engine, set the rate,
 # so the spec's tolerance has to reach it and not only the producer.
 [[ $BEHIND_MAX_MS == null ]] || SCORE="$SCORE --behind-max-ms $BEHIND_MAX_MS"
+# Left off when unset, like the spec's own keys above, so the scorer applies its
+# own default rather than one this script restates.
+[[ -z $SCORER_READ_WORKERS ]] || SCORE="$SCORE --read-workers $SCORER_READ_WORKERS"
 
 log "starting the scorer as job/$SCORER_JOB (epoch $EPOCH, idle stop ${IDLE_STOP_S}s)"
 k8s_delete job "$SCORER_JOB"
