@@ -2042,7 +2042,9 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
 
     run = _run_driver(
         GATE,
-        [RUN_ID, "--teardown"],
+        # `--breaches 1` so this one tick reaches the teardown: how many ticks
+        # it waits for is the case beside this one.
+        [RUN_ID, "--teardown", "--breaches", "1"],
         tmp_path,
         {"STUB_GATE_LOG": str(gate_calls), "STUB_GATE_STATUS": "3"},
         programs={"gate": GATE_STUB},
@@ -2053,6 +2055,81 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
     # The two artifacts the gate reads, and no others: fetching the whole set
     # every minute would pay for a run's record to answer one question.
     assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == ["summary.json", "keepup_samples.jsonl"]
+
+
+def _gated(tmp_path: Path, arguments: list[str], status: str, gate_calls: Path) -> subprocess.CompletedProcess[str]:
+    """One `gate.sh` tick, in a working directory the ticks share.
+
+    Shared because the count of consecutive verdicts lives beside the run, so
+    what is under test is what one tick leaves for the next.
+    """
+    run = _run_driver(
+        GATE,
+        [RUN_ID, *arguments],
+        tmp_path,
+        {"STUB_GATE_LOG": str(gate_calls), "STUB_GATE_STATUS": status},
+        programs={"gate": GATE_STUB},
+    )
+    return run.result
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("required", [None, 1])
+def test_a_teardown_waits_for_the_verdict_to_repeat(tmp_path: Path, required: int | None) -> None:
+    """One tick is not a run's answer, and `--teardown` destroys the fleet.
+
+    The gate judges the lag as of the last sample, so a fleet still working
+    through a cold start, a checkpoint that took a moment, or a poll that read
+    a stale prefix each produce a single breaching tick that the next one
+    contradicts. Requiring the verdict to repeat is what separates those from
+    a fleet that will never catch up. `--breaches 1` is the old behaviour, for
+    a caller that wants it.
+    """
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+    arguments = ["--teardown"] if required is None else ["--teardown", "--breaches", str(required)]
+    ticks = 3 if required is None else 1
+
+    for number in range(1, ticks):
+        early = _gated(tmp_path, arguments, "3", gate_calls)
+        assert early.returncode == 3, early.stdout + early.stderr
+        assert f"breach {number} of {ticks}" in early.stderr, early.stderr
+        assert "tearing" not in early.stderr, early.stderr
+
+    acted = _gated(tmp_path, arguments, "3", gate_calls)
+    assert acted.returncode == 3, acted.stdout + acted.stderr
+    assert f"not been PASS for {ticks} consecutive" in acted.stderr, acted.stderr
+    assert "so its fleet may still be running" in acted.stderr, acted.stderr
+
+
+@needs_shell_tools
+def test_a_pass_forgets_the_breaches_before_it(tmp_path: Path) -> None:
+    """Consecutive means consecutive: one passing tick starts the count again.
+
+    Otherwise a run that breached twice hours apart would be torn down by an
+    unrelated third, which is the same false positive the requirement exists
+    to remove.
+    """
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+
+    breached = _gated(tmp_path, ["--teardown"], "3", gate_calls)
+    assert breached.returncode == 3 and "breach 1 of 3" in breached.stderr, breached.stderr
+    passed = _gated(tmp_path, ["--teardown"], "0", gate_calls)
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    again = _gated(tmp_path, ["--teardown"], "3", gate_calls)
+    assert "breach 1 of 3" in again.stderr, again.stderr
+
+
+@needs_shell_tools
+def test_a_gate_without_teardown_judges_and_leaves_the_fleet_alone(tmp_path: Path) -> None:
+    """The verdict is the exit code either way; only `--teardown` acts on it."""
+    gate_calls = tmp_path / "gate-calls.log"
+    gate_calls.touch()
+    for status in ("0", "3", "5"):
+        judged = _gated(tmp_path, [], status, gate_calls)
+        assert judged.returncode == int(status), judged.stdout + judged.stderr
+        assert "tearing" not in judged.stderr, judged.stderr
 
 
 @needs_shell_tools

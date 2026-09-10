@@ -48,6 +48,13 @@ NO_GEOMETRY = 4
 DEFAULT_ADAPTATION_S = 120
 DEFAULT_FLOOR_WINDOW_S = 60
 
+# How old the newest keep-up sample may be and still be a reading. The width of
+# the gate's own newest floor window, because a reading older than that leaves
+# the rising-floor test with no samples to read — and it is an order of
+# magnitude above the scorer's own poll interval and the bounded retry behind
+# it, so a healthy reader is never called stale.
+DEFAULT_STALE_AFTER_S = DEFAULT_FLOOR_WINDOW_S
+
 
 def build_score_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -136,6 +143,13 @@ def build_gate_parser() -> argparse.ArgumentParser:
         default=DEFAULT_FLOOR_WINDOW_S,
         help="the width of each backlog-floor window; the floor rising over three of them is a fleet falling behind",
     )
+    parser.add_argument(
+        "--stale-after-s",
+        type=int,
+        default=DEFAULT_STALE_AFTER_S,
+        help="a run whose newest keep-up sample is older than this is void: a scorer that was killed rather than "
+        "raising leaves a summary that still reads as a healthy run",
+    )
     return parser
 
 
@@ -211,6 +225,7 @@ def gate(argv: Sequence[str] | None = None) -> int:
         window_s=int(args.window_s),
         now_ms=SystemClock().now_ms(),
         epoch_ms=int(cast(int, summary["epoch_ms"])),
+        stale_after_s=int(args.stale_after_s),
     )
     return _report(verdict, reason)
 

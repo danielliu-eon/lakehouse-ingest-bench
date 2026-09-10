@@ -8,6 +8,11 @@
 # which of them was asked.
 #
 # It exits with the gate's own code: 0 PASS, 3 UNDERSIZED, 5 VOID.
+#
+# `--teardown` destroys a fleet, so it waits for the verdict to repeat. The
+# gate judges the lag as of the newest sample, and a fleet still working
+# through a cold start, a checkpoint that took a moment or a poll that read a
+# stale prefix each produce one breaching tick the next one contradicts.
 set -euo pipefail
 # The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
@@ -23,7 +28,8 @@ usage: scripts/gate.sh <run_id> [options]
   <run_id>           a launched run, whose scorer is publishing under the runs prefix
   --site PATH        the site config naming the runs prefix (default: ./site.yaml)
   --image-tag TAG    passed to teardown.sh, which runs one harness Job (default: this checkout's commit)
-  --teardown         tear the run down when the verdict is not PASS
+  --teardown         tear the run down once the verdict has not been PASS this many ticks running
+  --breaches N       how many consecutive non-PASS verdicts --teardown waits for (default 3; 1 acts at once)
 
 Environment: RUNS_DIR.
 
@@ -34,6 +40,11 @@ USAGE
 RUN_ID=""
 TEARDOWN=0
 IMAGE_TAG=""
+# How many consecutive non-PASS verdicts `--teardown` waits for. Three, because
+# the gate is polled about once a minute: two ticks is inside the noise a cold
+# start or one slow checkpoint produces, and three minutes of a fleet that is
+# not passing is minutes rather than hours of a run nobody can publish.
+BREACHES_REQUIRED=3
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--site)
@@ -47,6 +58,12 @@ while [[ $# -gt 0 ]]; do
 	--teardown)
 		TEARDOWN=1
 		shift
+		;;
+	--breaches)
+		BREACHES_REQUIRED="${2:?--breaches needs a count}"
+		[[ $BREACHES_REQUIRED =~ ^[1-9][0-9]*$ ]] ||
+			die "--breaches takes a count of consecutive verdicts, and was given '$BREACHES_REQUIRED'"
+		shift 2
 		;;
 	-h | --help)
 		usage
@@ -100,10 +117,34 @@ fi
 VERDICT_STATUS=0
 harness_local "${GATE[@]}" || VERDICT_STATUS=$?
 
-if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)); then
+# How many ticks in a row have not been PASS, kept beside the run because each
+# tick is its own process: an operator runs this every minute or so, and a
+# count held in memory would be one tick long.
+BREACH_FILE="$RUNS_DIR/$RUN_ID/gate-breaches"
+BREACHES=0
+if ((VERDICT_STATUS == 0)); then
+	# Consecutive means consecutive: a passing tick starts the count again, so
+	# two breaches hours apart cannot be joined by an unrelated third.
+	rm -f "$BREACH_FILE"
+else
+	if [[ -f $BREACH_FILE ]]; then
+		BREACHES="$(cat "$BREACH_FILE")"
+		[[ $BREACHES =~ ^[0-9]+$ ]] ||
+			die "$BREACH_FILE holds '$BREACHES' rather than a count of consecutive verdicts; remove it"
+	fi
+	BREACHES=$((BREACHES + 1))
+	mkdir -p "$RUNS_DIR/$RUN_ID"
+	printf '%s\n' "$BREACHES" >"$BREACH_FILE"
+fi
+
+if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)) && ((BREACHES < BREACHES_REQUIRED)); then
+	log "the verdict is not PASS (breach $BREACHES of $BREACHES_REQUIRED), so $RUN_ID is left running"
+fi
+
+if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)) && ((BREACHES >= BREACHES_REQUIRED)); then
 	# Any non-zero answer, including a gate that found no measurement to judge:
 	# each of them says the run is not worth paying for another minute of.
-	log "the verdict is not PASS, so tearing $RUN_ID down"
+	log "the verdict has not been PASS for $BREACHES consecutive ticks, so tearing $RUN_ID down"
 	# The tag reaches teardown.sh, whose drop-topic Job would otherwise default
 	# to this checkout's commit — which need not be the commit that was pushed.
 	TEARDOWN_ARGS=("$RUN_ID" --site "$SITE_FILE")

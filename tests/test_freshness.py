@@ -113,6 +113,11 @@ def test_exactness_result() -> None:
     assert r["exact"] is False and r["duplicate_rows"] == 2 and r["loss_rows"] == 0 and r["duplicate_ppm"] == 100_000.0
 
 
+# What the gate is given for the staleness bound in these cases: the default,
+# which is the width of its own newest floor window.
+STALE_AFTER_S = 60
+
+
 def test_gate() -> None:
     samples = [
         keepup.KeepupSample(E + i * 1000, 1000 * i, 1000 * i - min(i, 5) * 100, min(i, 5) * 100, None, None)
@@ -126,6 +131,7 @@ def test_gate() -> None:
         window_s=60,
         now_ms=E + 400_000,
         epoch_ms=E,
+        stale_after_s=STALE_AFTER_S,
     )
     assert flat[0] == "PASS"
     late = gate.gate_verdict(
@@ -136,6 +142,7 @@ def test_gate() -> None:
         window_s=60,
         now_ms=E + 400_000,
         epoch_ms=E,
+        stale_after_s=STALE_AFTER_S,
     )
     assert late[0] == "UNDERSIZED"
     rising = [keepup.KeepupSample(E + i * 1000, 1000 * i, 700 * i, 300 * i, None, None) for i in range(1, 400)]
@@ -148,6 +155,7 @@ def test_gate() -> None:
             window_s=60,
             now_ms=E + 400_000,
             epoch_ms=E,
+            stale_after_s=STALE_AFTER_S,
         )[0]
         == "UNDERSIZED"
     )
@@ -160,6 +168,83 @@ def test_gate() -> None:
             window_s=60,
             now_ms=E + 400_000,
             epoch_ms=E,
+            stale_after_s=STALE_AFTER_S,
         )[0]
         == "VOID"
     )
+
+
+def test_a_reading_nothing_is_still_taking_is_void_and_never_a_pass() -> None:
+    """A scorer that died leaves a summary that reads as a run going well.
+
+    Its last mirrored `summary.json` carries `aborted: false` and a lag inside
+    the bound — the `except` block that would have set the flag never ran,
+    because an OOMKill, an eviction or a lost node does not run one. So the
+    liveness signal is the age of the newest keep-up sample: past the bound,
+    there is nothing measuring the run, whatever the last measurement said.
+    """
+    samples = [
+        keepup.KeepupSample(E + i * 1000, 1000 * i, 1000 * i - min(i, 5) * 100, min(i, 5) * 100, None, None)
+        for i in range(1, 400)
+    ]
+    within_bound = {"lag_s": 30.0, "aborted": False}
+    fresh = gate.gate_verdict(
+        within_bound,
+        samples,
+        bound_s=180,
+        adaptation_s=120,
+        window_s=60,
+        now_ms=E + 400_000,
+        epoch_ms=E,
+        stale_after_s=STALE_AFTER_S,
+    )
+    assert fresh[0] == "PASS"
+
+    stale = gate.gate_verdict(
+        within_bound,
+        samples,
+        bound_s=180,
+        adaptation_s=120,
+        window_s=60,
+        # Two minutes after the last sample, with a sixty-second bound.
+        now_ms=E + 520_000,
+        epoch_ms=E,
+        stale_after_s=STALE_AFTER_S,
+    )
+    assert stale[0] == "VOID" and "121s old" in stale[1], stale
+
+    # And a run whose scorer published no sample at all is the same answer:
+    # the absence of a measurement, not a measurement of a healthy fleet.
+    none_at_all = gate.gate_verdict(
+        within_bound,
+        [],
+        bound_s=180,
+        adaptation_s=120,
+        window_s=60,
+        now_ms=E + 400_000,
+        epoch_ms=E,
+        stale_after_s=STALE_AFTER_S,
+    )
+    assert none_at_all[0] == "VOID" and "no keep-up sample" in none_at_all[1], none_at_all
+
+
+def test_an_empty_newest_window_is_void_however_the_bound_was_raised() -> None:
+    """The rising-floor test cannot fire over a window with no samples in it.
+
+    `_backlog_floors` returns None there precisely so that an empty window
+    cannot read as a cleared backlog — and a verdict that then reported PASS
+    would have cleared it anyway. Reachable only with a staleness bound raised
+    past the window's own width, which is why both checks exist.
+    """
+    samples = [keepup.KeepupSample(E + i * 1000, 1000 * i, 900 * i, 100 * i, None, None) for i in range(1, 100)]
+    verdict = gate.gate_verdict(
+        {"lag_s": 30.0, "aborted": False},
+        samples,
+        bound_s=180,
+        adaptation_s=120,
+        window_s=10,
+        now_ms=E + 160_000,
+        epoch_ms=E,
+        stale_after_s=600,
+    )
+    assert verdict[0] == "VOID" and "last 10s" in verdict[1], verdict

@@ -16,6 +16,13 @@ however busy each individual commit looked.
 UNDERSIZED and VOID are kept apart on purpose: the first is an answer about the
 fleet, the second is the absence of an answer, and a sweep that conflates them
 reports missing measurements as capacity limits.
+
+Which is why the first thing judged is whether anything is still measuring. A
+scorer that was killed rather than raising leaves a summary saying the run was
+going well: the flag that says otherwise is set by an `except` block, and an
+OOMKill, an eviction or a lost node runs none. So liveness is read off the age
+of the newest keep-up sample instead, and a reading nothing is still taking is
+the absence of an answer however healthy the last one looked.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ def gate_verdict(
     window_s: int,
     now_ms: int,
     epoch_ms: int,
+    stale_after_s: int,
 ) -> tuple[str, str]:
     """Judge a run in flight, with the figure that decided it.
 
@@ -64,9 +72,23 @@ def gate_verdict(
     scaling out to meet its first rows is lagging for a reason that will pass,
     and a gate that fired there would report every cold start as a capacity
     limit.
+
+    ``stale_after_s`` is how old the newest keep-up sample may be and still be
+    a reading. Past it the verdict is void whatever the summary says, since the
+    summary is only ever as recent as the process that wrote it.
     """
     if freshness_partial["aborted"]:
         return VOID, "the freshness reader aborted, so the run has no measurement to judge"
+
+    newest_ms = max((sample.at_ms for sample in keepup_samples), default=None)
+    if newest_ms is None:
+        return VOID, "the scorer has published no keep-up sample, so nothing is measuring the run"
+    age_s = (now_ms - newest_ms) / 1000
+    if age_s > stale_after_s:
+        return VOID, (
+            f"the scorer's newest keep-up sample is {age_s:.0f}s old, past the {stale_after_s}s staleness bound, "
+            "so nothing is measuring the run"
+        )
 
     lag = freshness_partial["lag_s"]
     if lag is not None and not isinstance(lag, (int, float)):
@@ -77,9 +99,13 @@ def gate_verdict(
         return UNDERSIZED, f"lag {lag:.1f}s is past the {max_bound_s:.0f}s max bound {adaptation_s}s after the epoch"
 
     recent, middle, oldest = _backlog_floors(keepup_samples, now_ms=now_ms, window_s=window_s, windows=_FLOOR_WINDOWS)
-    if recent is not None and middle is not None and oldest is not None and recent > middle > oldest > 0:
+    if recent is None:
+        # Unreachable while the staleness bound is at or under the window's own
+        # width, and the point of the check is that raising the bound cannot
+        # turn an unfirable floor test into a pass.
+        return VOID, f"no keep-up sample in the last {window_s}s, so the backlog floor cannot be read"
+    if middle is not None and oldest is not None and recent > middle > oldest > 0:
         return UNDERSIZED, f"backlog floor rose {oldest} -> {middle} -> {recent} rows over three {window_s}s windows"
 
     lag_figure = f"lag {lag:.1f}s" if lag is not None else "no lag sample yet"
-    floor_figure = f"backlog floor {recent} rows" if recent is not None else "no backlog samples in the last window"
-    return PASS, f"{lag_figure} within the {max_bound_s:.0f}s max bound, {floor_figure} not rising"
+    return PASS, f"{lag_figure} within the {max_bound_s:.0f}s max bound, backlog floor {recent} rows not rising"
