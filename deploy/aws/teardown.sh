@@ -7,7 +7,8 @@
 # By default the bucket, the ECR repositories and both engine operators stay:
 # the corpus is the expensive thing to rebuild, the images are the slow thing to
 # push, and an operator is shared with whatever else runs on the cluster.
-# `--all` removes those as well, corpus included.
+# `--all` removes those as well, corpus included — and asks first about the
+# bucket, which is the one step that destroys measured data.
 #
 # Like `setup.sh` it never creates, deletes or reconfigures the EKS cluster, and
 # it leaves the eks-pod-identity-agent add-on installed — the add-on is free and
@@ -23,10 +24,12 @@ source "$AWS_DIR/../../scripts/_lib.sh"
 
 usage() {
 	cat <<'USAGE'
-usage: deploy/aws/teardown.sh [--all]
+usage: deploy/aws/teardown.sh [--all] [--yes]
 
   --all   also delete the bucket and everything in it, the three ECR
           repositories and both engine operators' releases
+  --yes   do not ask before emptying the bucket; for a teardown run from a
+          script
 
 Environment: AWS_REGION and CLUSTER_NAME are required. BUCKET, MSK_NAME,
 NAMESPACE and KUBE_CONTEXT mean what they mean to setup.sh and must match the
@@ -35,10 +38,15 @@ USAGE
 }
 
 ALL=0
+ASSUME_YES=no
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--all)
 		ALL=1
+		shift
+		;;
+	--yes)
+		ASSUME_YES=yes
 		shift
 		;;
 	-h | --help)
@@ -210,23 +218,6 @@ if ((ALL == 0)); then
 	exit 0
 fi
 
-if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
-	log "emptying and deleting s3://$BUCKET — every corpus and every run's artifacts"
-	aws s3 rm "s3://$BUCKET" --recursive >/dev/null
-	if ! DELETE_ERROR="$(aws s3api delete-bucket --bucket "$BUCKET" 2>&1)"; then
-		case "$DELETE_ERROR" in
-		*BucketNotEmpty*)
-			die "s3://$BUCKET still holds objects: $DELETE_ERROR
-     A bucket that was versioned before keeps its noncurrent versions, which \`aws s3 rm\` does not remove.
-     Delete them (aws s3api list-object-versions / delete-objects) and re-run with --all."
-			;;
-		*) die "could not delete s3://$BUCKET: $DELETE_ERROR" ;;
-		esac
-	fi
-else
-	log "s3://$BUCKET is already gone"
-fi
-
 # shellcheck disable=SC2086  # a deliberate expansion: the names are space separated
 for repository in $ECR_REPOSITORIES; do
 	if aws ecr describe-repositories --repository-names "$repository" >/dev/null 2>&1; then
@@ -257,3 +248,57 @@ if ((CLUSTER_PRESENT == 1)); then
 		log "the Kubeflow spark-operator is not a helm release here; leaving it alone"
 	fi
 fi
+
+# ---------------------------------------------------------------------------
+# The bucket, last and asked about
+# ---------------------------------------------------------------------------
+
+# Whether the bucket carries the tag `setup.sh` puts on everything it creates.
+# A bucket with no tag set at all answers with an API error rather than an empty
+# tag list, and both mean the same thing here.
+bucket_is_ours() {
+	local tags
+	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
+		--query "TagSet[?Key=='$TAG_KEY'].Value" --output text 2>/dev/null)" || return 1
+	[[ $tags == true ]]
+}
+
+# The corpus, every run's artifacts and the warehouse. Matched on the tag the
+# way the security group above is, so a bucket of this name that this benchmark
+# did not create is not the one emptied — `BUCKET` defaults to a name derived
+# from the account id, which an operator may well have used for something else.
+# And asked about, because describing a deletion is not the same as asking.
+remove_bucket() {
+	if ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
+		log "s3://$BUCKET is already gone"
+		return 0
+	fi
+	bucket_is_ours "$BUCKET" ||
+		die "s3://$BUCKET carries no $TAG_KEY tag, so this benchmark did not create it and will not empty it;
+     name the right one with BUCKET, or remove that one yourself"
+	printf 'emptying and deleting s3://%s removes, permanently:\n' "$BUCKET"
+	printf '  every corpus generated into it\n'
+	printf '  every run%s artifacts, scores and publish logs\n' "'s"
+	printf '  the warehouse, and every table any run has written\n'
+	if [[ $ASSUME_YES == no ]]; then
+		confirm "remove all of the above?"
+	fi
+	log "emptying and deleting s3://$BUCKET"
+	aws s3 rm "s3://$BUCKET" --recursive >/dev/null
+	local delete_error
+	if ! delete_error="$(aws s3api delete-bucket --bucket "$BUCKET" 2>&1)"; then
+		case "$delete_error" in
+		*BucketNotEmpty*)
+			die "s3://$BUCKET still holds objects: $delete_error
+     A bucket that was versioned before keeps its noncurrent versions, which \`aws s3 rm\` does not remove.
+     Delete them (aws s3api list-object-versions / delete-objects) and re-run with --all."
+			;;
+		*) die "could not delete s3://$BUCKET: $delete_error" ;;
+		esac
+	fi
+}
+
+# Last of the three, because it is the one that destroys measured data: a
+# refusal here leaves the images and the operators already gone rather than
+# leaving a teardown to be run again.
+remove_bucket

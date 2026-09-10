@@ -597,6 +597,132 @@ def test_a_broker_volume_size_msk_would_not_report_is_refused() -> None:
     assert "die a-cluster reports no broker volume size" in unread.stdout, unread.stdout
 
 
+@dataclass(frozen=True)
+class BucketStep:
+    """One run of a bucket step, and every `aws` call and question it made."""
+
+    result: subprocess.CompletedProcess[str]
+    calls: str
+    asked: str
+
+
+def _bucket_step(script: Path, function: str, *, tags: str | None, answered: str = "yes") -> BucketStep:
+    """One script's own bucket lines, against fixed answers from S3.
+
+    Lifted and run rather than read, like the broker-volume growth above: the
+    path sits behind a live account, and the branches in it are the ones that
+    decide whether a bucket the operator keeps something else in is reconfigured
+    or emptied. ``tags`` is None for a bucket that does not exist, empty for one
+    with no tag of ours, and the tag's value otherwise.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        calls = Path(directory) / "aws-calls.log"
+        calls.touch()
+        asked = Path(directory) / "asked.log"
+        asked.touch()
+        present = "1" if tags is not None else ""
+        stub = f"""
+            printf 'aws %s\n' "$*" >>'{calls}'
+            case "$*" in
+            *head-bucket*) [[ -n '{present}' ]] || return 1 ;;
+            *get-bucket-tagging*)
+                [[ -n '{tags or ""}' ]] || return 254
+                printf '%s\n' '{tags or ""}'
+                ;;
+            *get-bucket-versioning*) printf 'None\n' ;;
+            esac
+        """
+        harness = f"""
+            set -euo pipefail
+            log() {{ printf 'log %s\n' "$*"; }}
+            die() {{ printf 'die %s\n' "$*"; exit 3; }}
+            confirm() {{ printf '%s\n' "$*" >>'{asked}'; [[ '{answered}' == yes ]] || die "answered nothing"; }}
+            aws() {{{stub}}}
+            AWS_REGION=eu-west-1
+            BUCKET=a-bucket
+            TAG_KEY=lakehouse-ingest-bench
+            ASSUME_YES=no
+{_shell_function(script, "bucket_is_ours")}
+{_shell_function(script, function)}
+            {function}
+        """
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+        return BucketStep(result=result, calls=calls.read_text(), asked=asked.read_text())
+
+
+@needs_bash
+def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
+    """Neither of the two calls it would make is additive.
+
+    PutBucketTagging replaces the whole tag set and PutBucketVersioning
+    suspends versioning, so adopting a bucket would silently reconfigure one
+    the operator keeps something else in — and `BUCKET` defaults to a name
+    derived from the account id, which is exactly the name someone may have
+    used already.
+    """
+    refused = _bucket_step(AWS_SETUP, "create_bucket", tags="")
+    assert refused.result.returncode == 3, refused.result.stdout
+    assert "carries no lakehouse-ingest-bench tag" in refused.result.stdout, refused.result.stdout
+    for mutation in ("put-bucket-tagging", "put-bucket-versioning", "put-public-access-block"):
+        assert mutation not in refused.calls, refused.calls
+
+
+@needs_bash
+def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
+    """A bucket it created before is adopted, and an absent one is created."""
+    created = _bucket_step(AWS_SETUP, "create_bucket", tags=None)
+    assert created.result.returncode == 0, created.result.stdout + created.result.stderr
+    assert "create-bucket --bucket a-bucket" in created.calls, created.calls
+    assert "put-bucket-tagging" in created.calls
+
+    adopted = _bucket_step(AWS_SETUP, "create_bucket", tags="true")
+    assert adopted.result.returncode == 0, adopted.result.stdout + adopted.result.stderr
+    assert "create-bucket" not in adopted.calls, adopted.calls
+    assert "put-bucket-tagging" in adopted.calls
+
+
+@needs_bash
+def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
+    """The tag check the security-group deletion has, on the more destructive step.
+
+    `BUCKET` is a name derived from the account id, and what `--all` does to it
+    is remove every corpus, every run's artifacts and the warehouse.
+    """
+    refused = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="")
+    assert refused.result.returncode == 3, refused.result.stdout
+    assert "carries no lakehouse-ingest-bench tag" in refused.result.stdout, refused.result.stdout
+    assert "s3 rm" not in refused.calls and "delete-bucket" not in refused.calls, refused.calls
+    assert refused.asked == "", "a bucket it will not empty is not one to ask about"
+
+
+@needs_bash
+def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> None:
+    """Describing a deletion is not the same as asking for it.
+
+    `purge.sh` argues the policy for the same class of data and implements the
+    prompt; this is the same data, one level up.
+    """
+    asked = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="no")
+    assert asked.result.returncode == 3, asked.result.stdout
+    assert "remove all of the above?" in asked.asked, asked.asked
+    assert "every corpus generated into it" in asked.result.stdout, asked.result.stdout
+    assert "s3 rm" not in asked.calls and "delete-bucket" not in asked.calls, asked.calls
+
+    answered = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="yes")
+    assert answered.result.returncode == 0, answered.result.stdout + answered.result.stderr
+    assert "s3 rm s3://a-bucket --recursive" in answered.calls, answered.calls
+    assert "delete-bucket --bucket a-bucket" in answered.calls, answered.calls
+
+
+@needs_bash
+def test_teardown_leaves_a_bucket_that_is_already_gone_alone() -> None:
+    """A re-run after a partial teardown finishes the job rather than failing."""
+    gone = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags=None)
+    assert gone.result.returncode == 0, gone.result.stdout + gone.result.stderr
+    assert "already gone" in gone.result.stdout, gone.result.stdout
+    assert "s3 rm" not in gone.calls and gone.asked == ""
+
+
 def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pinned_version() -> None:
     """The chart, the pin, and the three values the install cannot be right without.
 
@@ -2727,7 +2853,7 @@ def test_purge_names_what_it_would_remove_and_removes_nothing_unasked(tmp_path: 
     _torn_down_run(tmp_path)
     run = _run_driver(PURGE, [RUN_ID], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
     assert run.result.returncode != 0
-    assert "pass --yes to purge unattended" in run.result.stderr
+    assert "pass --yes to run unattended" in run.result.stderr
 
     assert str(FACTS["table"]) in run.result.stdout
     assert TABLE_LOCATION in run.result.stdout

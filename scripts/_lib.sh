@@ -88,6 +88,24 @@ print_verdict() {
 		die "run_valid is false; the block above says why, in full in $summary"
 }
 
+# confirm <what> — a y/N question, answered on stdin, for a step that destroys
+# measured data or the bucket holding it.
+#
+# stdin rather than the terminal device, so a caller can answer through a pipe.
+# A caller with no stdin at all is refused rather than defaulted: "nothing
+# answered" is not consent to delete. The caller has already printed what goes;
+# this asks about it.
+confirm() {
+	[[ -t 0 ]] || die "nothing is attached to answer, and this does not assume one; pass --yes to run unattended"
+	printf '%s [y/N] ' "$1"
+	local answer=""
+	read -r answer || true
+	case "$answer" in
+	y | Y) return 0 ;;
+	*) die "answered '${answer:-nothing}', so nothing was removed" ;;
+	esac
+}
+
 # Refuse up front rather than half way through a run. A missing `yq` surfaces
 # otherwise as a scorer given an empty `--warmup-s`, minutes after the corpus
 # was generated.

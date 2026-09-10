@@ -137,17 +137,7 @@ if [[ $ARTIFACTS == yes ]]; then
 fi
 
 if [[ $ASSUME_YES == no ]]; then
-	# stdin rather than the terminal device, so a caller can answer through a
-	# pipe. A caller with no stdin at all is refused rather than defaulted:
-	# "nothing answered" is not consent to delete measured data.
-	[[ -t 0 ]] || die "nothing is attached to answer, and this does not assume one; pass --yes to purge unattended"
-	printf 'remove all of the above? [y/N] '
-	ANSWER=""
-	read -r ANSWER || true
-	case "$ANSWER" in
-	y | Y) ;;
-	*) die "answered '${ANSWER:-nothing}', so nothing was removed" ;;
-	esac
+	confirm "remove all of the above?"
 fi
 
 # ---------------------------------------------------------------------------

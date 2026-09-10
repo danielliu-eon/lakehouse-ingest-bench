@@ -180,31 +180,57 @@ log "flink operator: $OPERATOR_CHART"
 # S3
 # ---------------------------------------------------------------------------
 
-if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
-	log "s3://$BUCKET exists"
-else
-	log "creating s3://$BUCKET"
-	# us-east-1 is the one region whose CreateBucket refuses a location
-	# constraint naming it.
-	if [[ $AWS_REGION == us-east-1 ]]; then
-		aws s3api create-bucket --bucket "$BUCKET" >/dev/null
+# Whether the bucket already carries the tag this script puts on everything it
+# creates. A bucket with no tag set at all answers with an API error rather than
+# an empty tag list, and both mean the same thing here.
+bucket_is_ours() {
+	local tags
+	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
+		--query "TagSet[?Key=='$TAG_KEY'].Value" --output text 2>/dev/null)" || return 1
+	[[ $tags == true ]]
+}
+
+# The bucket, created or adopted, and then configured the way a corpus wants it.
+#
+# A bucket that already exists and does not carry the tag is refused rather than
+# adopted: the two calls below are not additive — PutBucketTagging replaces the
+# whole tag set and PutBucketVersioning suspends versioning — so adopting one
+# would silently reconfigure a bucket the operator keeps something else in.
+# `BUCKET` defaults to a name derived from the account id, which is exactly the
+# name someone may already have used.
+create_bucket() {
+	if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
+		bucket_is_ours "$BUCKET" ||
+			die "s3://$BUCKET already exists and carries no $TAG_KEY tag, so this script did not create it;
+     tagging and versioning are set below and neither call is additive, so it will not adopt one.
+     Name a bucket of your own with BUCKET, or tag that one $TAG_KEY=true if it is meant to be this benchmark's."
+		log "s3://$BUCKET exists"
 	else
-		aws s3api create-bucket --bucket "$BUCKET" \
-			--create-bucket-configuration "LocationConstraint=$AWS_REGION" >/dev/null
+		log "creating s3://$BUCKET"
+		# us-east-1 is the one region whose CreateBucket refuses a location
+		# constraint naming it.
+		if [[ $AWS_REGION == us-east-1 ]]; then
+			aws s3api create-bucket --bucket "$BUCKET" >/dev/null
+		else
+			aws s3api create-bucket --bucket "$BUCKET" \
+				--create-bucket-configuration "LocationConstraint=$AWS_REGION" >/dev/null
+		fi
 	fi
-fi
-aws s3api put-public-access-block --bucket "$BUCKET" \
-	--public-access-block-configuration \
-	BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws s3api put-bucket-tagging --bucket "$BUCKET" --tagging "TagSet=[{Key=$TAG_KEY,Value=true}]"
-# Only when it is actually on. A corpus is regenerated rather than restored, so
-# versions buy nothing and every deleted object of a hundred-gigabyte corpus
-# would keep being billed; a bucket that never had versioning needs no call at
-# all, and PutBucketVersioning is the only way to turn one off.
-if [[ "$(aws s3api get-bucket-versioning --bucket "$BUCKET" --query 'Status' --output text)" == Enabled ]]; then
-	log "suspending versioning on s3://$BUCKET"
-	aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Suspended
-fi
+	aws s3api put-public-access-block --bucket "$BUCKET" \
+		--public-access-block-configuration \
+		BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+	aws s3api put-bucket-tagging --bucket "$BUCKET" --tagging "TagSet=[{Key=$TAG_KEY,Value=true}]"
+	# Only when it is actually on. A corpus is regenerated rather than restored,
+	# so versions buy nothing and every deleted object of a hundred-gigabyte
+	# corpus would keep being billed; a bucket that never had versioning needs
+	# no call at all, and PutBucketVersioning is the only way to turn one off.
+	if [[ "$(aws s3api get-bucket-versioning --bucket "$BUCKET" --query 'Status' --output text)" == Enabled ]]; then
+		log "suspending versioning on s3://$BUCKET"
+		aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Suspended
+	fi
+}
+
+create_bucket
 
 # ---------------------------------------------------------------------------
 # ECR
