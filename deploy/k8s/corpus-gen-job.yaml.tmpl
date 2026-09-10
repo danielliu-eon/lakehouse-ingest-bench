@@ -32,17 +32,9 @@ spec:
           image: __IMAGE__
           args: ["__COMMAND__"]
           env: __ENV__
-          # Every key of the Secret site.kubernetes.secret_name names, as
-          # environment variables. This is what a `${env:NAME}` in a property
-          # resolves against: the manifest and the command line carry the
-          # reference, and the value exists only in that Secret.
           envFrom: __ENV_FROM__
-          # The generator holds one whole batch in memory while it encodes it,
-          # so its peak is set by the preset's batch bytes and not by the shard
-          # count: sharding buys throughput, never headroom. The default fits
-          # the smoke preset; see "Generating a corpus" in docs/running.md for
-          # what the larger ones need, and the driver's GEN_MEMORY for how to
-          # ask for it.
+          # Sized by the preset's batch bytes and not by the pod count; the
+          # driver's GEN_MEMORY is what raises it.
           resources:
             requests:
               cpu: "1"

@@ -656,8 +656,7 @@ def _region_env(cluster: KubernetesConfig) -> list[dict[str, str]]:
     botocore reads `AWS_DEFAULT_REGION` alone and is left with no region at all
     when only the other is set.
 
-    A copy per caller, like the mount and the placement above: one list
-    reached twice renders as an anchor and an alias.
+    A copy per caller, for the reason above.
     """
     if cluster.aws_region is None:
         return []
@@ -671,9 +670,7 @@ def _secret_env_from(cluster: KubernetesConfig) -> list[dict[str, object]]:
     against: `job.json` reaches a pod through a ConfigMap and the run's prefix
     in the bucket, so it holds the reference and this Secret holds the value.
     Both halves of the fleet get it — the executors open the Kafka source and
-    the driver commits — and a copy per caller, like the mount and the
-    placement above, because one list reached twice renders as an anchor and
-    an alias.
+    the driver commits — and a copy per caller, for the reason above.
     """
     if cluster.secret_name is None:
         return []

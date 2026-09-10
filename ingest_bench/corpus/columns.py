@@ -50,9 +50,8 @@ KIND_BOOLEAN = "boolean"
 KIND_TIMESTAMP = "timestamp"
 KIND_BLOB = "blob"
 
-# Row identity and partition truth are read out of these columns, so they are
-# computed, never drawn: a distribution over them would change what the scored
-# ground truth means.
+# The two reserved fields, as the names the generator computes rather than
+# draws.
 RESERVED_FIELDS = frozenset({"id", "partition_key"})
 
 # A role is what the benchmark asks of a column irrespective of its name, which

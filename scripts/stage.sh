@@ -244,8 +244,7 @@ else
 	VERIFY_DRIFT_STATUS=3
 	VERIFY_PENDING_STATUS=4
 	VERIFY_TRIES=3
-	# Absolute, because `harness_local`'s checkout fallback runs from the
-	# repository root and not from the operator's working directory.
+	# Absolute, for the reason `abs_path` gives.
 	VERIFY_SPEC="$(cd -- "$RUN_DIR" && pwd)/spec.yaml" || die "could not resolve $RUN_DIR to check the engine against"
 	[[ -f $VERIFY_SPEC ]] ||
 		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"

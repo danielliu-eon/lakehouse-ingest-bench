@@ -2404,8 +2404,6 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
-    # The copied spec, because a teardown reads which engine a run started out
-    # of it rather than guessing from the documents beside it.
     (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
     (run_dir / "flink-job-configmap.yaml").write_text("# flink-job-configmap.yaml\n")
@@ -2627,8 +2625,6 @@ def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
-    # The copied spec, because a teardown reads which engine a run started out
-    # of it rather than guessing from the documents beside it.
     (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
 
@@ -2964,8 +2960,7 @@ def test_finish_measures_the_geometry_from_the_copied_document_and_reports_it(tm
     assert f"/work/runs/{RUN_ID}/table-metadata.final.json" in measured
     assert "--epoch 1757419200" in measured
     assert f"/work/runs/{RUN_ID}/scores" in measured
-    # Absolute, because `harness_local`'s checkout fallback runs from the
-    # repository root: a relative path there names a file in the checkout.
+    # Absolute, for the reason `abs_path` gives.
     assert "--metadata /" in measured and "--out /" in measured
     # Every property the site declares, so the manifests the figures come from
     # are read with a region rather than against the global endpoint.
@@ -3121,8 +3116,6 @@ def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> Non
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
-    # The copied spec, because a teardown reads which engine a run started out
-    # of it rather than guessing from the documents beside it.
     (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
     (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
 
@@ -3148,8 +3141,7 @@ def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> Non
         f"s3://a-bucket/runs/{RUN_ID}/table-metadata.final.json" in run.aws_calls
     )
 
-    # Absolute paths, because `harness_local`'s checkout fallback runs from the
-    # repository root and a relative one there names a file in the checkout.
+    # Absolute, for the reason `abs_path` gives.
     collected = (tmp_path / "collect.log").read_text()
     assert "--run-dir /" in collected and f"/work/runs/{RUN_ID}" in collected
     assert "--site /" in collected and "/work/site.yaml" in collected

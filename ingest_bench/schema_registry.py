@@ -53,7 +53,6 @@ def subject_for(topic: str) -> str:
 
 
 def confluent_header(schema_id: int) -> bytes:
-    """The five bytes that precede an Avro value in the Confluent wire format."""
     if schema_id < 0:
         raise ValueError(f"a schema id is a non-negative integer, got {schema_id}")
     return CONFLUENT_MAGIC + schema_id.to_bytes(_SCHEMA_ID_BYTES, "big")

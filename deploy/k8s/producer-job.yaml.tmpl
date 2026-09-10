@@ -31,16 +31,9 @@ spec:
           image: __IMAGE__
           args: ["__COMMAND__"]
           env: __ENV__
-          # Every key of the Secret site.kubernetes.secret_name names, as
-          # environment variables. This is what a `${env:NAME}` in a property
-          # resolves against: the manifest and the command line carry the
-          # reference, and the value exists only in that Secret.
           envFrom: __ENV_FROM__
-          # A shard reads one whole batch object into memory and decompresses
-          # it whole, so its peak is set by the preset's batch bytes and not by
-          # the shard count: sharding buys throughput, never headroom. The
-          # driver's PRODUCER_MEMORY is what raises this for a preset whose
-          # batch is larger than the smoke one's.
+          # Sized by the preset's batch bytes and not by the pod count; the
+          # driver's PRODUCER_MEMORY is what raises it.
           #
           # Two cores, because a shard at full offer is two busy threads and
           # not one: the Python process encoding and pacing batches, and

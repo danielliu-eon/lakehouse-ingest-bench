@@ -40,10 +40,6 @@ spec:
           image: __IMAGE__
           args: ["__COMMAND__"]
           env: __ENV__
-          # Every key of the Secret site.kubernetes.secret_name names, as
-          # environment variables. This is what a `${env:NAME}` in a property
-          # resolves against: the manifest and the command line carry the
-          # reference, and the value exists only in that Secret.
           envFrom: __ENV_FROM__
           resources:
             requests:

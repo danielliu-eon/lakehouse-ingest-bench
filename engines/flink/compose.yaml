@@ -57,11 +57,9 @@ services:
   # this container open for the whole run. Pair `--wait` with an attached
   # submission if a caller ever wants the opposite.
   #
-  # `RUN_DIR` carries a default rather than being required. Interpolation runs
-  # over the whole model before profiles are filtered, so a required variable
-  # here would make every command in the stack — `up kafka` included — fail
-  # without it. The default is a path that cannot hold a run, so only an
-  # actual submission without `RUN_DIR` fails, and it names what is missing.
+  # `RUN_DIR` carries a default because interpolation precedes profile
+  # filtering — see the stack's own note. The default is a path that cannot
+  # hold a run, so only an actual submission without it fails.
   flink-job:
     profiles: [flink-job]
     image: lakehouse-ingest-bench/flink:local

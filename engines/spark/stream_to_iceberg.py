@@ -112,11 +112,9 @@ def read_job(path: Path) -> Job:
         value_encoding=_str_at(document, "value_encoding", path),
         table=_str_at(document, "table", path),
         columns=tuple(str(name) for name in cast(list[object], columns)),
-        # The source's options are the ones a site can put a credential in, so
-        # the document holds `${env:NAME}` and the value is read here, from
-        # this container's own environment. Nothing resolved is written back:
-        # the document reached this pod through a ConfigMap and is in the run's
-        # prefix in the bucket, and both keep the reference.
+        # Nothing resolved is written back: the document reached this pod
+        # through a ConfigMap and is in the run's prefix in the bucket, and
+        # both keep the reference.
         kafka_options=substitute_env_values(_string_map_at(document, "kafka_options", path)),
         write_options=_string_map_at(document, "write_options", path),
         trigger_interval=_str_at(document, "trigger_interval", path),

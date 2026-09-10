@@ -594,8 +594,6 @@ def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
     def unreadable(path: str, file_format: str) -> np.ndarray:
         raise RuntimeError("the object store stopped answering")
 
-    # The loop reaches it through the same module object, so this is the
-    # function it will call.
     monkeypatch.setattr(score, "read_id_column", unreadable)
     clock = StepClock(now_ms())
     log = io.StringIO()
@@ -633,8 +631,6 @@ def test_a_read_phase_past_the_poll_interval_says_so(
         clock.sleep(0.1 * len(added))
         return added
 
-    # The loop reaches it through the same module object, so this is the
-    # function it will call.
     monkeypatch.setattr(score, "added_files", slowly)
     log = io.StringIO()
     state = score._load_inputs(args, clock, log)
@@ -676,8 +672,6 @@ def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
             publish_log.append_done(log_path, 0, len(records))
         return real_shards_done(uri_prefix)
 
-    # The loop reaches it through the same module object, so this is the
-    # function it will call.
     monkeypatch.setattr(publish_log, "shards_done", finishing)
     args = score.ScoreArgs(
         corpus_uri=corpus.uri,
@@ -774,8 +768,6 @@ def test_a_failed_scorer_still_publishes_what_it_had(tmp_path: Path, corpus: met
         upload_prefix=f"file://{mirror}",
     )
     with pytest.MonkeyPatch.context() as patch:
-        # The loop reaches it through this module object, so this is the
-        # function it will call.
         patch.setattr(score, "load_table", unreachable)
         with pytest.raises(RuntimeError, match="stopped answering"):
             score.run(args, StepClock(now_ms()), io.StringIO())

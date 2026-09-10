@@ -7,13 +7,11 @@
 # scale. What that costs is a cluster-shaped run; what it buys is a stack that
 # fits on a laptop, which is all the local smoke is for.
 #
-# `RUN_DIR` carries a default rather than being required. Interpolation runs
-# over the whole model before profiles are filtered, so a required variable
-# here would make every command in the stack — `up kafka` included — fail
-# without it. The default is a path that cannot hold a run, so only an actual
-# submission without `RUN_DIR` fails, and it names what is missing. The two
-# sizing variables come from the run's own `job.env`; their defaults are only
-# what makes the model render.
+# `RUN_DIR` carries a default because interpolation precedes profile filtering
+# — see the stack's own note. The default is a path that cannot hold a run, so
+# only an actual submission without it fails. The two sizing variables come
+# from the run's own `job.env`; their defaults are only what makes the model
+# render.
 services:
   spark-job:
     profiles: [spark]

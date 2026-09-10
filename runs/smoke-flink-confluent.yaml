@@ -20,10 +20,6 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 flink:
-  # Eight slots, because a smoke run that cannot absorb its own corpus reports
-  # a freshness breach rather than whether the pieces agree. Four slots hold
-  # about three quarters of the corpus's 5 MB/s once the engine image is
-  # emulated, which drains exactly and still misses the bound above.
   taskmanagers: 2
   slots: 4
   tm_cpu: 2

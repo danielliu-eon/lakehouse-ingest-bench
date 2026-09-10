@@ -295,8 +295,8 @@ k8s_image_tag() {
 # repository is a clone at least as often as it is an installed package.
 #
 # Its stdout is the command's own, because callers parse it. Every path handed
-# to one of these must be absolute: the checkout fallback runs from the
-# repository root and not from the operator's working directory.
+# to one of these must be absolute — `abs_path` below is what a caller turns
+# its own relative paths into, and states why.
 #
 # A leading `--extra <name>`, repeatable, reaches the checkout fallback's `uv
 # run`. A command that opens a catalog needs the `aws` extra, because pyiceberg
@@ -304,8 +304,6 @@ k8s_image_tag() {
 # installs no cloud SDK. The installed-harness path takes no extras — an
 # installed harness carries whatever it was installed with, which is why
 # docs/running.md says to install it with that extra.
-#
-# `abs_path` below is what a caller turns its own relative paths into first.
 harness_local() {
 	local extras=()
 	while [[ ${1:-} == --extra ]]; do

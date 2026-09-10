@@ -24,13 +24,6 @@ from ingest_bench.specs.model import SiteConfig
 
 REDACTED = "<redacted>"
 
-# Which property names carry a credential is `specs.env`'s answer, because the
-# refusal that keeps a literal off a cluster and the redaction that keeps one
-# out of a published document have to agree about what a credential is.
-# Matching on the name rather than the value is what keeps a run directory
-# publishable: `facts.json` is meant to be pasted into an issue or an engine's
-# config, and a catalog token is the one thing in it that must not travel.
-
 
 def _roots(site: SiteConfig) -> list[tuple[str, str]]:
     """The site's roots paired with the literal each becomes, longest first.
@@ -75,6 +68,9 @@ def redact_uri(uri: str, site: SiteConfig) -> str:
     return uri
 
 
+# Which property names carry a credential is `specs.env`'s answer, because the
+# refusal that keeps a literal off a cluster and the redaction that keeps one
+# out of a published document have to agree about what a credential is.
 def redact_props(props: Mapping[str, str], site: SiteConfig | None) -> dict[str, str]:
     """``props`` with credentials replaced, and site roots replaced where asked.
 

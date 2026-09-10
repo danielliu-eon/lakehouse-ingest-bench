@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC_FILE = ROOT / "runs" / "smoke-spark.yaml"
 
 RUN_ID = "smoke-spark-20260908T120000Z"
+# The lowercased run id, which is what the SparkApplication object is called
+# because an RFC 1123 name has to be lowercase.
 RUN_OBJECT = RUN_ID.lower()
 APPLICATION = "spark-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
 
@@ -206,12 +208,7 @@ def test_a_setting_that_pretends_to_move_the_cadence_is_refused() -> None:
     ]
 
 
-# The lowercased run id, which is what the SparkApplication object is called
-# because an RFC 1123 name has to be lowercase.
-OBJECT_NAME = RUN_ID.lower()
-
-
-@pytest.mark.parametrize("reported", [RUN_ID, OBJECT_NAME])
+@pytest.mark.parametrize("reported", [RUN_ID, RUN_OBJECT])
 def test_either_spelling_of_the_run_s_name_identifies_its_driver(reported: str) -> None:
     """The submitted app name and the object's name differ only in case.
 
@@ -231,9 +228,9 @@ def test_either_spelling_of_the_run_s_name_identifies_its_driver(reported: str) 
         (
             [
                 {"id": APPLICATION, "name": RUN_ID, "attempts": []},
-                {"id": "second", "name": OBJECT_NAME, "attempts": []},
+                {"id": "second", "name": RUN_OBJECT, "attempts": []},
             ],
-            f"['{RUN_ID}', '{OBJECT_NAME}']",
+            f"['{RUN_ID}', '{RUN_OBJECT}']",
         ),
     ],
 )
@@ -251,7 +248,7 @@ def test_an_endpoint_that_is_not_this_runs_driver_names_what_it_found(
     driver at all.
     """
     # Sorted, so an uppercase stamp comes before its lowercased twin.
-    accepted = f"['{RUN_ID}', '{OBJECT_NAME}']"
+    accepted = f"['{RUN_ID}', '{RUN_OBJECT}']"
     assert _drift(answers=_answers(applications=listed)) == [
         f"applications named after the run: spec one of {accepted}, engine {shown}",
     ]
