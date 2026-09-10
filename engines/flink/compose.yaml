@@ -65,6 +65,6 @@ services:
   flink-job:
     profiles: [flink-job]
     image: lakehouse-ingest-bench/flink:local
-    volumes: ["${RUN_DIR:-/nonexistent/run}:/run:ro"]
+    volumes: ["${RUN_DIR:-/nonexistent/run}:/opt/bench/run:ro"]
     environment: [AWS_REGION=us-east-1]
-    command: ["flink", "run", "-d", "-m", "flink-jobmanager:8081", "-py", "/opt/bench/engines/flink/job.py", "--sql", "/run/job.sql", "--conf", "/run/flink-conf.yaml"]
+    command: ["flink", "run", "-d", "-m", "flink-jobmanager:8081", "-py", "/opt/bench/engines/flink/job.py", "--sql", "/opt/bench/run/job.sql", "--conf", "/opt/bench/run/flink-conf.yaml"]
