@@ -738,8 +738,9 @@ def render_flinkdeployment(
             # field over `spec.flinkConfiguration`: a run that overrode one of
             # these through `extra_flink_conf` would otherwise be honoured by
             # the job it submitted and discarded by the cluster running it.
-            # `replicas` and the slot count are not restated in the conf, and
-            # `cpu` has no conf key at all, so those stay knobs.
+            # `replicas` has no conf key and the slot count no CRD field, so
+            # neither can be set in two places, and `cpu` has no conf key at
+            # all — those three stay the knobs' to set.
             "jobManager": {"resource": {"memory": conf["jobmanager.memory.process.size"], "cpu": knobs.jm_cpu}},
             "taskManager": {
                 "resource": {"memory": conf["taskmanager.memory.process.size"], "cpu": knobs.tm_cpu},

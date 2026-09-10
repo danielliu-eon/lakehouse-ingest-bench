@@ -406,8 +406,8 @@ def finalize_corpus_json(
     share_gate_enforced = share_dev is not None and preset.alpha > 0 and cold_rows >= PARTITION_SHARE_GATE_MIN_COLD_ROWS
     if share_dev is not None and share_gate_enforced and share_dev > PARTITION_SHARE_MAX_DEVIATION:
         raise ValueError(f"partition byte share deviates {share_dev:.2%} from the Zipf weights")
-    # Under no skew the shares carry no information, so what is left to check is
-    # that the key space is covered at all.
+    # Coverage is checked whatever the skew: it is all the shares can say when
+    # the gate above is off, and it is still a fault when they agree.
     if shard_count == 1 and any(entry["rows"] == 0 for entry in truth.values()):
         raise ValueError("a partition key received no rows")
     sampled = max((stats.sampled_rows for stats in column_stats.values()), default=0)

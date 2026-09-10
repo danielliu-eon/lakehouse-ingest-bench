@@ -3,7 +3,7 @@
 # which is what makes a change to the harness checkable without a cluster.
 #
 # Profiles split what is always up from what a command brings up:
-#   (none)      kafka, minio, minio-init, iceberg-rest — the site
+#   (none)      kafka, minio, minio-init, iceberg-rest, schema-registry — the site
 #   flink       the engine cluster, scaled by `--scale flink-taskmanager=N`
 #   flink-job   the one-shot submitter, needing RUN_DIR
 #   spark       the Spark driver, which is the whole Spark fleet, needing RUN_DIR

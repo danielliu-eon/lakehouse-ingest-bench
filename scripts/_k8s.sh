@@ -125,6 +125,10 @@ require_site_file() {
 	[[ -f $SITE_FILE ]] || die "no site config at $SITE_FILE; copy site.aws.example.yaml and fill it in"
 }
 
+# The one scheme the drivers can reach, named so the check below reads as a
+# scheme comparison rather than as a glob.
+S3_SCHEME="s3://"
+
 # site_root <yq path to a root> — one of the site's storage roots, refused where
 # these drivers cannot reach it.
 #
@@ -134,10 +138,6 @@ require_site_file() {
 # GCS site would get a working corpus and a driver layer that cannot read it.
 # The cloud path is AWS-only today, and the refusal says so rather than
 # surfacing as an `aws s3` error about a URI it could not parse.
-# The one scheme the drivers can reach, named so the check below reads as a
-# scheme comparison rather than as a glob.
-S3_SCHEME="s3://"
-
 site_root() {
 	local root
 	root="$(site_required "$1")"
@@ -182,13 +182,11 @@ site_pairs() {
 # close the quoted scalar the whole command line is rendered into, leaving
 # `kubectl apply` reporting a parse error rather than the value that caused it.
 site_flags() {
-	# Assigned before the loop reads it, and checked explicitly rather than
-	# through `set -e`. Two reasons, and both end the same way — an empty string
-	# returned as success, so a Job is launched with none of the site's
-	# properties. A `die` inside the loop's own redirection would end only that
-	# redirection's subshell; and bash suspends `-e` inside a command
-	# substitution, which is where this function itself runs, so a failure would
-	# fall through to the `printf` below.
+	# Assigned before the loop reads it, and checked explicitly: bash suspends
+	# `-e` inside a command substitution, which is where this function runs,
+	# and a `die` inside the loop's own redirection would end only that
+	# subshell. Either way an empty string would be returned as success — see
+	# `site_pairs`.
 	local pairs
 	pairs="$(site_pairs "$1")" ||
 		die "cannot build the $2 flags a Job's command line needs; the line above says why"
@@ -210,10 +208,7 @@ site_flags() {
 # `site_flags` is the string form and is for a Job's command line, where the
 # image's shell does that splitting on purpose.
 #
-# The read is assigned and its status checked explicitly rather than left to
-# `set -e`: a `site_pairs` that could not read the file must refuse here instead
-# of yielding an empty map, which would open a catalog with none of the site's
-# properties — a signing failure far from the file that caused it.
+# Assigned and checked explicitly, for the reason `site_pairs` gives.
 read_catalog_prop_flags() {
 	local pairs
 	pairs="$(site_pairs '.catalog.props')" ||
@@ -634,7 +629,7 @@ ENGINE_NAME_MARKER='<name>'
 # with the run's object name already substituted into the ones that carry it.
 #
 # One call rather than one per field: the harness command is a Python process,
-# and a driver that started eleven of them would spend seconds asking for
+# and a driver that started thirteen of them would spend seconds asking for
 # constants. The engine's own module is the only statement of these names — a
 # driver that restated one would drift from the renderer the first time it
 # changed, which is also what keeps a third engine out of this file.
@@ -690,12 +685,12 @@ k8s_read_engine() {
 	done
 }
 
-# The two Jobs `launch.sh` creates and `teardown.sh` deletes, named in one place
-# so a rename cannot leave a producer fleet running after a teardown — which is
-# also why both take a run id and lowercase it here rather than at each of the
-# four call sites. The engine's own objects are named by the documents that
-# render them, and are deleted through those documents rather than by a name
-# restated here.
+# The two Jobs `launch.sh` creates, `teardown.sh` deletes and `purge.sh` looks
+# for, named in one place so a rename cannot leave a producer fleet running
+# after a teardown — which is also why both take a run id and lowercase it here
+# rather than at each of the five call sites. The engine's own objects are named
+# by the documents that render them, and are deleted through those documents
+# rather than by a name restated here.
 producer_job() {
 	printf 'producer-%s' "$(k8s_object_name "$1")"
 }

@@ -34,9 +34,9 @@ JOB_DOCUMENT = RUN_DIR / "job.json"
 READER_SCHEMA = RUN_DIR / "reader-schema.avsc"
 
 # What a value's bytes are, as the run's spec named them. Spelled here rather
-# than imported from the harness's spec package: this module is the only Python
-# the engine image carries, so it cannot reach that package — a test holds the
-# two copies together.
+# than imported from the harness's spec package: the image carries this module
+# and `env.py` alone, so it cannot reach that package — a test holds the two
+# copies together.
 VALUE_ENCODING_AVRO = "avro"
 VALUE_ENCODING_CONFLUENT = "confluent"
 

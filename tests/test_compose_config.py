@@ -47,9 +47,9 @@ def test_compose_config_renders() -> None:
         text=True,
         # A fixed PATH and a single variable, so the rendering a developer's
         # exported JM_MEM_MB or SLOTS would produce is not what is asserted on.
-        # RUN_DIR has no default by design — the submitter mounts a staged run
-        # directory or must not start — so the one profile that names it can
-        # only render with it set.
+        # RUN_DIR is set because the two services that mount it are activated
+        # here; each engine file gives it a default that cannot hold a run, so
+        # the model renders either way.
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "RUN_DIR": "/tmp"},
     )
     assert out.returncode == 0, out.stderr

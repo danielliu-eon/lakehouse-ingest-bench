@@ -50,9 +50,9 @@ DEFAULT_FLOOR_WINDOW_S = 60
 
 # How old the newest keep-up sample may be and still be a reading. The width of
 # the gate's own newest floor window, because a reading older than that leaves
-# the rising-floor test with no samples to read — and it is an order of
-# magnitude above the scorer's own poll interval and the bounded retry behind
-# it, so a healthy reader is never called stale.
+# the rising-floor test with no samples to read — and it is twelve poll
+# intervals, or twice the silence a bounded retry can leave, so a healthy
+# reader is never called stale.
 DEFAULT_STALE_AFTER_S = DEFAULT_FLOOR_WINDOW_S
 
 

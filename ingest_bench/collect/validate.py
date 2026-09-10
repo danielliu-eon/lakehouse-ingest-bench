@@ -29,9 +29,9 @@ from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED
 
 RESULTS_MD = "RESULTS.md"
 
-# Twelve digits with no digit on either side: an AWS account id, and not the
-# millisecond epoch timestamps and byte counts a run.json is full of, which
-# run thirteen digits and up.
+# Twelve digits with no digit on either side: an AWS account id. Only strings
+# are scanned (see `_account_id_failures`), because a byte total or a
+# millisecond epoch can land on twelve digits too.
 _TWELVE_DIGIT = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 # A path `collect`'s redaction left alone because it sat under none of the
