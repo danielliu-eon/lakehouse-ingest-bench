@@ -91,7 +91,7 @@ done
 
 require_host_tools aws jq yq
 require_site_file
-RUNS_ROOT="$(site_required '.runs_root')"
+RUNS_ROOT="$(site_root '.runs_root')"
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 SCORES="$RUN_DIR/scores"

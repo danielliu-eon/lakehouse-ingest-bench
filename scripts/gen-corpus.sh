@@ -92,7 +92,7 @@ require_host_tools kubectl yq git
 ((SHARDS == 1)) || require_host_tools aws
 
 k8s_read_site
-CORPUS_ROOT="$(site_required '.corpus_root')"
+CORPUS_ROOT="$(site_root '.corpus_root')"
 TAG="$(k8s_image_tag "$IMAGE_TAG")"
 IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 

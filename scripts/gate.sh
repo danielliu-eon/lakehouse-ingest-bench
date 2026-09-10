@@ -90,7 +90,7 @@ done
 
 require_host_tools aws yq
 require_site_file
-RUNS_ROOT="$(site_required '.runs_root')"
+RUNS_ROOT="$(site_root '.runs_root')"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ingest-bench-gate.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT

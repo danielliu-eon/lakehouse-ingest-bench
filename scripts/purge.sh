@@ -102,7 +102,7 @@ LOCATION="$(jq -r '.location // empty' "$METADATA_FINAL")"
 # root is every table the site has ever held, and a bucket root is the corpus
 # and every run's artifacts besides. A document that named either would
 # otherwise pass the non-empty check above and be removed whole.
-WAREHOUSE="$(site_required '.warehouse')"
+WAREHOUSE="$(site_root '.warehouse')"
 WAREHOUSE="${WAREHOUSE%/}"
 [[ $LOCATION == "$WAREHOUSE"/* ]] ||
 	die "$METADATA_FINAL puts $TABLE at '$LOCATION', which is not under this site's warehouse $WAREHOUSE; nothing is removed"

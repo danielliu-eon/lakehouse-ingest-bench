@@ -81,6 +81,23 @@ require_site_file() {
 	[[ -f $SITE_FILE ]] || die "no site config at $SITE_FILE; copy site.aws.example.yaml and fill it in"
 }
 
+# site_root <yq path to a root> — one of the site's storage roots, refused where
+# these drivers cannot reach it.
+#
+# The corpus generator, both engine renderers and the harness's own storage
+# layer all serve `gs://`; the drivers do not. Every one of them fetches a run
+# directory, an artifact or a listing by shelling out to the `aws` CLI, so a
+# GCS site would get a working corpus and a driver layer that cannot read it.
+# The cloud path is AWS-only today, and the refusal says so rather than
+# surfacing as an `aws s3` error about a URI it could not parse.
+site_root() {
+	local root
+	root="$(site_required "$1")"
+	[[ $root == s3://* ]] ||
+		die "${1#.} is '$root', and these drivers reach storage through the aws CLI: the cloud path is AWS-only today, so every root has to be an s3:// URI"
+	printf '%s' "$root"
+}
+
 # A map or a list, as the one-line JSON the manifests take. JSON is valid YAML
 # flow style, so a marker rendered with this is a document `kubectl` accepts
 # without the renderer having to know how deep in the manifest it landed.
@@ -204,7 +221,7 @@ k8s_read_site() {
 	KUBE_CONTEXT="$(site_required '.kubernetes.context')"
 	SERVICE_ACCOUNT="$(site_required '.kubernetes.harness_service_account')"
 	REGISTRY="$(site_required '.kubernetes.registry')"
-	RUNS_ROOT="$(site_required '.runs_root')"
+	RUNS_ROOT="$(site_root '.runs_root')"
 	NODE_SELECTOR="$(site_json '.kubernetes.node_selector' '{}')"
 	TOLERATIONS="$(site_json '.kubernetes.tolerations' '[]')"
 	JOB_ENV="$(site_env_json)"

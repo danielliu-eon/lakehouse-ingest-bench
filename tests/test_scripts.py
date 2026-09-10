@@ -1211,6 +1211,35 @@ def test_the_env_a_pod_reads_a_secret_from_is_the_one_the_site_names(tmp_path: P
     assert json.loads(out.stdout) == expected
 
 
+@needs_shell_tools
+@pytest.mark.parametrize("path", [".corpus_root", ".runs_root", ".warehouse"])
+def test_a_root_these_drivers_cannot_reach_is_refused_by_name(tmp_path: Path, path: str) -> None:
+    """The corpus and the renderers serve `gs://`; the drivers do not.
+
+    Every driver fetches a run directory, an artifact or a listing by shelling
+    out to the `aws` CLI, so a GCS site gets a working corpus generator and a
+    driver layer that cannot read what it wrote. Refused where the root is read,
+    rather than surfacing as an `aws s3` error about a URI it could not parse.
+    """
+    site_file = tmp_path / "site.yaml"
+    key = path.removeprefix(".")
+    site_file.write_text(
+        "\n".join(
+            line if not line.startswith(f"{key}:") else f"{key}: gs://a-bucket/{key}"
+            for line in _filled_site().splitlines()
+        )
+    )
+    refused = _site_reader(site_file, f"site_root '{path}'")
+    assert refused.returncode != 0
+    assert "AWS-only today" in refused.stderr, refused.stderr
+    assert key in refused.stderr, refused.stderr
+    # And an S3 root is answered with itself.
+    (tmp_path / "aws.yaml").write_text(_filled_site())
+    answered = _site_reader(tmp_path / "aws.yaml", f"site_root '{path}'")
+    assert answered.returncode == 0, answered.stderr
+    assert answered.stdout.startswith("s3://a-bucket/"), answered.stdout
+
+
 def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:
     """An inline `python -c` is a call site neither mypy nor a test would see.
 
