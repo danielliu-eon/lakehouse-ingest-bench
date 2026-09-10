@@ -96,13 +96,29 @@ SITE_AWS_FILLINGS = {
 }
 
 
+def _engine_compose_files() -> list[Path]:
+    """Each engine's Compose shape: how a run of it is started on one machine.
+
+    The other half of the seam `specs/kubernetes.py` is. Sourced by `smoke.sh`
+    for the run's engine alone, which is what keeps the engines' service names,
+    env files and readiness probes out of `scripts/`.
+    """
+    return sorted((REPO_ROOT / "engines").glob("*/compose.sh"))
+
+
 def _shell_files() -> list[Path]:
-    return sorted(SCRIPTS.glob("*.sh")) + sorted(AWS_DEPLOY.glob("*.sh"))
+    return sorted(SCRIPTS.glob("*.sh")) + sorted(AWS_DEPLOY.glob("*.sh")) + _engine_compose_files()
+
+
+def _sourced_shell_files() -> list[Path]:
+    """The files that are sourced rather than run: the two libraries and the engines'."""
+    return sorted([path for path in _shell_files() if path.name.startswith("_")] + _engine_compose_files())
 
 
 def _shell_entrypoints() -> list[Path]:
-    """The scripts meant to be run, which is every one but the sourced library."""
-    return [path for path in _shell_files() if not path.name.startswith("_")]
+    """The scripts meant to be run, which is everything that is not sourced."""
+    sourced = set(_sourced_shell_files())
+    return [path for path in _shell_files() if path not in sourced]
 
 
 def _iam_documents() -> list[Path]:
@@ -213,8 +229,13 @@ def test_every_script_parses() -> None:
 
 def test_every_script_is_executable() -> None:
     entrypoints = _shell_entrypoints()
-    sourced = sorted(set(_shell_files()) - set(entrypoints))
-    assert [path.name for path in sourced] == ["_k8s.sh", "_lib.sh"], "these are the two sourced libraries"
+    sourced = _sourced_shell_files()
+    assert [path.relative_to(REPO_ROOT).as_posix() for path in sourced] == [
+        "engines/flink/compose.sh",
+        "engines/spark/compose.sh",
+        "scripts/_k8s.sh",
+        "scripts/_lib.sh",
+    ], "the two shared libraries and one Compose shape per engine"
     for script in entrypoints:
         assert os.access(script, os.X_OK), f"{script} is not executable"
     for script in sourced:
@@ -1335,6 +1356,87 @@ def test_both_drivers_offer_the_codec_the_spec_asks_for(script: Path) -> None:
     assert "--compression $COMPRESSION" in text, f"{script.name} reads the codec but never passes --compression"
     for codec in ("zstd", "lz4", "snappy", "gzip"):
         assert f"--compression {codec}" not in text, f"{script.name} hardcodes a codec"
+
+
+def _compose_hooks() -> list[str]:
+    """The hooks `smoke.sh` calls, read off the loop that refuses a missing one.
+
+    Read rather than restated, so a fifth hook is a failure in every engine
+    that has not declared it instead of a call into nothing.
+    """
+    match = re.search(r"for hook in ((?:engine_compose_\w+ ?)+); do", SMOKE.read_text())
+    assert match is not None, "smoke.sh no longer states which hooks an engine declares"
+    return match.group(1).split()
+
+
+def _shell_functions(path: Path) -> set[str]:
+    return set(re.findall(r"^(\w+)\(\) \{$", path.read_text(), flags=re.MULTILINE))
+
+
+def test_every_engine_declares_the_whole_compose_contract() -> None:
+    """A hook an engine did not declare is a call into nothing, minutes in.
+
+    `smoke.sh` refuses it at source time for the same reason `engine-k8s`
+    refuses a descriptor field no driver reads: the failure has to land before
+    a corpus is generated, not after.
+    """
+    hooks = _compose_hooks()
+    assert len(hooks) == 4, hooks
+    files = _engine_compose_files()
+    assert {path.parent.name for path in files} == set(engines.MANAGED), "one Compose shape per managed engine"
+    for path in files:
+        assert set(hooks) <= _shell_functions(path), f"{path} declares {sorted(_shell_functions(path) & set(hooks))}"
+
+
+def test_the_smoke_names_no_engine_service_of_its_own() -> None:
+    """The contract `docs/adding-an-engine.md` states: no engine branches in `scripts/`.
+
+    Checked against the service names the engines' own compose files declare,
+    so it is the engines that say what must not appear here rather than a list
+    in this test. A third engine adds a directory, not a line under `scripts/`.
+    """
+    services = {
+        service
+        for path in (REPO_ROOT / "engines").glob("*/compose.yaml")
+        for service in _mapping(yaml.safe_load(path.read_text())["services"])
+    }
+    assert services, "no engine compose file declares a service"
+    for script in sorted(SCRIPTS.glob("*.sh")):
+        text = script.read_text()
+        named = sorted(service for service in services if service in text)
+        assert not named, f"{script.name} names the engine service(s) {named}"
+
+
+@needs_shell_tools
+def test_the_stack_activates_every_profile_its_engines_declare() -> None:
+    """A service invisible to the one command that needs it is the failure this avoids.
+
+    Compose interpolates the whole model before it filters by profile, so
+    naming them all costs nothing — and the names come from the compose files
+    that declare them, which is what keeps them out of `_lib.sh`.
+    """
+    declared = {
+        profile
+        for path in (REPO_ROOT / "engines").glob("*/compose.yaml")
+        for service in _mapping(yaml.safe_load(path.read_text())["services"]).values()
+        for profile in _sequence(_mapping(service).get("profiles", []))
+    }
+    assert declared, "no engine compose file declares a profile"
+    with tempfile.TemporaryDirectory() as directory:
+        calls = Path(directory) / "docker-calls.log"
+        program = "\n".join(
+            [
+                "set -euo pipefail",
+                "source scripts/_lib.sh",
+                f"docker() {{ printf '%s\\n' \"$*\" >>'{calls}'; }}",
+                "compose config --services",
+            ]
+        )
+        out = subprocess.run(["bash", "-c", program], cwd=REPO_ROOT, capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        arguments = calls.read_text().split()
+    activated = {arguments[index + 1] for index, word in enumerate(arguments) if word == "--profile"}
+    assert activated == declared | {"tools"}, activated
 
 
 def test_the_smoke_stages_the_spec_it_was_given() -> None:

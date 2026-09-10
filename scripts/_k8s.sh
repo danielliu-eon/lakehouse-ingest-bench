@@ -90,10 +90,14 @@ require_site_file() {
 # GCS site would get a working corpus and a driver layer that cannot read it.
 # The cloud path is AWS-only today, and the refusal says so rather than
 # surfacing as an `aws s3` error about a URI it could not parse.
+# The one scheme the drivers can reach, named so the check below reads as a
+# scheme comparison rather than as a glob.
+S3_SCHEME="s3://"
+
 site_root() {
 	local root
 	root="$(site_required "$1")"
-	[[ $root == s3://* ]] ||
+	[[ $root == "$S3_SCHEME"* ]] ||
 		die "${1#.} is '$root', and these drivers reach storage through the aws CLI: the cloud path is AWS-only today, so every root has to be an s3:// URI"
 	printf '%s' "$root"
 }

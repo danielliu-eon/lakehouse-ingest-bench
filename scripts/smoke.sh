@@ -27,10 +27,10 @@ usage() {
 	cat <<'USAGE'
 usage: scripts/smoke.sh [options]
 
-  --engine flink|spark|external
-                              which run spec to stage; `flink` and `spark` also
-                              start the engine, `external` waits for you to
-                              start yours (default: flink)
+  --engine NAME|external      which run spec to stage. NAME is a directory under
+                              engines/ whose compose.sh starts the engine here;
+                              `external` waits for you to start yours
+                              (default: flink)
   --spec PATH                 a run spec under runs/ to stage instead of
                               runs/smoke-<engine>.yaml
   --set KEY=VALUE             override a corpus preset key, repeatable
@@ -39,12 +39,15 @@ usage: scripts/smoke.sh [options]
   --external-ready-file PATH  with --engine external, wait for PATH to appear
                               instead of reading a newline from stdin
 
-Environment: EPOCH_LEAD_S, IDLE_STOP_S, EXTERNAL_READY_WAIT_S,
-FLINK_REST, FLINK_SLOT_WAIT_S, FLINK_JOB_WAIT_S, SPARK_UI, SPARK_APP_WAIT_S,
-SPARK_QUERY_WAIT_S.
+Environment: EPOCH_LEAD_S, IDLE_STOP_S, EXTERNAL_READY_WAIT_S, and whatever
+the engine's own engines/<engine>/compose.sh declares — its readiness waits and
+the endpoints they poll.
 USAGE
 }
 
+# The default engine. A name and not a branch: it is the one the docs and the
+# CI workflow run without an argument, and everything below reads it as the
+# directory under engines/ that says how to start that engine here.
 ENGINE=flink
 KEEP=0
 READY_FILE=""
@@ -56,7 +59,7 @@ SETS=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--engine)
-		ENGINE="${2:?--engine needs flink, spark or external}"
+		ENGINE="${2:?--engine needs an engines/ directory name, or external}"
 		shift 2
 		;;
 	--spec)
@@ -90,13 +93,29 @@ done
 require_host_tools docker jq yq curl
 
 [[ -n $SPEC_FILE ]] || SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"
-[[ -f $SPEC_FILE ]] || die "no run spec at $SPEC_FILE; --engine takes flink, spark or external, or name one with --spec"
+[[ -f $SPEC_FILE ]] ||
+	die "no run spec at $SPEC_FILE; --engine takes external or a directory under $REPO_ROOT/engines, or name a spec with --spec"
 # The harness container mounts this checkout's `runs/` as `/runs` and the stage
 # command names the spec inside it, so a spec anywhere else is not a file that
 # container can open.
 [[ "$(cd -- "$(dirname -- "$SPEC_FILE")" && pwd)" == "$REPO_ROOT/runs" ]] ||
 	die "--spec must name a file under $REPO_ROOT/runs, which is what the harness container mounts as /runs"
 [[ $ENGINE == external || -z $READY_FILE ]] || die "--external-ready-file only applies to --engine external"
+
+# How this engine is built, raised, made ready and read on this stack — its own
+# package's answer, so nothing below branches on which engine a run names. The
+# external tier has no such file, because there is no engine here to start.
+if [[ $ENGINE != external ]]; then
+	ENGINE_COMPOSE="$REPO_ROOT/engines/$ENGINE/compose.sh"
+	[[ -f $ENGINE_COMPOSE ]] ||
+		die "no $ENGINE_COMPOSE, so this stack does not know how to start '$ENGINE'; --engine takes external or a directory under $REPO_ROOT/engines"
+	# shellcheck source=/dev/null
+	source "$ENGINE_COMPOSE"
+	for hook in engine_compose_build engine_compose_start engine_compose_ready engine_compose_logs; do
+		declare -F "$hook" >/dev/null ||
+			die "$ENGINE_COMPOSE declares no $hook, and this script calls all four; see docs/adding-an-engine.md"
+	done
+fi
 
 STAGE_OUT=""
 RUN_ID=""
@@ -109,21 +128,16 @@ cleanup() {
 			log "--- last 30 lines of scorer-$RUN_ID ---"
 			docker logs --tail 30 "scorer-$RUN_ID" >&2 || true
 		fi
-		case "$ENGINE" in
-		flink)
-			log "--- last 40 lines of flink-jobmanager ---"
-			compose logs --tail 40 --no-log-prefix flink-jobmanager >&2 || true
-			;;
-		spark)
-			log "--- last 40 lines of spark-job ---"
-			compose logs --tail 40 --no-log-prefix spark-job >&2 || true
-			;;
-		esac
+		# The engine's own, because only it knows which of its services
+		# holds the reason. An external run has none of this script's to show.
+		if declare -F engine_compose_logs >/dev/null; then
+			engine_compose_logs
+		fi
 	fi
 	[[ -z $STAGE_OUT ]] || rm -f "$STAGE_OUT"
 	if ((KEEP == 1)); then
 		log "--keep: the stack is still up. Tear it down with:"
-		log "  docker compose -f $COMPOSE_FILE --profile flink --profile flink-job --profile spark --profile tools down -v"
+		log "  scripts/smoke.sh --help is not it; run: RUN_DIR=/tmp docker compose -f $COMPOSE_FILE --profile '*' down -v"
 	else
 		log "tearing the stack down"
 		compose down -v --remove-orphans >/dev/null 2>&1 || true
@@ -138,12 +152,8 @@ trap cleanup EXIT
 
 log "building the harness image"
 compose build harness
-if [[ $ENGINE == flink ]]; then
-	log "building the engine image (amd64; emulated on an arm64 machine)"
-	compose build flink-jobmanager
-elif [[ $ENGINE == spark ]]; then
-	log "building the engine image"
-	compose build spark-job
+if [[ $ENGINE != external ]]; then
+	engine_compose_build
 fi
 
 log "starting the broker, the object store and the catalog"
@@ -170,39 +180,12 @@ export RUN_DIR="$REPO_ROOT/runs/$RUN_ID"
 [[ -d $RUN_DIR ]] || die "stage reported run_id $RUN_ID but wrote no $RUN_DIR"
 log "run $RUN_ID staged in $RUN_DIR"
 
-if [[ $ENGINE == flink ]]; then
-	# The cluster's shape, as the engine's renderer wrote it. Exported so
-	# compose interpolates the taskmanager's slots and both memory sizes.
-	set -a
-	# shellcheck source=/dev/null
-	source "$RUN_DIR/flink.env"
-	set +a
-	log "starting flink: $TASKMANAGERS taskmanager(s) of $SLOTS slot(s)"
-	compose up -d --scale "flink-taskmanager=$TASKMANAGERS" flink-jobmanager flink-taskmanager
-	wait_for_flink_slots "$((TASKMANAGERS * SLOTS))"
-	log "submitting the job"
-	compose run --rm -T flink-job
-	wait_for_flink_job_running "$RUN_ID"
-	# A job that is RUNNING is not yet a job running what the spec asked for:
-	# Flink drops a setting it does not know and sizes a vertex from whatever
-	# configuration reached it, neither of which fails a submission. The
-	# jobmanager is addressed by its service name because this runs inside the
-	# stack's own network, where `localhost` is the harness container.
-	log "checking the job against the spec it was staged from"
-	harness "verify-flink --spec /runs/$RUN_ID/spec.yaml --run-id $RUN_ID --rest http://flink-jobmanager:8081" ||
-		die "the flink job is not running what $(basename "$SPEC_FILE") asked for; the lines above name every setting it dropped"
-elif [[ $ENGINE == spark ]]; then
-	# The submission line's shape, as the engine's renderer wrote it. Exported
-	# so compose interpolates the driver's cores and its heap. There is no
-	# separate submitter: under `--master local[N]` this one container is the
-	# driver, its executors and the job.
-	set -a
-	# shellcheck source=/dev/null
-	source "$RUN_DIR/job.env"
-	set +a
-	log "starting spark: local[$LOCAL_CORES], ${DRIVER_MEM_MB}m driver"
-	compose up -d spark-job
-	wait_for_spark_query "$RUN_ID"
+if [[ $ENGINE != external ]]; then
+	# Raised, submitted and then held to the spec it was staged from, all by
+	# the engine's own package: a running engine is not yet one running what
+	# the spec asked for, and only the engine can read back its own settings.
+	engine_compose_start
+	engine_compose_ready
 else
 	log "start your engine now against these facts:"
 	cat "$RUN_DIR/facts.json"

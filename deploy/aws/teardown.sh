@@ -276,7 +276,7 @@ remove_bucket() {
 	bucket_is_ours "$BUCKET" ||
 		die "s3://$BUCKET carries no $TAG_KEY tag, so this benchmark did not create it and will not empty it;
      name the right one with BUCKET, or remove that one yourself"
-	printf 'emptying and deleting s3://%s removes, permanently:\n' "$BUCKET"
+	printf 'emptying and deleting %s removes, permanently:\n' "s3://$BUCKET"
 	printf '  every corpus generated into it\n'
 	printf '  every run%s artifacts, scores and publish logs\n' "'s"
 	printf '  the warehouse, and every table any run has written\n'
