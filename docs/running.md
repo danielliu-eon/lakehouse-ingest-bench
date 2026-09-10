@@ -80,6 +80,11 @@ because with a ten-second checkpoint interval there is barely one commit inside 
 thirty-second offer. It still checks that the table drains and that exactness is
 clean; only the freshness bound and the keep-up fraction need a longer corpus.
 
+Those 60 seconds are the spec's own `scoring.warmup_s`, and the hour-long specs
+set it to 120. An engine whose first commit lands after the warmup has ended
+carries its cold start into the window, so raise it for one that starts slowly —
+as far as leaving enough run behind it to measure allows.
+
 ## CI
 
 `ci.yml` runs on every pull request and on pushes to `main`: ruff, mypy, the

@@ -1,0 +1,37 @@
+# `aws-smoke-external.yaml` with every value behind the five-byte Confluent
+# header: the harness registers the corpus's schema at staging, and every value
+# carries the id it was registered under. docs/adding-an-engine.md §Confluent
+# values is the framing, and either way of reading it.
+#
+# The site has to declare `kafka.schema_registry` — the registry
+# `WITH_SCHEMA_REGISTRY=true deploy/aws/setup.sh` deploys into the namespace, or
+# a hosted one — and staging refuses this spec before it touches the cluster
+# otherwise.
+#
+# `fleet` and `external` are yours to edit for the same reason as in the raw-Avro
+# sibling: the fleet is what the run is costed on and the harness cannot see it,
+# `YOUR_MACHINE_TYPE` is not a machine, and `external` is what the result records
+# the engine as.
+name: aws-smoke-external-confluent
+engine: external
+corpus: smoke
+table:
+  managed_by: harness
+  partition: identity(partition_key)
+kafka:
+  partitions: 4
+  key: user_id
+  value_encoding: confluent
+producer:
+  shards: 1
+  compression: lz4
+scoring:
+  freshness_bound_s: 60
+  warmup_s: 60
+external:
+  name: your-engine
+  version: "0.0"
+  notes: "replace with the engine you are scoring"
+fleet:
+  - {role: coordinator, count: 1, vcpu: 1, gib: 2, machine_type: YOUR_MACHINE_TYPE}
+  - {role: worker, count: 2, vcpu: 2, gib: 4, machine_type: YOUR_MACHINE_TYPE}

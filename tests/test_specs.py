@@ -300,6 +300,28 @@ def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
         assert spec.scoring.freshness_bound_s == 180.0 and spec.scoring.warmup_s == 120, engine
 
 
+@pytest.mark.parametrize(
+    ("name", "encoding"),
+    [("aws-smoke-external", "avro"), ("aws-smoke-external-confluent", "confluent")],
+    ids=["avro", "confluent"],
+)
+def test_a_cluster_external_spec_ships_for_each_wire_format(name: str, encoding: str) -> None:
+    """The tier-1 contract is the primary one, and a cluster is where it is measured.
+
+    The local pair sizes its fleet on a laptop, which is not compute any
+    cluster run is costed against — so these two ship placeholder rows to
+    replace, and the loader has to carry the placeholder rather than refuse it
+    the way a site's is refused.
+    """
+    spec = model.load_run_spec(ROOT / "runs" / f"{name}.yaml")
+    assert spec.is_external() and spec.external is not None
+    assert spec.kafka.value_encoding == encoding
+    # The offer crosses the cluster's network, as it does in both hour-long
+    # cluster specs.
+    assert spec.producer.compression == "lz4"
+    assert spec.fleet and all(role.machine_type == "YOUR_MACHINE_TYPE" for role in spec.fleet)
+
+
 def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(tmp_path: Path) -> None:
     """Defaulted, unlike the two beside it, so an older site config still loads.
 

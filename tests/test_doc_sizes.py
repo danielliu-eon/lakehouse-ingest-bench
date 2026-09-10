@@ -29,9 +29,9 @@ MAX_LINES: dict[str, int] = {
     "docs/corpus.md": 300,
     "docs/running.md": 300,
     "docs/run-spec.md": 150,
-    "docs/adding-an-engine.md": 200,
+    "docs/adding-an-engine.md": 220,
     "docs/results-format.md": 150,
-    "docs/pitfalls.md": 140,
+    "docs/pitfalls.md": 150,
     "engines/flink/README.md": 150,
     "engines/spark/README.md": 150,
 }

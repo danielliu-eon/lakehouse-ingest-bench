@@ -100,9 +100,9 @@ credential, where the registry needs one, is the operator's and is not in
 `facts.json`.
 
 Nothing else about the run changes: the rows, the keys, the table and the
-scoring are what a raw-Avro run's are. `runs/smoke-external-confluent.yaml` is
-the shipped external spec, and both managed engines read the framing too. The
-walk-through below is a raw-Avro run.
+scoring are what a raw-Avro run's are. `runs/smoke-external-confluent.yaml` and
+its `aws-` sibling are the shipped external specs, and both managed engines read
+the framing too. The walk-through below is a raw-Avro run.
 
 ## Walk-through: an engine the harness does not manage
 
@@ -152,6 +152,26 @@ stdin instead — `scripts/run.sh <spec> --external-ready-file <path>` is the sa
 contract for a run on a cluster. `runs/<run_id>/scores/summary.json` is the whole
 answer, and [`methodology.md`](methodology.md) §The verdict says what each field
 means and when a result may be published from it.
+
+## On a cluster
+
+The same contract, driven by `scripts/` rather than the local stack.
+`runs/aws-smoke-external.yaml` and its `-confluent` sibling are the specs to
+copy; the `fleet` rows in them are placeholders, and a fleet is what the result
+is costed on. The confluent one needs `site.kafka.schema_registry`, and staging
+refuses it before it touches the cluster otherwise.
+
+```bash
+RUN_ID=$(scripts/stage.sh runs/aws-smoke-external-confluent.yaml | awk -F': ' '/^run_id: /{print $2}')
+jq . "runs/$RUN_ID/facts.json"    # start your engine against these
+scripts/launch.sh "$RUN_ID"       # once it is consuming: the scorer, then the offer
+```
+
+`scripts/run.sh <spec> --external-ready-file <path>` is the same sequence
+unattended: it waits for `<path>` to appear rather than for you, and
+[`running.md`](running.md) has every driver. Either way the ordering is the
+invariant — staging creates the topic and the table, so an engine that resolves
+either at startup cannot start until `stage.sh` has returned.
 
 ## Tier 2: a managed engine
 

@@ -103,6 +103,17 @@ Never point two runs at one topic or one table. A consumer group's committed
 offsets, a checkpoint directory and a table's existing rows all survive, and the
 second run measures the first.
 
+## A failed launch still leaves a table
+
+`stage.sh` creates the topic, the run's prefix and — unless the spec hands the
+DDL to the engine — the table, all before `launch.sh` starts anything. And a
+launch that fails leaves the fleet up on purpose, since its refusals point at
+pod events a teardown would delete. So a run that died there still has all of
+it: `teardown.sh <run_id>` deletes the engine, the producer and the scorer and
+drops the topic, and `purge.sh <run_id> --artifacts` drops the table, removes
+its files and reclaims the prefix. Neither runs itself, and a campaign of
+failed launches accumulates tables until one of them does.
+
 ## The two AWS SDKs disagree about the region variable
 
 The Java client reads `AWS_REGION`; botocore reads `AWS_DEFAULT_REGION` alone and
