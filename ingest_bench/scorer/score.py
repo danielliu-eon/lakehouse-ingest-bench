@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO, cast
@@ -38,6 +39,7 @@ from ingest_bench.scorer import freshness
 from ingest_bench.scorer.exactness import exactness_result
 from ingest_bench.scorer.keepup import KeepupSample, keepup_summary, make_sample
 from ingest_bench.scorer.snapshots import (
+    AddedFile,
     added_files,
     check_table_schema,
     load_table,
@@ -93,6 +95,11 @@ class ScoreArgs:
     behind_max_ms: int = 5000
     expected_publish_shards: int = 1
     upload_prefix: str | None = None
+    # How many of a commit's data files are read at once. Each id column is one
+    # request whose cost is latency rather than bytes, so the count is set by
+    # how many of those a poll must overlap to stay inside its interval, not by
+    # the cores it has.
+    read_workers: int = 32
     # Who ran the DDL, in the run spec's own vocabulary. `engine` is the only
     # value under which a table that is not there yet is a phase of the run
     # rather than a fault: such an engine creates it from its first record, and
@@ -408,6 +415,39 @@ def _load_table(state: ScoreState, log: TextIO) -> Table | None:
     return table
 
 
+def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> None:
+    """Tally one commit's new data files, reading their id columns at once.
+
+    A wide fleet writing a high-cardinality partition commits hundreds of small
+    files, and each id column is one request whose cost is latency rather than
+    bytes. Read one after another they take longer than the interval the table
+    is polled on, and a reader that has fallen that far behind the table is a
+    run the gate voids for staleness without ever measuring its engine.
+
+    The pool only reads. Every array is added to the tally from this thread, in
+    whatever order the reads return, which is sound because a batch is judged
+    on a count of its ids and their sum modulo a prime and both are
+    commutative. A file joins ``applied_files`` only once its ids are in the
+    tally, so a poll that failed part way through a commit is retried against
+    the files it had not applied rather than against none of them.
+    """
+    pending = [file for file in files if file.path not in state.applied_files]
+    if not pending:
+        return
+    pool = ThreadPoolExecutor(max_workers=min(state.args.read_workers, len(pending)))
+    try:
+        reads = {pool.submit(read_id_column, file.path, file.file_format): file.path for file in pending}
+        for read in as_completed(reads):
+            state.tally.add_ids(read.result())
+            state.applied_files.add(reads[read])
+    finally:
+        # A read that raised leaves the rest of the queue abandoned rather than
+        # drained: the poll is already failing, and waiting for the reads it no
+        # longer needs would hold it open for the whole commit — which is the
+        # delay the failure is being reported instead of.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     """Read both sides of the run and apply every commit not yet seen.
 
@@ -447,11 +487,7 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> bool:
         first_seen_ms = clock.now_ms()
         files = added_files(document, info.snapshot_id, table.io)
         if info.operation == APPEND:
-            for data_file in files:
-                if data_file.path in state.applied_files:
-                    continue
-                state.tally.add_ids(read_id_column(data_file.path, data_file.file_format))
-                state.applied_files.add(data_file.path)
+            _apply_added_files(state, files)
             # Appended before the artifact line, so a failed write is retried
             # against a duplicate observation rather than a duplicate line: the
             # repeated observation is the same step of the same function and

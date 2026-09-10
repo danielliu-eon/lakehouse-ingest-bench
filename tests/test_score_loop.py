@@ -5,6 +5,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TextIO
 
+import numpy as np
+import pyarrow.parquet as pq
 import pytest
 from pyiceberg.exceptions import NamespaceAlreadyExistsError
 from pyiceberg.schema import Schema
@@ -364,6 +366,8 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                 "60",
                 "--upload-prefix",
                 "s3://bench/runs/events/scores",
+                "--read-workers",
+                "8",
             ]
         )
         == 0
@@ -376,6 +380,7 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert args.expected_publish_shards == 4 and args.warmup_s == 60
     assert args.out_dir == tmp_path / "scores" and args.freshness_bound_s == 180.0
     assert args.upload_prefix == "s3://bench/runs/events/scores"
+    assert args.read_workers == 8
 
 
 def test_shortened_replay_is_scored_on_what_was_offered(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
@@ -455,6 +460,112 @@ def test_a_snapshot_arriving_between_polls_is_tallied_once(tmp_path: Path, corpu
     assert len(state.seen) == 2 and state.tally.committed_rows() == records[0].rows + records[1].rows
     assert len(score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE)) == 3
     assert len(state.observations) == 2 and [obs.prefix for obs in state.observations] == [0, 1]
+
+
+def _many_file_commit(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, files: int) -> Table:
+    """A table whose one commit added ``files`` data files, all of one batch.
+
+    That is the shape a wide fleet writing a high-cardinality partition
+    produces, and it is built by writing the files and adding them in a single
+    commit because what matters here is the count of files one snapshot brings,
+    not which writer laid them out.
+    """
+    props = _props(tmp_path)
+    table = create.create_table(props, f"bench.{name}", corpus, create.parse_partition("unpartitioned"), {})
+    rows = _rows_of(metadata.read_manifest(corpus.uri)[0], corpus)
+    per_file = rows.num_rows // files
+    directory = tmp_path / f"{name}-files"
+    directory.mkdir()
+    written: list[str] = []
+    for index in range(files):
+        start = index * per_file
+        stop = rows.num_rows if index == files - 1 else start + per_file
+        path = directory / f"part-{index:05d}.parquet"
+        pq.write_table(rows.slice(start, stop - start), path)
+        written.append(f"file://{path}")
+    table.add_files(written)
+    return table
+
+
+def _many_file_args(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, read_workers: int, poll_interval_s: float = 5.0
+) -> score.ScoreArgs:
+    logs = tmp_path / f"{name}-logs"
+    logs.mkdir()
+    _finished_producer(logs, metadata.read_manifest(corpus.uri), now_ms() - 10_000)
+    return score.ScoreArgs(
+        corpus_uri=corpus.uri,
+        table=f"bench.{name}",
+        catalog_props=_props(tmp_path),
+        publish_logs_uri=str(logs),
+        epoch_ms=now_ms() - 10_000,
+        out_dir=tmp_path / f"{name}-out",
+        poll_interval_s=poll_interval_s,
+        idle_stop_s=30.0,
+        warmup_s=0,
+        freshness_bound_s=180.0,
+        read_workers=read_workers,
+    )
+
+
+def test_a_commit_of_many_files_is_tallied_once_at_any_worker_count(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    """One worker or sixteen, the commit tallies to the same figures.
+
+    A batch is judged on a count of its ids and their sum modulo a prime, and
+    both are commutative — so the order the reads return in cannot change what
+    the tally holds, which is what lets each array be added the moment it
+    arrives. The two counts agreeing is that property asserted, and the batch
+    reading complete is every file applied exactly once.
+    """
+    records = metadata.read_manifest(corpus.uri)
+    figures: list[tuple[int, int, int, int]] = []
+    for workers in (1, 16):
+        name = f"fanout{workers}"
+        _many_file_commit(tmp_path, corpus, name, files=64)
+        args = _many_file_args(tmp_path, corpus, name, read_workers=workers)
+        clock = StepClock(now_ms())
+        state = score._load_inputs(args, clock, io.StringIO())
+        assert score._poll_once(state, clock, io.StringIO()) is True
+        assert state.tally.complete(0), "a file read twice, or not at all"
+        line = json.loads((args.out_dir / score.SNAPSHOTS_FILE).read_text().splitlines()[-1])
+        figures.append(
+            (state.tally.prefix(), state.tally.committed_rows(), int(line["added_files"]), len(state.observations))
+        )
+    assert figures[0] == figures[1] == (0, records[0].rows, 64, 1)
+
+
+def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unreadable file is one failed poll, whatever else the pool had in flight.
+
+    A file the poll did not apply is re-read by the retry, so the failure has
+    to belong to the poll rather than to the file: a poll that carried on
+    without it would tally the commit short and report the engine as having
+    lost the rows.
+    """
+    _many_file_commit(tmp_path, corpus, "torn", files=64)
+    args = _many_file_args(tmp_path, corpus, "torn", read_workers=16)
+
+    def unreadable(path: str, file_format: str) -> np.ndarray:
+        raise RuntimeError("the object store stopped answering")
+
+    # The loop reaches it through the same module object, so this is the
+    # function it will call.
+    monkeypatch.setattr(score, "read_id_column", unreadable)
+    clock = StepClock(now_ms())
+    log = io.StringIO()
+    state = score._load_inputs(args, clock, log)
+    assert score._poll_once(state, clock, log) is False
+    printed = log.getvalue()
+    assert printed.count("POLL_FAILED") == 1, printed
+    assert "POLL t=" not in printed, printed
+    assert state.read_failures == 1 and state.tally.committed_rows() == 0
+    # The commit stays unseen, so the retry reads it whole.
+    assert state.seen == set()
+    assert score.read_keepup_samples(args.out_dir / score.KEEPUP_SAMPLES_FILE) == []
 
 
 def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(

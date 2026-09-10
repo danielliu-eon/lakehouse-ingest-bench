@@ -123,6 +123,14 @@ def build_score_parser() -> argparse.ArgumentParser:
         help="a producer that fell this far behind its schedule voids the run",
     )
     parser.add_argument(
+        "--read-workers",
+        type=int,
+        default=32,
+        help="how many of a commit's data files have their id column read at once; a commit of a "
+        "high-cardinality partition is hundreds of small files, and one request at a time is a poll longer "
+        "than the interval it is polled on",
+    )
+    parser.add_argument(
         "--table-managed-by",
         choices=sorted({HARNESS, ENGINE_OWNED}),
         default=HARNESS,
@@ -190,6 +198,7 @@ def score(argv: Sequence[str] | None = None) -> int:
             behind_max_ms=int(args.behind_max_ms),
             expected_publish_shards=int(args.publish_shards),
             upload_prefix=None if args.upload_prefix is None else str(args.upload_prefix),
+            read_workers=int(args.read_workers),
             table_managed_by=str(args.table_managed_by),
         ),
         SystemClock(),
