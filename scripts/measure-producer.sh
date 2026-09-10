@@ -13,6 +13,30 @@ set -euo pipefail
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 
+usage() {
+	cat <<'USAGE'
+usage: scripts/measure-producer.sh
+
+It takes no arguments: the corpus, the topic and the speed are fixed so that
+two measurements are comparable. It prints wall seconds, encoded MB, MB/s,
+rows and rows/s, and needs Docker and this checkout's local stack.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	*)
+		printf 'unknown argument %s\n\n' "$1" >&2
+		usage >&2
+		exit 2
+		;;
+	esac
+done
+
 require_host_tools docker
 
 cleanup() {

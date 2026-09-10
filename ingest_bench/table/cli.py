@@ -144,14 +144,14 @@ def metadata_location(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     table = str(args.table)
     try:
-        table_identifier(table)
+        identifier = table_identifier(table)
         props = load_catalog_props(
             [str(prop) for prop in args.catalog_prop], [str(name) for name in args.catalog_prop_file]
         )
     except ValueError as error:
         parser.error(str(error))
     try:
-        loaded = open_catalog(props).load_table(table)
+        loaded = open_catalog(props).load_table(identifier)
     except NoSuchTableError:
         print(f"no table {table} in this catalog, so it has no metadata document", file=sys.stderr)
         return TABLE_ABSENT

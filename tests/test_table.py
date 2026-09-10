@@ -178,6 +178,23 @@ def test_table_metadata_prints_the_metadata_location(
     assert capsys.readouterr().out == f"{table.metadata_location}\n"
 
 
+def test_table_metadata_reads_a_three_part_name_as_the_same_table(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`catalog.namespace.table` and `namespace.table` must reach one table.
+
+    A query engine addresses a table with the catalog in front, and a client is
+    already scoped to one catalog. Handing the dotted string straight to the
+    catalog would make the leading segment part of the namespace, so the same
+    `--table` value would name two different tables across two commands.
+    """
+    props = sqlite_props(tmp_path)
+    table = create.create_table(props, "bench.m", corpus, create.parse_partition("unpartitioned"), {})
+    flags = [flag for key, value in props.items() for flag in ("--catalog-prop", f"{key}={value}")]
+    assert cli.metadata_location(["--table", "cat.bench.m", *flags]) == 0
+    assert capsys.readouterr().out == f"{table.metadata_location}\n"
+
+
 def test_table_metadata_answers_an_absent_table_with_a_code(
     tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
 ) -> None:

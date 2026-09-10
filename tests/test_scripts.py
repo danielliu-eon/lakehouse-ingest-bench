@@ -54,6 +54,7 @@ GATE = SCRIPTS / "gate.sh"
 TEARDOWN = SCRIPTS / "teardown.sh"
 FINISH = SCRIPTS / "finish.sh"
 PURGE = SCRIPTS / "purge.sh"
+MEASURE_PRODUCER = SCRIPTS / "measure-producer.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
@@ -358,6 +359,22 @@ def test_an_unknown_argument_is_refused() -> None:
     out = subprocess.run([str(SMOKE), "--warmup"], capture_output=True, text=True)
     assert out.returncode == 2, out.stdout
     assert "unknown argument --warmup" in out.stderr
+
+
+@needs_bash
+def test_measure_producer_answers_before_it_starts_a_stack() -> None:
+    """The one script whose work is a build, a 3 GB corpus and a full offer.
+
+    Answering `--help` by starting that is the most expensive way in the
+    repository to learn what a script does.
+    """
+    out = subprocess.run([str(MEASURE_PRODUCER), "--help"], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "takes no arguments" in out.stdout
+
+    refused = subprocess.run([str(MEASURE_PRODUCER), "--warmup"], capture_output=True, text=True)
+    assert refused.returncode == 2, refused.stdout
+    assert "unknown argument --warmup" in refused.stderr
 
 
 @needs_bash
