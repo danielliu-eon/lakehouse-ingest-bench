@@ -248,3 +248,16 @@ eksctl delete cluster -f deploy/aws/eksctl-cluster.example.yaml
 ```
 
 Neither script above runs `eksctl`, and neither deletes what it made.
+
+## The in-cluster stack's half
+
+`deploy/k8s/stack/setup.sh` runs the broker and the catalog inside the cluster
+instead of on MSK and Glue. What it needs of the account it takes from
+`_stack_hooks.sh` here, sourced with `CLOUD=aws`: a role,
+`lakehouse-ingest-bench-stack`, over the bucket's three prefixes and nothing
+else, bound through Pod Identity to the three run identities and the
+catalog's; a gp3 `StorageClass` from `k8s/kafka-storageclass.yaml.tmpl`; and
+the EBS CSI driver, which it refuses without. `eksctl-kafka-nodegroup.example.yaml`
+makes the brokers' node group. The bucket and the registry come from
+`setup.sh` above, which also makes an MSK cluster this shape never uses — tear
+that down when the stack is what you run.

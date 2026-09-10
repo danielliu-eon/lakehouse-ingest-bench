@@ -1,0 +1,50 @@
+# The three releases of the in-cluster stack, read from the environment
+# deploy/k8s/stack/setup.sh builds; run through it, not on its own, because
+# the identities, the storage class and the catalog's bootstrap are not
+# releases. `requiredEnv` refuses a missing name by name.
+repositories:
+  - name: strimzi
+    url: quay.io/strimzi-helm
+    oci: true
+  - name: lakekeeper
+    url: https://lakekeeper.github.io/lakekeeper-charts/
+
+helmDefaults:
+  wait: true
+  timeout: 600
+
+releases:
+  - name: strimzi-kafka-operator
+    namespace: strimzi-operator
+    createNamespace: true
+    chart: strimzi/strimzi-kafka-operator
+    version: {{ requiredEnv "STRIMZI_VERSION" }}
+    values:
+      - values/strimzi.yaml.gotmpl
+
+  # After the operator, and waited on: the Kafka and KafkaNodePool kinds exist
+  # only once the operator's CRDs are installed. Helm's wait knows nothing of
+  # the CR's own readiness; setup.sh waits on that.
+  - name: kafka
+    namespace: {{ requiredEnv "NAMESPACE" }}
+    chart: ./charts/kafka
+    needs:
+      - strimzi-operator/strimzi-kafka-operator
+    values:
+      - brokers: {{ requiredEnv "KAFKA_BROKERS" }}
+        storage:
+          size: {{ requiredEnv "KAFKA_VOLUME_GI" }}Gi
+          class: {{ requiredEnv "KAFKA_STORAGE_CLASS" }}
+        resources:
+          cpu: {{ requiredEnv "KAFKA_CPU" | quote }}
+          memory: {{ requiredEnv "KAFKA_MEM_GI" }}Gi
+        jvmHeap: {{ requiredEnv "KAFKA_JVM_HEAP" }}
+        nodeSelector: {{ requiredEnv "KAFKA_NODE_SELECTOR" }}
+        tolerations: {{ requiredEnv "KAFKA_TOLERATIONS" }}
+
+  - name: lakekeeper
+    namespace: {{ requiredEnv "NAMESPACE" }}
+    chart: lakekeeper/lakekeeper
+    version: {{ requiredEnv "LAKEKEEPER_CHART_VERSION" }}
+    values:
+      - values/lakekeeper.yaml.gotmpl

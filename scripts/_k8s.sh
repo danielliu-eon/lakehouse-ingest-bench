@@ -39,6 +39,13 @@ K8S_JOB_POLL_S="${K8S_JOB_POLL_S:-10}"
 # tunnel still silent after this is one that is not going to answer.
 K8S_PORT_FORWARD_WAIT_S="${K8S_PORT_FORWARD_WAIT_S:-30}"
 
+# Where a tunnel to a cluster-internal catalog answers on this machine, and the
+# path that says the catalog behind it is serving. Only the drivers that read
+# the catalog from here open one, and only for a URI whose host is a Service
+# name; see `read_catalog_prop_flags`.
+CATALOG_FORWARD_PORT="${CATALOG_FORWARD_PORT:-18181}"
+CATALOG_FORWARD_PROBE="${CATALOG_FORWARD_PROBE:-/health}"
+
 # Where a run's engine provenance is written, and how long a pod that has not
 # reported its image digest yet is waited for. A digest appears once the kubelet
 # has pulled the image, which is already true of a pod whose job is RUNNING, so
@@ -200,15 +207,15 @@ site_flags() {
 	printf '%s' "$flags"
 }
 
-# The catalog properties as `--catalog-prop key=value` argument pairs, in the
-# global array `CATALOG_PROP_FLAGS`, for a harness command run on this machine.
+# The site's catalog properties as `--catalog-prop key=value` flags, in
+# CATALOG_PROP_FLAGS, for the harness commands that read the catalog from the
+# operator's machine.
 #
-# Set rather than printed, and an array rather than a string, because a caller
-# splitting one string back apart would split a value on its own spaces too.
-# `site_flags` is the string form and is for a Job's command line, where the
-# image's shell does that splitting on purpose.
-#
-# Assigned and checked explicitly, for the reason `site_pairs` gives.
+# A URI whose host is a Service name is reachable only inside the cluster, so
+# it is reached through a tunnel opened here and the `uri` flag names the
+# tunnel's end instead. Every other property, and every other host, reaches the
+# command as the site wrote it. Callers trap `k8s_port_forward_stop` on EXIT
+# before calling this, because it may open a tunnel.
 read_catalog_prop_flags() {
 	local pairs
 	pairs="$(site_pairs '.catalog.props')" ||
@@ -217,8 +224,48 @@ read_catalog_prop_flags() {
 	local pair
 	while IFS= read -r pair; do
 		[[ -n $pair ]] || continue
+		if [[ $pair == uri=* ]]; then
+			k8s_reach_catalog "${pair#uri=}"
+			pair="uri=$CATALOG_URI"
+		fi
 		CATALOG_PROP_FLAGS+=(--catalog-prop "$pair")
 	done <<<"$pairs"
+}
+
+# k8s_service_host <host> — `<service> <namespace>` for a cluster-internal
+# Service name, `<service>.<namespace>.svc` with or without `.cluster.local`;
+# a non-zero exit for any other host. The shape is Kubernetes' own DNS
+# convention, which is what makes this a definition rather than a guess: a
+# name of it resolves nowhere but inside the cluster.
+k8s_service_host() {
+	[[ $1 =~ ^([a-z0-9-]+)\.([a-z0-9-]+)\.svc(\.cluster\.local)?$ ]] || return 1
+	printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+# k8s_reach_catalog <uri> — CATALOG_URI set to where this machine reaches the
+# catalog at <uri>: the URI itself, or the local end of a tunnel this opens to
+# the Service it names. A function that sets a global rather than one that
+# prints, because the tunnel's pid has to reach the caller's EXIT trap and a
+# command substitution would keep it.
+k8s_reach_catalog() {
+	local uri=$1 rest hostport host port path parts service namespace
+	CATALOG_URI="$uri"
+	rest="${uri#*://}"
+	[[ $rest != "$uri" ]] || return 0
+	hostport="${rest%%/*}"
+	path="${rest#"$hostport"}"
+	host="${hostport%%:*}"
+	parts="$(k8s_service_host "$host")" || return 0
+	read -r service namespace <<<"$parts"
+	[[ $uri == http://* ]] ||
+		die "catalog.props.uri is $uri: a Service name is reached through a tunnel, and the tunnel carries plain http only"
+	if [[ $hostport == *:* ]]; then
+		port="${hostport##*:}"
+	else
+		port=80
+	fi
+	k8s_port_forward "svc/$service" "$CATALOG_FORWARD_PORT:$port" "$namespace" "$CATALOG_FORWARD_PROBE"
+	CATALOG_URI="http://localhost:$CATALOG_FORWARD_PORT$path"
 }
 
 # The env list every Job gets, which is the region or nothing. A cluster off AWS
@@ -627,19 +674,20 @@ k8s_nodes_with_free_cpu() {
 # function that runs in a command substitution would not reach one.
 K8S_PORT_FORWARD_PID=""
 
-# k8s_port_forward <resource> <local:remote>
+# k8s_port_forward <resource> <local:remote> [namespace] [probe path]
 #
 # For the harness commands that speak a cluster-internal HTTP API from an
 # operator's machine. The wait is a request through the tunnel and not the
 # process being up: `kubectl port-forward` opens its listener before the
 # connection behind it works, so a command started on the listener alone is
-# answered with a reset.
+# answered with a reset. The namespace defaults to the site's and the probe
+# to `/`; a service that answers nothing at its root names the path it does.
 k8s_port_forward() {
-	local resource=$1 ports=$2 local_port=${2%%:*} waited=0
-	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" port-forward "$resource" "$ports" >&2 &
+	local resource=$1 ports=$2 namespace=${3:-$SITE_NAMESPACE} probe=${4:-/} local_port=${2%%:*} waited=0
+	kubectl --context "$KUBE_CONTEXT" --namespace "$namespace" port-forward "$resource" "$ports" >&2 &
 	K8S_PORT_FORWARD_PID=$!
 	while ((waited < K8S_PORT_FORWARD_WAIT_S)); do
-		if curl -sf --max-time 5 -o /dev/null "http://localhost:$local_port/"; then
+		if curl -sf --max-time 5 -o /dev/null "http://localhost:$local_port$probe"; then
 			log "port-forward to $resource answers on localhost:$local_port"
 			return 0
 		fi

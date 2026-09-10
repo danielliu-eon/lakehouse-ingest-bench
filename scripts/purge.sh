@@ -90,6 +90,8 @@ TABLE="$(jq -r .table "$FACTS")"
 
 # Read once, because both of the harness commands below take them: the one that
 # asks the catalog whether it still holds the table, and the one that drops it.
+# Traps before it opens, because it may open a tunnel — see read_catalog_prop_flags.
+trap k8s_port_forward_stop EXIT
 read_catalog_prop_flags
 
 # A teardown copies the table's last metadata document beside the run, and that
@@ -122,7 +124,7 @@ if [[ ! -f $METADATA_FINAL ]]; then
 		# that directory as it found it — which is what the closing line says.
 		METADATA_DOCUMENT="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-metadata.XXXXXX")" ||
 			die "could not make a temporary file to fetch $TABLE's metadata document into"
-		trap 'rm -f "$METADATA_DOCUMENT"' EXIT
+		trap 'k8s_port_forward_stop; rm -f "$METADATA_DOCUMENT"' EXIT
 		# Fetched through the same reader a teardown uses, so a compressed
 		# document reaches the `jq` below as the JSON it parses.
 		k8s_fetch_metadata_document "$CURRENT" "$METADATA_DOCUMENT" ||

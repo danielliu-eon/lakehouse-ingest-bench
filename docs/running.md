@@ -191,6 +191,16 @@ keep it labelled by its validity state. The rules a published result has to meet
 are in [`../results/README.md`](../results/README.md), and the document's own
 schema is in [`results-format.md`](results-format.md).
 
+### In-cluster stack
+
+With the broker and the catalog inside the cluster
+([`../deploy/k8s/stack/README.md`](../deploy/k8s/stack/README.md)) the sequence
+is unchanged, but `catalog.props.uri` names a Service your machine cannot reach.
+`teardown.sh`, `finish.sh` and `purge.sh` read the catalog from here, so for a
+`<service>.<namespace>.svc` host they tunnel to it with `kubectl port-forward`;
+only the `uri` changes. `CATALOG_FORWARD_PORT` (`18181`) is the tunnel's local
+end and `CATALOG_FORWARD_PROBE` (`/health`) the path that says it is serving.
+
 ### Which steps run in the cluster, and why
 
 Six harness commands run as Jobs, for three reasons. `stage` and `drop-topic`

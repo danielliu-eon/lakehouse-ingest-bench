@@ -1,0 +1,24 @@
+{{- $factor := min 3 (int .Values.brokers) -}}
+{{- $isr := max 1 (sub $factor 1) -}}
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: {{ .Values.name }}
+  labels:
+    lakehouse-ingest-bench: "true"
+spec:
+  kafka:
+    version: {{ .Values.kafkaVersion | quote }}
+    metadataVersion: {{ .Values.metadataVersion | quote }}
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      default.replication.factor: {{ $factor }}
+      min.insync.replicas: {{ $isr }}
+      offsets.topic.replication.factor: {{ $factor }}
+      transaction.state.log.replication.factor: {{ $factor }}
+      transaction.state.log.min.isr: {{ $isr }}
+      auto.create.topics.enable: false

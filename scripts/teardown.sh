@@ -184,6 +184,8 @@ aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" --only-show-errors >&2 ||
 # table looked like when the run ended: its schema, its properties, its
 # snapshot history and the manifests behind them. The table itself stays where
 # it is, and a later campaign may drop it — the copy is what survives that.
+# Traps before it opens, because it may open a tunnel — see read_catalog_prop_flags.
+trap k8s_port_forward_stop EXIT
 read_catalog_prop_flags
 
 # A teardown converges over an absent table: a run that failed before it created

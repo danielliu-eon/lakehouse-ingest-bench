@@ -88,9 +88,13 @@ done
 [[ $PUBLISH_INVALID == no || -n $PUBLISH_DIR ]] ||
 	die "--publish-invalid says how to publish, so it needs --publish <dir> to say where"
 
-require_host_tools aws jq yq
+require_host_tools aws jq yq kubectl
 require_site_file
 RUNS_ROOT="$(site_root '.runs_root')"
+# Read here rather than only where a tunnel might open: `kubectl` needs it as
+# soon as it runs, and a refusal at the top is more use than one from inside
+# a backgrounded port-forward, where a missing value is silent instead of fatal.
+KUBE_CONTEXT="$(site_required '.kubernetes.context')"
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 SCORES="$RUN_DIR/scores"
@@ -129,6 +133,8 @@ aws s3 sync "$RUNS_ROOT/$RUN_ID/producer/" "$PRODUCER/" --only-show-errors >&2 |
 # are in the bucket, and a client with no region resolves the wrong endpoint.
 METADATA_FINAL="$RUN_DIR/$METADATA_FINAL_FILE"
 if [[ -f $METADATA_FINAL ]]; then
+	# Traps before it opens, because it may open a tunnel — see read_catalog_prop_flags.
+	trap k8s_port_forward_stop EXIT
 	read_catalog_prop_flags
 	# Empty when the spec sets no ladder, and the flag is then left off so that
 	# `file-sizes` applies its own default rather than one restated here.

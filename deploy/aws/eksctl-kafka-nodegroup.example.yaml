@@ -1,0 +1,34 @@
+# A node group for the in-cluster brokers, beside the cluster's engine nodes:
+# three 8 vCPU / 32 GiB nodes, tainted so nothing but a broker lands on them.
+# Placed beside the engine, the brokers would share its cores and its network,
+# and the engine's figure would carry the broker's cost.
+#
+#   eksctl create nodegroup -f deploy/aws/eksctl-kafka-nodegroup.example.yaml
+#   eksctl delete nodegroup -f deploy/aws/eksctl-kafka-nodegroup.example.yaml --approve
+#
+# Replace both placeholders. Then give deploy/k8s/stack/setup.sh
+#   KAFKA_NODE_SELECTOR='{"lakehouse-ingest-bench/role":"kafka"}'
+#   KAFKA_TOLERATIONS='[{"key":"lakehouse-ingest-bench/kafka","operator":"Equal","value":"true","effect":"NoSchedule"}]'
+# The stack scripts never run eksctl; the node group is the operator's.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: YOUR_CLUSTER_NAME
+  region: YOUR_REGION
+managedNodeGroups:
+  - name: kafka
+    instanceType: m6i.2xlarge
+    amiFamily: AmazonLinux2023
+    desiredCapacity: 3
+    minSize: 3
+    maxSize: 3
+    volumeSize: 80
+    privateNetworking: true
+    labels:
+      lakehouse-ingest-bench/role: kafka
+    taints:
+      - key: lakehouse-ingest-bench/kafka
+        value: "true"
+        effect: NoSchedule
+    tags:
+      lakehouse-ingest-bench: "true"

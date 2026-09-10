@@ -60,6 +60,14 @@ MEASURE_PRODUCER = SCRIPTS / "measure-producer.sh"
 AWS_SETUP = AWS_DEPLOY / "setup.sh"
 AWS_TEARDOWN = AWS_DEPLOY / "teardown.sh"
 SITE_AWS_EXAMPLE = REPO_ROOT / "site.aws.example.yaml"
+SITE_K8S_EXAMPLE = REPO_ROOT / "site.k8s.example.yaml"
+
+SITE_K8S_FILLINGS = {
+    "YOUR_BUCKET": "a-bucket",
+    "YOUR_REGION": "eu-west-1",
+    "YOUR_KUBE_CONTEXT": "a-cluster",
+    "YOUR_REGISTRY": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+}
 
 # The two names a pod's region is rendered under, in the order a driver writes
 # them. Java's SDK reads the first, botocore only the second.
@@ -74,6 +82,13 @@ needs_shell_tools = pytest.mark.skipif(
     any(shutil.which(tool) is None for tool in ("bash", "jq", "yq", "git")),
     reason="the cluster drivers read the site and a run's facts with jq, yq and git",
 )
+
+STACK_DEPLOY = REPO_ROOT / "deploy" / "k8s" / "stack"
+KAFKA_CHART = STACK_DEPLOY / "charts" / "kafka"
+
+# The charts are rendered with helm, which the harness never needs; a machine
+# without it runs the rest of this file.
+needs_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
 # What `setup.sh` exports before it renders the IAM documents with envsubst. The
 # values are shaped like the real ones: a document that only renders with a
@@ -110,7 +125,12 @@ def _engine_compose_files() -> list[Path]:
 
 
 def _shell_files() -> list[Path]:
-    return sorted(SCRIPTS.glob("*.sh")) + sorted(AWS_DEPLOY.glob("*.sh")) + _engine_compose_files()
+    return (
+        sorted(SCRIPTS.glob("*.sh"))
+        + sorted(AWS_DEPLOY.glob("*.sh"))
+        + sorted(STACK_DEPLOY.glob("*.sh"))
+        + _engine_compose_files()
+    )
 
 
 def _sourced_shell_files() -> list[Path]:
@@ -234,11 +254,12 @@ def test_every_script_is_executable() -> None:
     entrypoints = _shell_entrypoints()
     sourced = _sourced_shell_files()
     assert [path.relative_to(REPO_ROOT).as_posix() for path in sourced] == [
+        "deploy/aws/_stack_hooks.sh",
         "engines/flink/compose.sh",
         "engines/spark/compose.sh",
         "scripts/_k8s.sh",
         "scripts/_lib.sh",
-    ], "the two shared libraries and one Compose shape per engine"
+    ], "the shared libraries, the AWS hook for the in-cluster stack, and one Compose shape per engine"
     for script in entrypoints:
         assert os.access(script, os.X_OK), f"{script} is not executable"
     for script in sourced:
@@ -1394,6 +1415,146 @@ def test_the_aws_site_example_refuses_its_own_placeholders(tmp_path: Path) -> No
         load_site(copied)
 
 
+# ---------------------------------------------------------------------------
+# The in-cluster stack: the AWS hook and what it renders
+# ---------------------------------------------------------------------------
+
+STACK_HOOKS_AWS = AWS_DEPLOY / "_stack_hooks.sh"
+
+
+def test_the_stack_policy_covers_the_three_prefixes_and_nothing_else() -> None:
+    """The stack has no managed broker and no Glue, so its role holds only the bucket.
+
+    A statement for either would grant the pods access to services the stack
+    never creates; the whole point of a separate role is that it can be bound
+    without a managed broker existing.
+    """
+    statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "stack-policy.json"))
+    bucket = f"arn:aws:s3:::{IAM_VALUES['BUCKET']}"
+    listing = _one(statements, {bucket}, "listing the bucket")
+    assert _actions(listing) == {"s3:ListBucket"}
+    prefixes = {f"{bucket}/corpus/*", f"{bucket}/runs/*", f"{bucket}/warehouse/*"}
+    objects = _one(statements, prefixes, "the objects under the three prefixes")
+    assert _actions(objects) == {"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject"}
+    assert len(statements) == 2
+    for statement in statements:
+        for action in _actions(statement):
+            assert action.startswith("s3:"), action
+
+
+def test_the_stack_policy_uses_only_the_bucket_placeholder() -> None:
+    """The hook exports BUCKET alone, so a second placeholder would reach IAM verbatim."""
+    identifiers = set(Template((AWS_DEPLOY / "iam" / "stack-policy.json").read_text()).get_identifiers())
+    assert identifiers == {"BUCKET"}
+    assert "envsubst '${BUCKET}'" in STACK_HOOKS_AWS.read_text()
+
+
+def test_the_kafka_storage_class_renders_a_provisioned_gp3_class() -> None:
+    template = AWS_DEPLOY / "k8s" / "kafka-storageclass.yaml.tmpl"
+    values = {"KAFKA_STORAGE_CLASS": "a-class", "KAFKA_VOLUME_THROUGHPUT_MIBS": "250", "KAFKA_VOLUME_IOPS": "6000"}
+    assert set(Template(template.read_text()).get_identifiers()) == set(values)
+    rendered = _mapping(yaml.safe_load(Template(template.read_text()).substitute(values)))
+    assert rendered["kind"] == "StorageClass"
+    assert _mapping(rendered["metadata"])["name"] == "a-class"
+    assert rendered["provisioner"] == "ebs.csi.aws.com"
+    parameters = _mapping(rendered["parameters"])
+    assert parameters["type"] == "gp3"
+    # Strings: the CSI driver's parameters are a string map, and a bare number
+    # here is refused by the API server rather than coerced.
+    assert parameters["throughput"] == "250" and parameters["iops"] == "6000"
+    # A broker's claim grows when a campaign moves from a smoke to an hour
+    # run, and its volume is created in the zone of the broker it serves.
+    assert rendered["allowVolumeExpansion"] is True
+    assert rendered["volumeBindingMode"] == "WaitForFirstConsumer"
+    hooks = STACK_HOOKS_AWS.read_text()
+    for name in values:
+        assert f"${{{name}}}" in hooks, f"the hook never gives envsubst ${{{name}}}"
+
+
+def test_the_kafka_nodegroup_example_parses_tainted_and_labelled() -> None:
+    """The example is copied and edited; it has to parse and carry the two placeholders only.
+
+    The taint is what keeps every other pod off the brokers' nodes, and the
+    label is what the KAFKA_NODE_SELECTOR beside it selects.
+    """
+    config = yaml.safe_load((AWS_DEPLOY / "eksctl-kafka-nodegroup.example.yaml").read_text())
+    assert config["kind"] == "ClusterConfig"
+    assert config["metadata"] == {"name": "YOUR_CLUSTER_NAME", "region": "YOUR_REGION"}
+    assert len(config["managedNodeGroups"]) == 1
+    group = config["managedNodeGroups"][0]
+    assert group["name"] == "kafka" and group["privateNetworking"] is True
+    assert group["labels"] == {"lakehouse-ingest-bench/role": "kafka"}
+    assert group["taints"] == [{"key": "lakehouse-ingest-bench/kafka", "value": "true", "effect": "NoSchedule"}]
+    assert group["desiredCapacity"] == group["minSize"] == group["maxSize"] == 3
+
+
+@needs_bash
+def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
+    """The stack scripts dispatch on CLOUD to these names; a missing one is a
+    `command not found` half way through a setup."""
+    text = STACK_HOOKS_AWS.read_text()
+    for name in (
+        "stack_preflight",
+        "stack_preflight_storage",
+        "stack_bind_identity",
+        "stack_unbind_identity",
+        "stack_storage_class",
+        "stack_catalog_settings",
+        "stack_storage_profile_json",
+        "stack_storage_credential_json",
+        "stack_delete_storage_class",
+    ):
+        assert f"\n{name}() {{\n" in text, name
+    assert not text.startswith("#!"), "a sourced file, not an entrypoint"
+    assert text.splitlines()[0] == "# SPDX-License-Identifier: Apache-2.0"
+
+
+@needs_shell_tools
+def test_the_storage_profile_keeps_the_catalog_off_the_data_path() -> None:
+    """Vending and remote signing off: every pod already reaches the bucket as its own identity."""
+    function = _shell_function(STACK_HOOKS_AWS, "stack_storage_profile_json")
+    out = subprocess.run(
+        ["bash", "-c", f"{function}\nstack_storage_profile_json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "BUCKET": "a-bucket", "AWS_REGION": "eu-west-1"},
+    )
+    assert out.returncode == 0, out.stderr
+    profile = _mapping(json.loads(out.stdout))
+    assert profile == {
+        "type": "s3",
+        "bucket": "a-bucket",
+        "key-prefix": "warehouse",
+        "region": "eu-west-1",
+        "flavor": "aws",
+        "sts-enabled": False,
+        "remote-signing-enabled": False,
+    }
+
+
+@needs_shell_tools
+def test_the_storage_credential_is_the_pods_own_identity() -> None:
+    function = _shell_function(STACK_HOOKS_AWS, "stack_storage_credential_json")
+    out = subprocess.run(
+        ["bash", "-c", f'{function}\nstack_storage_credential_json "$1"', "_", "an-external-id"],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert _mapping(json.loads(out.stdout)) == {
+        "type": "s3",
+        "credential-type": "aws-system-identity",
+        "external-id": "an-external-id",
+    }
+
+
+def test_setup_creates_the_warehouse_with_hard_deletes() -> None:
+    """purge.sh removes a table's files itself; a soft delete would reserve the location."""
+    setup = STACK_SETUP.read_text()
+    assert '"delete-profile": {type: "hard"}' in setup
+    assert "stack_storage_profile_json" in setup and 'stack_storage_credential_json "$EXTERNAL_ID"' in setup
+
+
 def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: Path) -> None:
     text = SITE_AWS_EXAMPLE.read_text()
     # Off the parsed document rather than off the file's text: the header
@@ -2362,6 +2523,162 @@ def test_a_driver_addresses_the_topic_staging_named(tmp_path: Path, script: Path
     assert published, commands
     for command in published:
         assert f"--topic {topic}" in command, command
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "host, answer",
+    [
+        ("lakekeeper.ingest-bench.svc", "lakekeeper ingest-bench"),
+        ("lakekeeper.ingest-bench.svc.cluster.local", "lakekeeper ingest-bench"),
+        ("glue.eu-west-1.amazonaws.com", None),
+        ("localhost", None),
+        ("iceberg-rest", None),
+    ],
+)
+def test_a_service_name_is_told_apart_from_any_other_catalog_host(host: str, answer: str | None) -> None:
+    """Only Kubernetes' own `<service>.<namespace>.svc` shape names a tunnel.
+
+    The shape is the cluster DNS convention and not a heuristic: a name of it
+    resolves nowhere but inside the cluster, so it is exactly the set of hosts
+    an operator's machine cannot reach as written.
+    """
+    function = _shell_function(K8S_LIB, "k8s_service_host")
+    out = subprocess.run(
+        ["bash", "-c", f'{function}\nk8s_service_host "$1"', "_", host], capture_output=True, text=True
+    )
+    if answer is None:
+        assert out.returncode != 0, out.stdout
+        assert out.stdout == ""
+    else:
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == answer
+
+
+def _svc_catalog_site(host: str) -> str:
+    """The filled AWS site with its catalog moved inside the cluster."""
+    return _filled_site().replace(
+        "uri: https://glue.eu-west-1.amazonaws.com/iceberg", f"uri: http://{host}:8181/catalog"
+    )
+
+
+def _staged_for_teardown(tmp_path: Path) -> None:
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("host", ["lakekeeper.ingest-bench.svc", "lakekeeper.ingest-bench.svc.cluster.local"])
+def test_an_in_cluster_catalog_is_reached_through_a_tunnel(tmp_path: Path, host: str) -> None:
+    """A catalog addressed by Service name is a ClusterIP, which this machine cannot reach.
+
+    `stage` and `drop-topic` already run as Jobs for the broker's sake; the two
+    catalog reads a teardown and a purge make from here are the whole gap, and
+    a tunnel to the Service the URI names is what closes it. Only the `uri`
+    flag changes: every other property reaches the command as the site wrote it.
+    """
+    _staged_for_teardown(tmp_path)
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_METADATA_LOG": str(tmp_path / "table-metadata-calls.log"),
+            "STUB_METADATA_STATUS": "3",
+            "STUB_CURL_LOG": str(tmp_path / "curl.log"),
+        },
+        site=_svc_catalog_site(host),
+        programs={"table-metadata": TABLE_METADATA_STUB, "curl": CURL_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "--namespace ingest-bench port-forward svc/lakekeeper 18181:8181" in run.calls
+    # The tunnel is probed at the catalog's health path, not at `/`.
+    assert "http://localhost:18181/health" in (tmp_path / "curl.log").read_text()
+    flags = (tmp_path / "table-metadata-calls.log").read_text()
+    assert "--catalog-prop uri=http://localhost:18181/catalog" in flags
+    assert ".svc" not in flags
+    assert "--catalog-prop rest.signing-name=glue" in flags, "every other property passes through as written"
+
+
+@needs_shell_tools
+def test_a_catalog_off_the_cluster_is_reached_as_written(tmp_path: Path) -> None:
+    """A public endpoint needs no tunnel, and gets none."""
+    _staged_for_teardown(tmp_path)
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_METADATA_LOG": str(tmp_path / "table-metadata-calls.log"), "STUB_METADATA_STATUS": "3"},
+        programs={"table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "port-forward" not in run.calls
+    flags = (tmp_path / "table-metadata-calls.log").read_text()
+    assert "--catalog-prop uri=https://glue.eu-west-1.amazonaws.com/iceberg" in flags
+
+
+@needs_shell_tools
+def test_a_purge_asks_an_in_cluster_catalog_through_the_same_tunnel(tmp_path: Path) -> None:
+    _torn_down_run(tmp_path, metadata=False)
+    run = _run_driver(
+        PURGE,
+        [RUN_ID, "--yes", "--artifacts"],
+        tmp_path,
+        {
+            **_purge_environment(tmp_path),
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "3",
+            "STUB_CURL_LOG": str(tmp_path / "curl.log"),
+        },
+        site=_svc_catalog_site("lakekeeper.ingest-bench.svc"),
+        programs={**PURGE_PROGRAMS, "table-metadata": TABLE_METADATA_STUB, "curl": CURL_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "--namespace ingest-bench port-forward svc/lakekeeper 18181:8181" in run.calls
+    assert "--catalog-prop uri=http://localhost:18181/catalog" in (tmp_path / "metadata.log").read_text()
+
+
+@needs_shell_tools
+def test_an_https_service_uri_is_refused_by_name(tmp_path: Path) -> None:
+    """The tunnel carries plain HTTP; a TLS Service name is a site to fix, not to guess at."""
+    _staged_for_teardown(tmp_path)
+    run = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_METADATA_LOG": str(tmp_path / "table-metadata-calls.log"), "STUB_METADATA_STATUS": "3"},
+        site=_filled_site().replace(
+            "uri: https://glue.eu-west-1.amazonaws.com/iceberg", "uri: https://lakekeeper.ingest-bench.svc:8181/catalog"
+        ),
+        programs={"table-metadata": TABLE_METADATA_STUB},
+    )
+    assert run.result.returncode == 1, run.result.stdout
+    assert "plain http" in run.result.stderr
+
+
+@needs_shell_tools
+def test_finish_reaches_an_in_cluster_catalog_through_a_tunnel_too(tmp_path: Path) -> None:
+    """`finish.sh` reads the catalog properties for the same reason `teardown.sh` does.
+
+    It never opens a catalog connection — `file-sizes` reads the copied
+    document — but the object-store settings among the properties still come
+    through `read_catalog_prop_flags`, which opens the same tunnel for a
+    Service-shaped `uri` and has to stop it on the way out.
+    """
+    _torn_down_run(tmp_path)
+    run = _run_driver(
+        FINISH,
+        [RUN_ID],
+        tmp_path,
+        {**_finish_environment(tmp_path), "STUB_CURL_LOG": str(tmp_path / "curl.log")},
+        site=_svc_catalog_site("lakekeeper.ingest-bench.svc"),
+        programs={**FINISH_PROGRAMS, "curl": CURL_STUB},
+    )
+    assert run.result.returncode == 0, run.result.stderr
+    assert "--namespace ingest-bench port-forward svc/lakekeeper 18181:8181" in run.calls
 
 
 @needs_shell_tools
@@ -4216,3 +4533,381 @@ def test_a_chained_run_hands_each_flag_to_the_driver_that_owns_it(tmp_path: Path
     # was given rather than whatever `SITE_FILE` happens to hold.
     for driver in ("stage", "launch", "gate", "teardown", "finish"):
         assert "--site ./site.yaml" in run.call(driver), run.call(driver)
+
+
+# ---------------------------------------------------------------------------
+# The in-cluster stack: the Kafka chart
+# ---------------------------------------------------------------------------
+
+
+def _helm_template(chart: Path, settings: dict[str, str]) -> dict[str, dict[str, object]]:
+    """The chart rendered with ``settings`` as ``--set`` pairs, keyed by kind."""
+    command = ["helm", "template", "stack", str(chart), "--namespace", "a-namespace"]
+    for key, value in settings.items():
+        command += ["--set-string", f"{key}={value}"]
+    rendered = subprocess.run(command, capture_output=True, text=True)
+    assert rendered.returncode == 0, rendered.stderr
+    documents = [_mapping(document) for document in yaml.safe_load_all(rendered.stdout) if document is not None]
+    by_kind = {str(document["kind"]): document for document in documents}
+    assert len(by_kind) == len(documents), "one object per kind"
+    return by_kind
+
+
+@needs_helm
+@pytest.mark.parametrize("brokers, factor, isr", [("1", 1, 1), ("2", 2, 1), ("3", 3, 2), ("5", 3, 2)])
+def test_the_kafka_chart_derives_replication_from_the_broker_count(brokers: str, factor: int, isr: int) -> None:
+    """`min(3, brokers)` replicas and one fewer in sync, which is what staging asks for too.
+
+    Staging creates the topic with `min(3, brokers)` replicas; a cluster whose
+    own default disagreed would place the offsets and transaction topics
+    differently from the run's, and a single broker would refuse a factor of 3.
+    """
+    kafka = _mapping(_mapping(_helm_template(KAFKA_CHART, {"brokers": brokers})["Kafka"]["spec"])["kafka"])
+    config = _mapping(kafka["config"])
+    assert config["default.replication.factor"] == factor
+    assert config["offsets.topic.replication.factor"] == factor
+    assert config["transaction.state.log.replication.factor"] == factor
+    assert config["min.insync.replicas"] == isr
+    assert config["transaction.state.log.min.isr"] == isr
+    assert config["auto.create.topics.enable"] is False, "staging creates the topic"
+
+
+@needs_helm
+def test_the_kafka_chart_exposes_one_plain_listener() -> None:
+    """One internal listener on 9092 without TLS or authentication: the Compose stack's shape.
+
+    That is what `kafka.security: {}` in the site means, and what lets the
+    local smoke stand for the cluster's broker.
+    """
+    rendered = _helm_template(KAFKA_CHART, {})
+    kafka = _mapping(_mapping(rendered["Kafka"]["spec"])["kafka"])
+    listeners = [_mapping(listener) for listener in _sequence(kafka["listeners"])]
+    assert listeners == [{"name": "plain", "port": 9092, "type": "internal", "tls": False}]
+    assert kafka["version"] == "4.3.1" and kafka["metadataVersion"] == "4.3-IV0"
+    assert _mapping(rendered["Kafka"]["metadata"])["name"] == "ingest-bench"
+    assert "entityOperator" not in _mapping(rendered["Kafka"]["spec"]), "topics come from the admin API"
+
+
+@needs_helm
+def test_the_kafka_chart_places_and_sizes_its_brokers() -> None:
+    """Every knob setup.sh takes reaches the node pool, and nothing else does.
+
+    Strimzi's pod template has no `nodeSelector`, so a selector is rendered as
+    the required node affinity that means the same thing.
+    """
+    rendered = _helm_template(
+        KAFKA_CHART,
+        {
+            "brokers": "3",
+            "storage.size": "500Gi",
+            "storage.class": "ingest-bench-kafka",
+            "resources.cpu": "4",
+            "resources.memory": "16Gi",
+            "jvmHeap": "6g",
+            "nodeSelector.lakehouse-ingest-bench/role": "kafka",
+            "tolerations[0].key": "lakehouse-ingest-bench/kafka",
+            "tolerations[0].operator": "Equal",
+            "tolerations[0].value": "true",
+            "tolerations[0].effect": "NoSchedule",
+        },
+    )
+    pool = _mapping(rendered["KafkaNodePool"]["spec"])
+    assert pool["replicas"] == 3
+    assert set(_sequence(pool["roles"])) == {"controller", "broker"}
+    volume = _mapping(_sequence(_mapping(pool["storage"])["volumes"])[0])
+    assert volume["type"] == "persistent-claim" and volume["size"] == "500Gi"
+    assert volume["class"] == "ingest-bench-kafka"
+    assert volume["deleteClaim"] is True and volume["kraftMetadata"] == "shared"
+    resources = _mapping(pool["resources"])
+    assert _mapping(resources["requests"]) == {"cpu": "4", "memory": "16Gi"}
+    assert _mapping(resources["limits"]) == {"cpu": "4", "memory": "16Gi"}
+    assert _mapping(pool["jvmOptions"]) == {"-Xms": "6g", "-Xmx": "6g"}
+    pod = _mapping(_mapping(pool["template"])["pod"])
+    assert _sequence(pod["tolerations"]) == [
+        {"key": "lakehouse-ingest-bench/kafka", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+    ]
+    terms = _sequence(
+        _mapping(_mapping(_mapping(pod["affinity"])["nodeAffinity"])["requiredDuringSchedulingIgnoredDuringExecution"])[
+            "nodeSelectorTerms"
+        ]
+    )
+    expressions = _sequence(_mapping(terms[0])["matchExpressions"])
+    assert expressions == [{"key": "lakehouse-ingest-bench/role", "operator": "In", "values": ["kafka"]}]
+    labels = _mapping(_mapping(rendered["KafkaNodePool"]["metadata"])["labels"])
+    assert labels["strimzi.io/cluster"] == "ingest-bench", "the pool belongs to the Kafka CR of that name"
+
+
+@needs_helm
+def test_the_kafka_chart_leaves_placement_and_class_out_when_unset() -> None:
+    """An empty selector, no tolerations and no class render nothing, not empty fields.
+
+    An empty `class` would ask for a StorageClass literally named "", and an
+    empty affinity block is refused by the operator's schema.
+    """
+    pool = _mapping(_helm_template(KAFKA_CHART, {})["KafkaNodePool"]["spec"])
+    volume = _mapping(_sequence(_mapping(pool["storage"])["volumes"])[0])
+    assert "class" not in volume
+    assert "template" not in pool
+
+
+# ---------------------------------------------------------------------------
+# The in-cluster stack: the helmfile
+# ---------------------------------------------------------------------------
+
+STACK_HELMFILE = STACK_DEPLOY / "helmfile.yaml.gotmpl"
+STACK_SETUP = STACK_DEPLOY / "setup.sh"
+
+
+def _helmfile_environment_names() -> set[str]:
+    texts = [STACK_HELMFILE.read_text()] + [
+        path.read_text() for path in sorted((STACK_DEPLOY / "values").glob("*.gotmpl"))
+    ]
+    names: set[str] = set()
+    for text in texts:
+        names |= set(re.findall(r'requiredEnv "([A-Z_]+)"', text))
+    return names
+
+
+def test_the_helmfile_names_the_three_releases_at_their_pins() -> None:
+    text = STACK_HELMFILE.read_text()
+    releases = text[text.index("\nreleases:") :]
+    assert releases.count("\n  - name: ") == 3
+    for release in ("strimzi-kafka-operator", "kafka", "lakekeeper"):
+        assert f"\n  - name: {release}\n" in text, release
+    assert "chart: ./charts/kafka" in text
+    assert "needs:\n      - strimzi-operator/strimzi-kafka-operator" in text, "the CRDs exist before the CR"
+    assert 'version: {{ requiredEnv "STRIMZI_VERSION" }}' in text
+    assert 'version: {{ requiredEnv "LAKEKEEPER_CHART_VERSION" }}' in text
+    assert "oci: true" in text and "quay.io/strimzi-helm" in text
+    assert "https://lakekeeper.github.io/lakekeeper-charts/" in text
+
+
+def test_the_catalog_values_turn_vending_and_auth_off_and_name_its_identity() -> None:
+    text = (STACK_DEPLOY / "values" / "lakekeeper.yaml.gotmpl").read_text()
+    assert "name: ingest-bench-catalog" in text, "the account a pod identity association is made for"
+    assert 'encryptionKeySecret: {{ requiredEnv "CATALOG_SECRET" }}' in text
+    assert 'config: {{ requiredEnv "STACK_CATALOG_CONFIG_JSON" }}' in text
+    assert 'extraEnv: {{ requiredEnv "STACK_CATALOG_ENV_JSON" }}' in text
+    assert "providerUri" not in text and "k8s:" not in text, "authentication stays at the chart's off default"
+    assert "postgresql:\n  enabled: true" in text
+    assert 'className: {{ requiredEnv "KAFKA_STORAGE_CLASS" }}' in text
+    assert "\nhelmWait: true\n" in text, "the migration Job must not be a post-install hook under --wait"
+
+
+# ---------------------------------------------------------------------------
+# The in-cluster stack: setup.sh
+# ---------------------------------------------------------------------------
+
+
+def _without(*names: str) -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key not in names}
+
+
+@needs_bash
+def test_stack_setup_answers_before_it_needs_a_cloud() -> None:
+    """`--help` and an unknown argument, with no CLOUD, no tools and no cluster."""
+    environment = _without("CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION")
+    out = subprocess.run([str(STACK_SETUP), "--help"], capture_output=True, text=True, env=environment)
+    assert out.returncode == 0, out.stderr
+    assert "takes no arguments" in out.stdout and "CLOUD" in out.stdout
+
+    refused = subprocess.run([str(STACK_SETUP), "--brokers"], capture_output=True, text=True, env=environment)
+    assert refused.returncode == 2, refused.stdout
+    assert "unknown argument --brokers" in refused.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "cloud, said",
+    [
+        (None, "CLOUD must be set"),
+        ("gcp", "CLOUD=gcp is not supported yet"),
+        ("azure", "CLOUD is 'azure'"),
+    ],
+)
+def test_stack_setup_refuses_a_cloud_it_has_no_hook_for_by_name(cloud: str | None, said: str) -> None:
+    """Before any tool check: the answer for GCP is 'not yet', not 'helmfile is missing'."""
+    environment = _without("CLOUD")
+    if cloud is not None:
+        environment["CLOUD"] = cloud
+    out = subprocess.run([str(STACK_SETUP)], capture_output=True, text=True, env=environment)
+    assert out.returncode == 1, out.stdout
+    assert said in out.stderr
+    assert "missing host tool" not in out.stderr
+
+
+@needs_bash
+def test_stack_setup_refuses_a_heap_that_is_not_below_the_pod_s_memory() -> None:
+    """Before any tool check: a broker with no page cache left OOMs minutes after it starts, not before."""
+    environment = _without(
+        "CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION", "KAFKA_JVM_HEAP", "KAFKA_MEM_GI"
+    )
+    environment["CLOUD"] = "aws"
+    environment["KAFKA_JVM_HEAP"] = "16g"
+    environment["KAFKA_MEM_GI"] = "16"
+    out = subprocess.run([str(STACK_SETUP)], capture_output=True, text=True, env=environment)
+    assert out.returncode == 1, out.stdout
+    assert "must be below" in out.stderr
+    assert "missing host tool" not in out.stderr
+
+
+def test_stack_setup_substitutes_every_marker_the_registry_template_carries() -> None:
+    """The same `sed` as deploy/aws/setup.sh, over the same template."""
+    template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
+    setup = STACK_SETUP.read_text()
+    markers = {match[2:-2] for match in MARKER_RE.findall(template.read_text())}
+    assert markers == {"NAMESPACE", "NODE_SELECTOR", "TOLERATIONS"}
+    for marker in markers:
+        assert f"s|__{marker}__|$" in setup, f"setup.sh never substitutes __{marker}__"
+    assert "WITH_SCHEMA_REGISTRY" in setup
+    assert "schema-registry.$NAMESPACE.svc:8080/apis/ccompat/v7" in setup
+
+
+def test_stack_setup_prints_every_value_the_site_example_asks_for() -> None:
+    """What setup.sh prints at the end is what the operator pastes into site.yaml.
+
+    Each printed key names a key of the example, so a key the example gains
+    and the script never prints is a value the operator has to guess.
+    """
+    setup = STACK_SETUP.read_text()
+    for printed in (
+        "kafka.bootstrap_servers:",
+        "catalog.props.uri:",
+        "catalog.props.warehouse:",
+        "kubernetes.context:",
+        "kubernetes.namespace:",
+    ):
+        assert printed in setup, printed
+    assert "$KAFKA_NAME-kafka-bootstrap.$NAMESPACE.svc:9092" in setup
+    assert "http://lakekeeper.$NAMESPACE.svc:8181/catalog" in setup
+
+
+def test_stack_setup_reuses_the_namespace_manifest_rather_than_copying_it() -> None:
+    setup = STACK_SETUP.read_text()
+    assert "deploy/aws/k8s/namespace.yaml.tmpl" in setup
+    assert not (STACK_DEPLOY / "namespace.yaml.tmpl").exists()
+
+
+def test_stack_setup_binds_the_catalog_beside_the_three_run_identities() -> None:
+    """Four associations, the catalog's among them: it writes the warehouse's metadata."""
+    setup = STACK_SETUP.read_text()
+    site = _mapping(_mapping(yaml.safe_load(SITE_AWS_EXAMPLE.read_text()))["kubernetes"])
+    for account in (site["harness_service_account"], site["flink_service_account"], site["spark_service_account"]):
+        assert str(account) in setup
+    assert "ingest-bench-catalog" in setup
+    bind = re.search(r"stack_bind_identity \"\$NAMESPACE\"(.*)", setup)
+    assert bind is not None
+    assert bind.group(1).count("SERVICE_ACCOUNT") == 4
+
+
+def test_every_helmfile_input_is_something_setup_exports() -> None:
+    """`requiredEnv` fails a render on a missing name; this fails it here instead.
+
+    The helmfile and its values read the environment setup.sh builds, so the
+    two lists are one, and a name added to a template without an `export` in
+    the script would stop the first `helmfile sync` on a live cluster.
+    """
+    names = _helmfile_environment_names()
+    assert names, "the helmfile reads nothing from the environment"
+    setup = STACK_SETUP.read_text()
+    for name in sorted(names):
+        assert re.search(rf"\bexport\b[^\n]*\b{name}\b", setup), f"setup.sh never exports {name}"
+
+
+# ---------------------------------------------------------------------------
+# The in-cluster stack: teardown.sh
+# ---------------------------------------------------------------------------
+
+STACK_TEARDOWN = STACK_DEPLOY / "teardown.sh"
+
+
+@needs_bash
+def test_stack_teardown_takes_its_arguments_before_it_needs_a_cloud() -> None:
+    environment = _without("CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION")
+    out = subprocess.run([str(STACK_TEARDOWN), "--help"], capture_output=True, text=True, env=environment)
+    assert out.returncode == 0, out.stderr
+    assert "--all" in out.stdout and "--yes" in out.stdout
+
+    refused = subprocess.run([str(STACK_TEARDOWN), "--everything"], capture_output=True, text=True, env=environment)
+    assert refused.returncode == 2, refused.stdout
+    assert "unknown argument --everything" in refused.stderr
+
+
+def test_stack_teardown_removes_the_broker_before_the_operator_that_owns_it() -> None:
+    """Strimzi deletes a broker's claims only while it is running.
+
+    The Kafka release goes first and the operator last, under `--all`; the
+    other order leaves every broker volume behind, billed and orphaned.
+    """
+    text = STACK_TEARDOWN.read_text()
+    kafka = text.index("--selector name=kafka")
+    lakekeeper = text.index("--selector name=lakekeeper")
+    namespace = text.index("delete namespace")
+    operator = text.index("--selector name=strimzi-kafka-operator")
+    assert kafka < lakekeeper < namespace < operator
+    assert "stack_unbind_identity" in text and "stack_delete_storage_class" in text
+    assert "confirm" in text and "ASSUME_YES" in text
+
+
+# ---------------------------------------------------------------------------
+# The in-cluster site example
+# ---------------------------------------------------------------------------
+
+
+def test_the_k8s_site_example_refuses_its_own_placeholders(tmp_path: Path) -> None:
+    copied = tmp_path / "site.yaml"
+    copied.write_text(SITE_K8S_EXAMPLE.read_text())
+    with pytest.raises(ValueError, match="YOUR_"):
+        load_site(copied)
+
+
+def test_the_k8s_site_example_loads_once_every_placeholder_is_filled(tmp_path: Path) -> None:
+    """The in-cluster shape: a plain broker, a REST catalog by Service name, a warehouse by name.
+
+    That is the Compose stack's shape on a cluster, which is what lets the
+    local smoke stand for it — and `warehouse` is a name and not a path, as it
+    is for Glue, so every location comes from `site.warehouse`.
+    """
+    text = SITE_K8S_EXAMPLE.read_text()
+    in_values = set(re.findall(r"YOUR_[A-Z_]+", yaml.safe_dump(yaml.safe_load(text))))
+    assert in_values == set(SITE_K8S_FILLINGS), "the example's placeholders and the ones filled here have drifted"
+    for placeholder, value in SITE_K8S_FILLINGS.items():
+        text = text.replace(placeholder, value)
+    copied = tmp_path / "site.yaml"
+    copied.write_text(text)
+
+    site = load_site(copied)
+    assert site.corpus_root == "s3://a-bucket/corpus"
+    assert site.runs_root == "s3://a-bucket/runs"
+    assert site.warehouse == "s3://a-bucket/warehouse"
+    assert site.kafka_bootstrap == "ingest-bench-kafka-bootstrap.ingest-bench.svc:9092"
+    assert site.kafka_security == {}
+    assert site.schema_registry is None
+    assert site.catalog_props == {
+        "uri": "http://lakekeeper.ingest-bench.svc:8181/catalog",
+        "warehouse": "ingest-bench",
+        "s3.region": "eu-west-1",
+    }
+    assert site.kubernetes == KubernetesConfig(
+        context="a-cluster",
+        namespace="ingest-bench",
+        harness_service_account="ingest-bench-harness",
+        flink_service_account="ingest-bench-flink",
+        spark_service_account="ingest-bench-spark",
+        service_account_annotations={},
+        registry="123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+        aws_region="eu-west-1",
+        secret_name=None,
+        node_selector={},
+        tolerations=[],
+    )
+
+
+def test_the_k8s_site_example_names_what_setup_prints() -> None:
+    """Every address in the example is one setup.sh prints, at the default namespace."""
+    example = _mapping(yaml.safe_load(SITE_K8S_EXAMPLE.read_text()))
+    setup = STACK_SETUP.read_text().replace("$KAFKA_NAME", "ingest-bench").replace("$NAMESPACE", "ingest-bench")
+    assert str(_mapping(example["kafka"])["bootstrap_servers"]) in setup
+    props = _mapping(_mapping(example["catalog"])["props"])
+    assert str(props["uri"]) in setup
+    assert f"catalog.props.warehouse:        {props['warehouse']}" in setup.replace("$WAREHOUSE_NAME", "ingest-bench")

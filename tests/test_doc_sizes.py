@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # and a pitfall list are skimmed, a reference is consulted, and a methodology is
 # read once and returned to.
 MAX_LINES: dict[str, int] = {
-    "README.md": 150,
+    "README.md": 160,
     "CONTRIBUTING.md": 150,
     "docs/methodology.md": 250,
     "docs/corpus.md": 300,
@@ -32,6 +32,7 @@ MAX_LINES: dict[str, int] = {
     "docs/adding-an-engine.md": 220,
     "docs/results-format.md": 150,
     "docs/pitfalls.md": 150,
+    "deploy/k8s/stack/README.md": 200,
     "engines/flink/README.md": 150,
     "engines/spark/README.md": 150,
 }

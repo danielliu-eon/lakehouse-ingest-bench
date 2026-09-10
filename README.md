@@ -95,6 +95,15 @@ Once per run, [`docs/running.md`](docs/running.md) is the drivers' order:
 of which `scripts/run.sh <spec>` chains all but the last. Amazon MSK bills by
 the hour, idle or not, so tear it down between campaigns.
 
+## In-cluster broker and catalog
+
+The broker and the catalog can run inside the cluster instead:
+[`deploy/k8s/stack/README.md`](deploy/k8s/stack/README.md) installs Apache
+Kafka through the Strimzi operator and Lakekeeper with its Postgres, and prints
+a `site.yaml` — copy `site.k8s.example.yaml`. Nothing about a run changes; the
+brokers want a node group of their own, so the engine's figure does not carry
+theirs.
+
 ## Publishing a result
 
 `scripts/finish.sh <run_id> --publish results/` writes one redacted JSON

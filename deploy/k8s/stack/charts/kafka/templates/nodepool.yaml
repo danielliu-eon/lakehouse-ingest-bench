@@ -1,0 +1,54 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  labels:
+    strimzi.io/cluster: {{ .Values.name }}
+    lakehouse-ingest-bench: "true"
+spec:
+  replicas: {{ int .Values.brokers }}
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: {{ .Values.storage.size }}
+        {{- with .Values.storage.class }}
+        class: {{ . }}
+        {{- end }}
+        deleteClaim: true
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: {{ .Values.resources.cpu | quote }}
+      memory: {{ .Values.resources.memory }}
+    limits:
+      cpu: {{ .Values.resources.cpu | quote }}
+      memory: {{ .Values.resources.memory }}
+  jvmOptions:
+    -Xms: {{ .Values.jvmHeap }}
+    -Xmx: {{ .Values.jvmHeap }}
+  {{- if or .Values.tolerations .Values.nodeSelector }}
+  template:
+    pod:
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  {{- range $key, $value := . }}
+                  - key: {{ $key }}
+                    operator: In
+                    values:
+                      - {{ $value | quote }}
+                  {{- end }}
+      {{- end }}
+  {{- end }}
