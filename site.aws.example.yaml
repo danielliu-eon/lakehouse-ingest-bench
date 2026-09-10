@@ -43,4 +43,7 @@ kubernetes:
   # secret_name: bench-env
   node_selector: {}
   tolerations: []
+# Zeros are a placeholder, and validate-results.py refuses a result published at
+# them: fill in the hourly price of the instance types your fleet asks for, split
+# across their vCPU and GiB. docs/methodology.md, under Cost, is the formula.
 pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}
