@@ -41,9 +41,17 @@ spec:
           # the shard count: sharding buys throughput, never headroom. The
           # driver's PRODUCER_MEMORY is what raises this for a preset whose
           # batch is larger than the smoke one's.
+          #
+          # Two cores, because a shard at full offer is two busy threads and
+          # not one: the Python process encoding and pacing batches, and
+          # librdkafka's sender compressing and writing them. Requested rather
+          # than limited, so a shard that briefly needs more takes it from an
+          # idle node instead of being throttled into falling behind its own
+          # schedule — which the scorer would then read as a producer-bound
+          # run.
           resources:
             requests:
-              cpu: "1"
+              cpu: "2"
               memory: __MEMORY__
           volumeMounts:
             - name: work

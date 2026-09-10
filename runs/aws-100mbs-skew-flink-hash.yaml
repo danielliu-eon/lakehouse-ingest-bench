@@ -7,11 +7,14 @@
 # one that produced a committed result, so this file's is a starting point until
 # a result stands behind it.
 #
-# Topic partitions equal the fleet's slots, so every slot owns a lane; two
-# producer shards give the ~115 MB/s-per-process producer the headroom
-# "Sizing the producer" in docs/running.md asks for. `lz4` because an hour at
-# 100 MB/s is what crosses the link, and it is the cheapest codec that still
-# halves it.
+# Topic partitions equal the fleet's slots, so every slot owns a lane. Four
+# producer shards, because one shard is a single encoding process plus
+# librdkafka's sender and reaches about 130k rows/s on an m6i.xlarge-class
+# node with `lz4` — a third of this corpus's rate at its ~256-byte rows, so
+# the offer takes four of them to stay ahead of its own schedule. `lz4`
+# because an hour at 100 MB/s is what crosses the link, and it is the cheapest
+# codec that still halves it. "Sizing the offer" in docs/corpus.md is how to
+# measure this on your own machine rather than trusting the figure.
 name: aws-100mbs-skew-flink-hash
 engine: flink
 corpus: events-100mbs-skew
@@ -21,7 +24,7 @@ kafka:
   partitions: 32
   key: user_id
 producer:
-  shards: 2
+  shards: 4
   compression: lz4
 scoring:
   freshness_bound_s: 180

@@ -225,6 +225,7 @@ shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
 
 **Measure on the machine that will offer.** One process's rate is a property of
 that machine, its broker and the encoder, so no figure recorded elsewhere sizes
-your offer — and none is quoted here, because this repository ships no recorded
-producer measurement to cite. Re-measure after any change to the producer or the
-encoder as well.
+your offer. The shipped cluster specs state the shard count one node class's
+measured rate implied for their own corpus, as the starting point a probe ladder
+needs and not as a figure to reuse. Re-measure after any change to the producer
+or the encoder as well.

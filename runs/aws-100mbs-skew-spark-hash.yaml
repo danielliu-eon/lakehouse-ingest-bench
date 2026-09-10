@@ -22,7 +22,7 @@ kafka:
   partitions: 32
   key: user_id
 producer:
-  shards: 2
+  shards: 4
   compression: lz4
 scoring:
   freshness_bound_s: 180
