@@ -19,13 +19,14 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
 
   | Tool | Needed by |
   |---|---|
-  | `aws` CLI v2 | these two scripts and every driver |
-  | `kubectl` | these two scripts, and every driver that applies or reads an object |
+  | `aws` CLI v2 | these two scripts, and every driver that reads the bucket or the registry — all of them but `launch.sh` |
+  | `kubectl` | these two scripts, and every driver that applies or reads a Kubernetes object. `gate.sh` and `finish.sh` read only the bucket, so they need none |
   | `helm` | `setup.sh` / `teardown.sh`, for the two operators |
   | `envsubst` (GNU gettext) | `setup.sh`, for the IAM and namespace templates |
-  | `jq`, `yq` (mikefarah v4) | the drivers, to read a run's facts and the site |
-  | `git` | the drivers, for the image tag |
-  | `curl` | `stage.sh`, to read the engine's own endpoint |
+  | `yq` (mikefarah v4) | every driver, to read the site and the copied spec |
+  | `jq` | every driver that reads a run's facts or an object's status |
+  | `git` | every driver that names an image, since the tag is a commit |
+  | `curl` | `stage.sh`, to read a running engine through a port-forward |
   | `docker` | `push-images.sh` |
 - Credentials for the account the cluster is in, with permission to create S3
   buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS

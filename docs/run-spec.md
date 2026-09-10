@@ -80,8 +80,8 @@ rather than sending it to a broker as a hostname.
 ### What an engine is given, and what is translated
 
 `site.catalog.props` and `site.kafka.security` reach a managed engine's rendered
-configuration almost verbatim. Three keys are translated, because the engine's
-own name for the thing differs:
+configuration almost verbatim. Four keys are translated, because the engine's
+own name for the thing differs — three from the catalog, and one from Kafka:
 
 | From the site | What an engine gets |
 |---|---|
@@ -97,9 +97,13 @@ beside the mechanism and stripped before the properties reach a client. Install
 the harness with its `aws` extra for it. A site that arranges its own tokens sets
 any `sasl.oauthbearer.*` property instead and is passed through untouched.
 
-Neither may carry a `compression.*` property. Those would win the merge and
-decide the wire codec while the run's published facts name `producer.compression`,
-so a site or a client property that states one is refused.
+**`site.kafka.security` and `--kafka-prop` may not carry a `compression.*`
+property.** Those two are what reach a client over the producer's own
+configuration, so one of them would decide the wire codec while the run's
+published facts name `producer.compression`. Each is scanned where it is read —
+the site as it loads, the flag before the producer opens a connection — and a
+stated conflict is an error rather than a preference. The catalog properties are
+not scanned, because nothing there reaches a Kafka client.
 
 ### Secrets
 

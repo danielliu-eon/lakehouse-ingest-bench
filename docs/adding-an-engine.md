@@ -5,7 +5,7 @@ scored here. There are two ways in.
 
 **Tier 1, external.** The harness creates the topic and the table, prints the
 facts, and waits. You start your engine however you already start it — a
-cluster, a hosted service, a laptop process. The harness never touches it.
+cluster, a hosted service, a laptop process — and the harness never touches it.
 This is the primary contract and the one to reach for first.
 
 **Tier 2, managed.** The engine lives in `engines/<name>/`, the harness sizes
@@ -155,24 +155,24 @@ when a result may be published from it.
 
 ## Tier 2: a managed engine
 
-`engines/<name>/` holds everything engine-specific. The harness contains no
-engine branches outside it, and both shipped engines carry all seven files:
+`engines/<name>/` holds everything engine-specific, and the harness contains no
+engine branches outside it. Both shipped engines carry all seven of its files:
 
 | File | Purpose |
 |---|---|
 | `README.md` | what the engine runs, knobs it honours, known traps |
 | `Dockerfile` | stock upstream image plus connector jars, pinned; built locally, and pushed to the operator's own registry by `scripts/push-images.sh` |
-| the cluster documents | the custom resource a run is, and the ConfigMap its pods mount, both rendered from a run spec by `knobs.py` |
 | `compose.yaml` | the engine's services for the local stack |
 | job source | the job the engine runs (SQL or Python) |
 | `knobs.py` | run-spec keys the engine accepts, validation, rendering into the template and the DDL |
 | `verify.py` | reads effective state from the running engine and fails staging on drift from the spec |
 | `fleet.py` | requested vCPU and GiB per role from the spec, for `run.json` |
+| *the cluster documents* | not a file here: the custom resource a run is, and the ConfigMap its pods mount, are `knobs.py`'s render output into the run directory |
 
 Two rules in them are worth copying. **Render, never reach:** nothing in
 `knobs.py` touches a cluster, so a run's whole configuration can be read, and
 diffed against another run's, before any compute is paid for. **Refuse unknown
-keys:** a misspelled knob costs one error message instead of a published result
+keys:** a misspelled knob costs one error message rather than a published result
 whose tuning silently did not apply.
 
 Register it by adding its knobs module to `MANAGED` in
@@ -190,7 +190,7 @@ missing verdict or a missing cost:
 - `fleet.py` owes `fleet(spec)`: the compute the run asked for, in the vCPU and
   GiB a published result is costed in.
 - `verify.py` owes `verify(spec, run_id, fetch, ...)`: one line per setting the
-  running engine does not honour, and an empty list for a run it does.
+  running engine does not honour, empty for a run it does.
 
 For a run on a cluster `knobs.py` owes one more thing: `KUBERNETES`, an
 `EngineKubernetes` naming the kind of object a run is, where its state sits in

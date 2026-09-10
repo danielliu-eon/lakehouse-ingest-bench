@@ -15,14 +15,15 @@ to drain, backlog max 214,016 rows.
 `geometry.json` is what `finish.sh` measured from the table's final
 metadata document: 1,984 data files, 723,633,080 bytes (~690 MiB), p50 file
 size 178,340.5 bytes (~0.17 MiB), 100% of files under the 32 MiB
-small-file threshold. Its `at` map is empty: the geometry ladder starts at
-600 s, so every rung of a 300 s run reads `absent` and only the final
-snapshot is populated. `run.json` is the `collect` v2 record
-(`schema_version: 2`) the results table is rendered from, exactly as
-`collect` wrote it: the site's object-store roots, its registry and the
-Glue warehouse id (the account id) are substituted with placeholders. Its
-`run` object predates `run.compression`, which every document collected now
-carries.
+small-file threshold. Its `at` map carries all five rungs and every one of
+them reads `absent`: the ladder starts at 600 s and this run is 300, so it
+reached none of them and the final snapshot is the whole of its geometry.
+
+`run.json` is the `collect` v2 record (`schema_version: 2`) the results
+table is rendered from, exactly as `collect` wrote it: the site's
+object-store roots, its registry and the Glue warehouse id (the account id)
+are substituted with placeholders. Its `run` object predates
+`run.compression`, which every document collected now carries.
 
 `scripts/gate.sh` reported one `UNDERSIZED` tick mid-offer that the next
 tick, and the final scorer verdict, both contradicted, an artifact of

@@ -119,11 +119,20 @@ flattened:
   remainder — and any other blob declares a positive one.
 
 Generation then gates the corpus it produced, and refuses to publish one that
-missed its own declaration: the coldest key's byte share within 5% of expected,
-the mean encoded row size within 2% of `target_row_bytes`, each checked column's
-realized cardinality within 10%, and an unbounded blob column's entropy at or
-above 7.5 bits per byte — a payload a codec could fold away is not the
-incompressibility axis it claims to be.
+missed its own declaration: the mean encoded row size within 2% of
+`target_row_bytes`, each checked column's realized cardinality within 10%, and
+an unbounded blob column's entropy at or above 7.5 bits per byte — a payload a
+codec could fold away is not the incompressibility axis it claims to be.
+
+The key space is gated too, differently under skew and without it. A skewed
+corpus (`alpha` above zero) is held to its Zipf weights: the **worst** key's
+realized byte share may not deviate from the weight it was asked for by more
+than 5%. Bytes rather than rows, because what a skewed key costs an engine is
+the data it has to write for it. That comparison only means anything once there
+are enough rows behind the thinnest key to out-weigh sampling noise, so it is
+enforced only when the coldest key expects at least 10,000 rows. Under no skew
+the shares carry no information, and what is checked instead is that every key
+received some rows at all.
 
 **Ship the schema and the preset before publishing any result from them.**
 `validate-results.py` refuses a result whose `corpus_hash` does not match a
@@ -208,13 +217,8 @@ Size a shard count from the figure it prints:
 shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
 ```
 
-For a sense of the order: the median of three runs on one arm64 laptop, nothing
-emulated, was 115.6 MB/s encoded and 449,182 rows/s — so offering 500 MB/s from
-a machine like that needs `ceil(500 / 115.6 * 1.5) = 7` shards. That is a
-per-process ceiling against a one-broker local stack sharing its cores with the
-harness, and it clears by a wide margin the 30 MB/s below which a compiled
-producer would be worth building instead.
-
-**Re-run it on the machine that will offer.** Putting a laptop's number into the
-formula sizes a cluster from a laptop, and the figure also moves whenever the
-producer or the encoder changes.
+**Measure on the machine that will offer.** One process's rate is a property of
+that machine, its broker and the encoder, so no figure recorded elsewhere sizes
+your offer — and none is quoted here, because this repository ships no recorded
+producer measurement to cite. Re-measure after any change to the producer or the
+encoder as well.
