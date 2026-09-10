@@ -71,14 +71,8 @@ def test_key_column_must_be_a_string_column() -> None:
 
 
 def test_an_event_time_finer_than_its_batch_window_is_refused() -> None:
-    """An event time's ranks are jitter buckets inside one batch's window.
-
-    The bucket is floored to a millisecond, so a window of N milliseconds
-    holds at most N distinct event times however many ranks are declared: a
-    higher cardinality is an axis the corpus flattens while `corpus.json` goes
-    on publishing the declaration. A cardinality at the window is the finest
-    one that is realized, and the unbounded declaration is always accepted —
-    it asks for as many values as the window holds.
+    """A batch window of N milliseconds supports at most N distinct millisecond
+    timestamps, regardless of a larger declared cardinality.
     """
     at_the_window = p.load_preset(
         "smoke", workloads_dir=WORKLOADS, overrides=["column_overrides.event_time.cardinality=1000"]

@@ -1,31 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# How a Flink run is started, made ready and read on the local Compose stack.
+# Local Flink lifecycle hooks, sourced by scripts/smoke.sh. Kubernetes
+# addressing is defined separately in specs/kubernetes.py.
 #
-# The other half of the seam `specs/kubernetes.py` is: that file says how a run
-# of this engine is addressed on a cluster, and this one says how it is
-# addressed on one machine — the services to build and raise, the env file the
-# renderer wrote the fleet's shape into, and a readiness probe nobody outside
-# the engine can write. Together they are what keeps `scripts/` free of an
-# engine's names.
-#
-# Sourced by scripts/smoke.sh, never executed, and only for a run whose spec
-# names this engine. The four `engine_compose_*` hooks are the whole contract
-# and are called in the order they are declared. `compose`, `harness`, `log`
-# and `die` come from scripts/_lib.sh; `RUN_ID`, `RUN_DIR`, `SPEC_FILE` and
-# `REPO_ROOT` are set before the first call.
+# The four engine_compose_* hooks run in declaration order. scripts/_lib.sh
+# provides compose, harness, log, and die; the caller sets RUN_ID, RUN_DIR,
+# SPEC_FILE, and REPO_ROOT before invoking them.
 
-# The jobmanager's REST endpoint, as the compose file publishes it.
+# JobManager REST endpoint published by Compose.
 FLINK_REST="${FLINK_REST:-http://localhost:8081}"
 
-# How long the fleet may take to register its slots, and a job to reach RUNNING
-# once submitted. Both are generous because the engine image is amd64: on an
-# arm64 machine every second of this is emulated.
+# Allow extra startup time for amd64 emulation on arm64 hosts.
 FLINK_SLOT_WAIT_S="${FLINK_SLOT_WAIT_S:-180}"
 FLINK_JOB_WAIT_S="${FLINK_JOB_WAIT_S:-180}"
 
-# A non-numeric or absent REST answer reads as zero rather than as an error: the
-# endpoint is polled precisely because it is not up yet, and `curl` failing is
-# the normal first answer.
+# Treat unavailable or non-numeric responses as zero while the endpoint starts.
 _rest_number() {
 	local value
 	value="$(curl -sf --max-time 5 "$1" 2>/dev/null | jq -r "$2" 2>/dev/null || true)"
@@ -33,9 +21,7 @@ _rest_number() {
 	printf '%s' "$value"
 }
 
-# Slots, not taskmanager containers: a job asks the scheduler for slots, and a
-# fleet whose containers are up but whose slots have not registered fails
-# submission with a resource timeout minutes later instead of at once.
+# Wait for registered slots; running containers alone cannot accept a job.
 wait_for_flink_slots() {
 	local wanted=$1 waited=0 total=0
 	while ((waited < FLINK_SLOT_WAIT_S)); do
@@ -50,8 +36,7 @@ wait_for_flink_slots() {
 	die "flink reported $total of $wanted slot(s) after ${FLINK_SLOT_WAIT_S}s; check: compose logs flink-taskmanager"
 }
 
-# The job is named after the run — `pipeline.name` is the run id — so this is
-# also the check that the job on the cluster is the one just submitted.
+# Match pipeline.name to the run ID so an unrelated job cannot satisfy readiness.
 wait_for_flink_job_running() {
 	local name=$1 waited=0 state=""
 	while ((waited < FLINK_JOB_WAIT_S)); do
@@ -78,8 +63,7 @@ engine_compose_build() {
 }
 
 engine_compose_start() {
-	# The cluster's shape, as the engine's renderer wrote it. Exported so
-	# compose interpolates the taskmanager's slots and both memory sizes.
+	# Export rendered sizing for Compose's slot and memory interpolation.
 	set -a
 	# shellcheck source=/dev/null
 	source "$RUN_DIR/flink.env"
@@ -93,11 +77,8 @@ engine_compose_start() {
 
 engine_compose_ready() {
 	wait_for_flink_job_running "$RUN_ID"
-	# A job that is RUNNING is not yet a job running what the spec asked for:
-	# Flink drops a setting it does not know and sizes a vertex from whatever
-	# configuration reached it, neither of which fails a submission. The
-	# jobmanager is addressed by its service name because this runs inside the
-	# stack's own network, where `localhost` is the harness container.
+	# Verify effective settings after RUNNING. Use the service name because the
+	# check runs inside the Compose network.
 	log "checking the job against the spec it was staged from"
 	harness "verify-flink --spec /runs/$RUN_ID/spec.yaml --run-id $RUN_ID --rest http://flink-jobmanager:8081" ||
 		die "the flink job is not running what $(basename "$SPEC_FILE") asked for; the lines above name every setting it dropped"

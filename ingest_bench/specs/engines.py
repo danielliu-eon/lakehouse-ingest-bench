@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The engines the harness drives itself, and where each one's modules live.
+"""Register managed engine modules and load them on demand.
 
-An engine is registered by module name rather than imported here so that
-reading a spec needs nothing the engine brings with it: a machine that only
-loads and publishes specs has no Flink package installed, and a knobs module
-that grew a heavy import would otherwise make every spec unreadable there.
-The import happens when a run is staged, which is the first moment the knobs
-are actually needed.
+Lazy imports let spec readers run without engine-specific dependencies.
 """
 
 from __future__ import annotations
@@ -27,12 +22,9 @@ KUBERNETES = "KUBERNETES"
 
 
 def _engine_module(engine: str, submodule: str) -> ModuleType:
-    """One module of a managed engine's package, imported on demand.
+    """Import an engine module using its registered package.
 
-    The package is taken from the registered knobs module rather than from a
-    second registry per accessor: two registries keyed by engine let one carry
-    an engine the other has never heard of, and the failure surfaces as a
-    missing fleet or a missing verdict rather than as an unregistered engine.
+    Derive the package from the knobs registry to keep module lookup consistent.
     """
     if engine not in MANAGED:
         raise ValueError(f"{engine!r} is not a managed engine; the registered ones are {sorted(MANAGED)}")
@@ -80,12 +72,7 @@ def verify_for(engine: str) -> ModuleType:
 
 
 def kubernetes_for(engine: str) -> EngineKubernetes:
-    """The Kubernetes shape of a managed engine, as its knobs module declares it.
-
-    On the knobs module because that is what renders the two documents the
-    descriptor names, so the filenames a driver applies and the ones the
-    renderer writes are one declaration rather than two to keep in step.
-    """
+    """Return the descriptor declared beside the engine's rendering code."""
     module = knobs_for(engine)
     if not hasattr(module, KUBERNETES):
         raise ValueError(

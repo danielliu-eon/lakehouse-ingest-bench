@@ -1,26 +1,18 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# The whole benchmark on one machine: build a corpus, stage a run, start an
-# engine on it, offer the corpus and score what reaches the table. Exits 0 only
-# when the scorer published `run_valid: true`.
-#
-# Nothing measured here is a result — the stack shares one machine with the
-# engine, and on arm64 the engine image is emulated. What it proves is that the
-# harness, the engine and the scorer agree about a run: the same topic, the same
-# table, the same epoch, and figures that come out the far end.
+# Run the full benchmark locally: generate, stage, start the engine, produce and score.
+# Exit 0 only when run_valid is true.
+# This checks integration, not engine performance: the stack shares one machine, and
+# images may require emulation on arm64.
 set -euo pipefail
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 
-# The producer and the scorer are both handed the run's time origin, and it is
-# a moment in the near future so that neither is still starting when the first
-# batch is due.
+# Set a shared future epoch so producer and scorer can start before the first batch.
 EPOCH_LEAD_S="${EPOCH_LEAD_S:-30}"
-# How long the scorer waits for a commit before it gives up on a table with
-# rows still outstanding. Long enough to cover a cold first checkpoint on an
-# emulated engine, short enough that a stuck run ends in minutes.
+# Allow a cold first commit, then stop if outstanding rows make no progress.
 IDLE_STOP_S="${IDLE_STOP_S:-120}"
-# How long `--external-ready-file` is waited on.
+# Timeout for --external-ready-file.
 EXTERNAL_READY_WAIT_S="${EXTERNAL_READY_WAIT_S:-900}"
 
 usage() {
@@ -45,16 +37,12 @@ the endpoints they poll.
 USAGE
 }
 
-# The default engine. A name and not a branch: it is the one the docs and the
-# CI workflow run without an argument, and everything below reads it as the
-# directory under engines/ that says how to start that engine here.
+# Load engine operations from engines/<name>/compose.sh.
 ENGINE=flink
 KEEP=0
 READY_FILE=""
 SPEC_FILE=""
-# A string rather than an array: these are passed inside the single command
-# string the harness image's entrypoint splits, so they are already subject to
-# one round of word splitting and an array would buy nothing.
+# These options enter the image's shell as part of one command string.
 SETS=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -95,16 +83,13 @@ require_host_tools docker jq yq curl
 [[ -n $SPEC_FILE ]] || SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"
 [[ -f $SPEC_FILE ]] ||
 	die "no run spec at $SPEC_FILE; --engine takes external or a directory under $REPO_ROOT/engines, or name a spec with --spec"
-# The harness container mounts this checkout's `runs/` as `/runs` and the stage
-# command names the spec inside it, so a spec anywhere else is not a file that
-# container can open.
+# Specs must be under runs/, which the harness container mounts at /runs.
 [[ "$(cd -- "$(dirname -- "$SPEC_FILE")" && pwd)" == "$REPO_ROOT/runs" ]] ||
 	die "--spec must name a file under $REPO_ROOT/runs, which is what the harness container mounts as /runs"
 [[ $ENGINE == external || -z $READY_FILE ]] || die "--external-ready-file only applies to --engine external"
 
-# How this engine is built, raised, made ready and read on this stack — its own
-# package's answer, so nothing below branches on which engine a run names. The
-# external tier has no such file, because there is no engine here to start.
+# Managed engines supply their own Compose hooks; external engines are started by the
+# operator.
 if [[ $ENGINE != external ]]; then
 	ENGINE_COMPOSE="$REPO_ROOT/engines/$ENGINE/compose.sh"
 	[[ -f $ENGINE_COMPOSE ]] ||
@@ -122,14 +107,12 @@ RUN_ID=""
 cleanup() {
 	local status=$?
 	if ((status != 0)); then
-		# The two logs that name why a run stopped: the engine's, and the
-		# reader's. Printed before teardown, because teardown removes both.
+		# Print engine and scorer logs before teardown removes their containers.
 		if [[ -n $RUN_ID ]] && docker container inspect "scorer-$RUN_ID" >/dev/null 2>&1; then
 			log "--- last 30 lines of scorer-$RUN_ID ---"
 			docker logs --tail 30 "scorer-$RUN_ID" >&2 || true
 		fi
-		# The engine's own, because only it knows which of its services
-		# holds the reason. An external run has none of this script's to show.
+		# Delegate log selection to the engine's Compose hooks.
 		if declare -F engine_compose_logs >/dev/null; then
 			engine_compose_logs
 		fi
@@ -166,24 +149,19 @@ harness "gen-corpus --preset smoke$SETS --out s3://corpus --seed 1"
 # The run
 # ---------------------------------------------------------------------------
 
-# A template with X's and an explicit directory, because `mktemp -t <prefix>`
-# is a BSD spelling: GNU coreutils refuses a template with no X's in it, so the
-# BSD form works on a developer's Mac and fails in CI.
+# Use an explicit XXXXXX template for both BSD and GNU mktemp.
 STAGE_OUT="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-stage.XXXXXX")"
 log "staging $(basename "$SPEC_FILE")"
 harness "stage --spec /runs/$(basename "$SPEC_FILE") --site /site.yaml --runs-dir /runs" | tee "$STAGE_OUT"
 RUN_ID="$(awk -F': ' '/^run_id: /{print $2; exit}' "$STAGE_OUT")"
 [[ -n $RUN_ID ]] || die "stage printed no run_id line; see the output above"
-# Exported because the engine's submitter mounts it, and compose reads it from
-# the environment rather than from an argument.
+# Compose reads the submitter's mount path from the environment.
 export RUN_DIR="$REPO_ROOT/runs/$RUN_ID"
 [[ -d $RUN_DIR ]] || die "stage reported run_id $RUN_ID but wrote no $RUN_DIR"
 log "run $RUN_ID staged in $RUN_DIR"
 
 if [[ $ENGINE != external ]]; then
-	# Raised, submitted and then held to the spec it was staged from, all by
-	# the engine's own package: a running engine is not yet one running what
-	# the spec asked for, and only the engine can read back its own settings.
+	# Start the engine, then verify its effective settings against the staged spec.
 	engine_compose_start
 	engine_compose_ready
 else
@@ -210,13 +188,9 @@ fi
 BOOTSTRAP="$(jq -r .bootstrap "$RUN_DIR/facts.json")"
 CORPUS_URI="$(jq -r .corpus_uri "$RUN_DIR/facts.json")"
 TABLE="$(jq -r .table "$RUN_DIR/facts.json")"
-# `key_column` is null when the spec asked for unkeyed records, and the flag is
-# then left off rather than passed empty.
+# Omit --key-column for unkeyed records.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$RUN_DIR/facts.json")"
-# What the producer frames each value as, and the id its header names. The
-# schema is registered at stage time, so this is the id every reader of the run
-# resolves the writer schema by; it is null for a raw-Avro run, and the flag is
-# then left off rather than passed empty.
+# Use the staged encoding and schema ID. Raw Avro has no schema ID.
 VALUE_ENCODING="$(jq -r '.value_encoding // empty' "$RUN_DIR/facts.json")"
 SCHEMA_ID="$(jq -r '.schema_id // empty' "$RUN_DIR/facts.json")"
 
@@ -224,10 +198,7 @@ SHARDS="$(yq '.producer.shards' "$SPEC_FILE")"
 [[ $SHARDS == null || $SHARDS == 1 ]] ||
 	die "this script offers one producer shard and $(basename "$SPEC_FILE") asks for $SHARDS"
 
-# Every knob the spec sets about the offer, so the run that happens is the run
-# the copied spec claims. A key the spec leaves out is left out here too, and
-# the producer and the scorer apply their own defaults rather than ones this
-# script would have to keep in step with theirs.
+# Pass configured options and preserve command defaults for omitted ones.
 SPEED="$(yq '.producer.speed' "$SPEC_FILE")"
 REPLAY_SECONDS="$(yq '.producer.seconds' "$SPEC_FILE")"
 BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC_FILE")"
@@ -237,18 +208,15 @@ EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 SCORE="score --corpus $CORPUS_URI --table $TABLE --catalog-prop-file /catalog.props"
 SCORE="$SCORE --publish-logs s3://runs/$RUN_ID/producer --epoch $EPOCH --out /runs/$RUN_ID/scores"
 SCORE="$SCORE --idle-stop-s $IDLE_STOP_S"
-# Who created the table, for the same reason launch.sh passes it: an engine that
-# creates its own has none until its first record.
+# An engine-managed table may not exist until the first record.
 MANAGED_BY="$(yq '.table.managed_by' "$SPEC_FILE")"
 [[ $MANAGED_BY == null ]] || SCORE="$SCORE --table-managed-by $MANAGED_BY"
-# A scoring key the spec leaves out is left out here too, so the scorer applies
-# its own default rather than one this script would have to keep in step.
+# Preserve scorer defaults for omitted options.
 for key in warmup_s freshness_bound_s; do
 	value="$(yq ".scoring.$key" "$SPEC_FILE")"
 	[[ $value == null ]] || SCORE="$SCORE --${key//_/-} $value"
 done
-# The scorer decides whether the producer, rather than the engine, set the rate,
-# so the spec's tolerance has to reach it and not only the producer.
+# Pass lateness tolerance to the scorer so it can determine producer_bound.
 [[ $BEHIND_MAX_MS == null ]] || SCORE="$SCORE --behind-max-ms $BEHIND_MAX_MS"
 
 log "starting the scorer (epoch $EPOCH, idle stop ${IDLE_STOP_S}s)"

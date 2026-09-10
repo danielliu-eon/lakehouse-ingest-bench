@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Whether the fleet absorbed the offer as fast as it was offered.
+"""Measure absorbed rows, backlog, and drain time.
 
-Freshness says how stale the table was; keep-up says whether the staleness was
-bounded work or a growing debt. The two come apart at the end of a run: a fleet
-that fell an hour behind and then drained still shows a small final lag, and
-only the backlog it carried while the offer was running tells that it never
-kept pace.
-
-Both figures are counted in rows rather than bytes or offsets, because rows are
-what the corpus froze and what the tally counts, so the backlog is the same
-quantity on either side of the subtraction.
+These metrics distinguish sustained ingest from a fleet that catches up only
+after the offer ends. Use rows consistently with the corpus and tally.
 """
 
 from __future__ import annotations
@@ -21,7 +14,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class KeepupSample:
-    """Offered against committed at one instant, with the rates into it."""
+    """Row totals, backlog, and interval rates at one sampling instant."""
 
     at_ms: int
     offered_rows: int
@@ -32,12 +25,9 @@ class KeepupSample:
 
 
 def make_sample(at_ms: int, offered_rows: int, committed_rows: int, previous: KeepupSample | None) -> KeepupSample:
-    """One sample, with rates differenced against the sample before it.
+    """Calculate rates since the previous sample.
 
-    Rates are over the gap to ``previous`` rather than since the epoch: an
-    average from the epoch converges and stops reacting, and the point of the
-    series is to show the moment the committed rate falls below the offered
-    one. The first sample of a run has no gap and so no rates.
+    The first sample, or a nonpositive interval, has unknown rates.
     """
     gap_ms = at_ms - previous.at_ms if previous is not None else 0
     if previous is not None and gap_ms > 0:
@@ -50,9 +40,7 @@ def make_sample(at_ms: int, offered_rows: int, committed_rows: int, previous: Ke
         at_ms=at_ms,
         offered_rows=offered_rows,
         committed_rows=committed_rows,
-        # An at-least-once writer can commit more rows than were offered, and a
-        # negative backlog is not a backlog: the duplication is exactness's to
-        # report, and the floor the gate reads must not go below empty.
+        # Clamp backlog at zero; exactness reports duplicate rows separately.
         backlog_rows=max(offered_rows - committed_rows, 0),
         offered_rate=offered_rate,
         committed_rate=committed_rate,
@@ -64,12 +52,9 @@ def keepup_summary(
     offer_end_ms: int | None,
     drained_ms: int | None,
 ) -> dict[str, object]:
-    """The keep-up scalars a run is reported by.
+    """Summarize offer-end absorption, drain time, and backlog.
 
-    ``absorbed_at_offer_end`` is read at the instant the offer stopped, not at
-    the end of the run, because everything after that instant is drain: given
-    long enough every fleet absorbs the whole offer, and the fraction only
-    distinguishes fleets while rows are still arriving.
+    Measure absorption from the last sample at or before the offer ended.
     """
     absorbed: float | None = None
     if offer_end_ms is not None:

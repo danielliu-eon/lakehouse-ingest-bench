@@ -1,22 +1,16 @@
-# The in-cluster shape of site.example.yaml: the broker and the Iceberg REST
-# catalog run inside the Kubernetes cluster the engine runs in, installed by
-# deploy/k8s/stack/setup.sh, which prints every value below when it finishes.
-# Copy to site.yaml and fill in. Every YOUR_ placeholder must go; loading
-# refuses otherwise.
-#
-# The addresses are Service names, reachable only inside the cluster. The
-# drivers that read the catalog from your machine — teardown.sh, finish.sh
-# and purge.sh — open a tunnel to it for that reason; see "In-cluster stack"
-# in docs/running.md.
+# Site for Kafka and Lakekeeper installed by deploy/k8s/stack/setup.sh. Copy to site.yaml
+# and replace every YOUR_ placeholder using setup's output.
+# Service addresses are cluster-internal. Teardown, finish and purge open a catalog tunnel
+# from the operator's machine; see In-cluster stack in docs/running.md.
 corpus_root: s3://YOUR_BUCKET/corpus
 runs_root: s3://YOUR_BUCKET/runs
 warehouse: s3://YOUR_BUCKET/warehouse
 kafka:
-  # <kafka cluster>-kafka-bootstrap.<namespace>.svc — the one plain listener.
+  # Plain Kafka listener at <cluster>-kafka-bootstrap.<namespace>.svc.
   bootstrap_servers: ingest-bench-kafka-bootstrap.ingest-bench.svc:9092
   security: {}
-  # Only for a run whose spec says kafka.value_encoding: confluent; this is
-  # the in-cluster registry setup.sh applies with WITH_SCHEMA_REGISTRY=true.
+  # Required for kafka.value_encoding: confluent. Setup deploys this registry
+  # with WITH_SCHEMA_REGISTRY=true.
   # schema_registry:
   #   url: http://schema-registry.ingest-bench.svc:8080/apis/ccompat/v7
 catalog:
@@ -36,7 +30,6 @@ kubernetes:
   # secret_name: bench-env              # only where a property is written ${env:NAME}
   node_selector: {}                     # the engine's and the harness's nodes, not the brokers'
   tolerations: []
-# Zeros are a placeholder, and validate-results.py refuses a result published at
-# them: fill in the hourly price of the instance types your fleet asks for, split
-# across their vCPU and GiB. docs/methodology.md, under Cost, is the formula.
+# Set nonzero prices before publishing. Split the fleet instance price between vCPU and
+# GiB using the Cost formula in docs/methodology.md.
 pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}

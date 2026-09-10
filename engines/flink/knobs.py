@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The knobs a managed Flink run is sized by, and the files one run needs.
+"""Validate Flink knobs and render the files needed for a run.
 
-Everything here renders text: the SQL the job submits, the configuration it is
-submitted with, and the cluster shape the local stack starts. Nothing in this
-module reaches a cluster, which is what lets a run's whole configuration be
-read — and diffed against another run's — before any compute is paid for.
-
-The engine is stock Flink: a released image, released connector jars and SQL.
-No source, sink or serializer is written anywhere in this package, so a result
-attributed to Flink is Flink's rather than this harness's.
+Render SQL, configuration, local fleet sizing, and Kubernetes manifests without
+contacting a cluster. The engine uses released Flink connectors throughout.
 """
 
 from __future__ import annotations
@@ -33,14 +27,11 @@ from ingest_bench.specs.model import (
     SiteConfig,
 )
 
-# The names inside the submitted script. Nothing outside the script refers to
-# either, so both are fixed rather than derived from the run.
+# Names are local to the submitted script, so they need no run-specific suffix.
 SOURCE_TABLE = "kafka_source"
 CATALOG_NAME = "ice"
 
-# The files `render` writes into the run directory. The last two are written
-# only for a run on a cluster, which is the one that has an operator to read
-# them.
+# Rendered files; the deployment and ConfigMap are only needed on Kubernetes.
 SQL_FILE = "job.sql"
 CONF_FILE = "flink-conf.yaml"
 ENV_FILE = "flink.env"
@@ -52,58 +43,39 @@ HASH = "hash"
 RANGE = "range"
 DISTRIBUTION_MODES = frozenset({NONE, HASH, RANGE})
 
-# The image the operator starts, under the registry the site names. Public
-# because it is one of three statements of this name — `push-images.sh` pushes
-# it and `deploy/aws/setup.sh` creates the repository — and a test holds the
-# three together.
+# Keep this repository name aligned with push-images.sh and AWS setup.sh.
 IMAGE_REPOSITORY = "lakehouse-ingest-bench/flink"
 
-# The Flink the image carries, in the two spellings the documents need: the
-# operator's version label, and the jar whose driver runs a Python job.
+# Pinned Flink version in the operator's label and Python driver jar formats.
 _FLINK_VERSION_LABEL = "v1_20"
 _PYFLINK_JAR = "local:///opt/flink/opt/flink-python-1.20.1.jar"
 _PYTHON_DRIVER = "org.apache.flink.client.python.PythonDriver"
 _JOB_SCRIPT = "/opt/bench/engines/flink/job.py"
 
-# Where the run's rendered files are mounted, and the volume that carries
-# them. Under `/opt/bench` beside the submitter rather than at `/run`, which
-# is the container's own runtime directory.
+# Mount beside the submitter; /run is reserved for container runtime files.
 _RUN_MOUNT = "/opt/bench/run"
 _JOB_VOLUME = "job"
 
-# The operator's fixed name for the Flink container. A podTemplate container
-# under any other name is added to the pod as a sidecar instead of being
-# merged into the one that runs Flink, so this name is not ours to choose.
+# The operator merges this container name into its Flink container. Any other
+# name would create a sidecar.
 _FLINK_CONTAINER = "flink-main-container"
 
-# PyFlink publishes no Linux aarch64 wheel in any release, so the image is
-# amd64 and a node that cannot run it is not a placement the site may pick.
-# Merged over the site's selector for that reason.
+# The pinned PyFlink image requires amd64. Override conflicting site selectors.
 _ARCH_PIN = {"kubernetes.io/arch": "amd64"}
 
 REST = "rest"
 
-# How a driver addresses a Flink run on a cluster. The names are the operator's
-# rather than ours: it publishes the JobManager's REST endpoint as a Service
-# called `<deployment>-rest` and labels the pods it creates `app` and
-# `component`, and the FlinkDeployment rendered below declares neither.
-#
-# The jobmanager is the pod provenance is read off because it is the one of the
-# two whose image is the engine's for every submission mode. No pods selector:
-# everything `verify` compares is reported by the job itself.
+# Operator-generated service names and pod labels, used to locate the run.
+# Read image provenance from the JobManager, whose image is the engine image
+# in every submission mode. Verification reads fleet settings from the job.
 KUBERNETES = EngineKubernetes(
     kind="flinkdeployment",
     running_state="RUNNING",
-    # A job that finished or was cancelled before the run started is as far
-    # from runnable as one that failed, and its fleet is gone either way — so
-    # waiting any of the three out would only postpone the same refusal.
+    # Terminal jobs cannot become ready, even when they completed successfully.
     failed_states=("FAILED", "CANCELED", "FINISHED"),
     state_jsonpath="{.status.jobStatus.state}",
-    # A document the operator rejected has no jobStatus at all, and its
-    # reconciliation errors land here as JSON text. The lifecycle beside it is
-    # what says whether the operator has given up on the document or is still
-    # retrying it: FAILED there is a refusal, and every other value with an
-    # error against it is a reconcile that may yet succeed.
+    # Rejected deployments may have no jobStatus. Treat reconciliation errors as
+    # terminal only when the lifecycle is FAILED; other states may recover.
     error_jsonpath="{.status.error}",
     lifecycle_jsonpath="{.status.lifecycleState}",
     rest_service_suffix="-rest",
@@ -113,16 +85,12 @@ KUBERNETES = EngineKubernetes(
     pods_selector="",
     document_file=FLINKDEPLOYMENT_FILE,
     configmap_file=CONFIGMAP_FILE,
-    # The operator publishes the JobManager's REST endpoint as a Service named
-    # by the FlinkDeployment itself, so the deployment's name has to be a legal
-    # DNS-1035 label for that Service — which the operator validates at 45
-    # characters and refuses beyond, before it creates anything.
+    # The operator derives a Service name from this label and enforces a
+    # 45-character DNS-1035 limit before creating resources.
     max_object_name_length=45,
 )
 
-# The type each knob is declared as. This is also the accepted surface: a key
-# that is not here is refused, so a misspelled knob costs one error message
-# instead of starting a run whose tuning silently did not apply.
+# Reject unknown keys so misspelled tuning options cannot be silently ignored.
 KNOBS: dict[str, type] = {
     "taskmanagers": int,
     "slots": int,
@@ -140,23 +108,17 @@ KNOBS: dict[str, type] = {
     "extra_flink_conf": dict,
 }
 
-# The knobs with no defensible default: the fleet's size, the memory a
-# taskmanager gets, how often it commits and how it distributes writes are the
-# axes a run exists to vary, and guessing any of them would publish a result
-# nobody chose.
+# Require explicit choices for the fleet size, memory, commit cadence, and
+# write distribution: these are the benchmark's main comparison dimensions.
 REQUIRED_KNOBS = frozenset({"taskmanagers", "slots", "tm_cpu", "tm_mem_mb", "checkpoint_interval", "distribution_mode"})
 
-# Flink writes `pipeline.max-parallelism` into a job's state at its first
-# checkpoint and cannot raise it on a restore, so the default leaves room to
-# grow a run's fleet without discarding the state it had.
+# Max parallelism is stored in checkpoints and cannot increase on restore.
+# Leave room to expand the fleet without discarding state.
 _MAX_PARALLELISM_FACTOR = 4
 
-# The Flink SQL type each type name a corpus publishes is declared as.
-# `TIMESTAMP(3)` and not `TIMESTAMP_LTZ` because the Iceberg column is a
-# zoneless timestamp, and precision 3 because the corpus carries zoneless
-# milliseconds. Three is also the widest timestamp `avro-confluent` can plan —
-# it converts the DDL under Flink's legacy Avro mapping and declares no option
-# to disable it — so one DDL serves both of the source formats below.
+# Use a zoneless TIMESTAMP to match Iceberg, with millisecond precision to
+# match the corpus. TIMESTAMP(3) also works with avro-confluent, whose legacy
+# timestamp mapping cannot plan higher precision.
 _DDL_TYPES = {
     "long": "BIGINT",
     "string": "STRING",
@@ -166,46 +128,31 @@ _DDL_TYPES = {
     "binary": "BYTES",
 }
 
-# The source format each wire format is read with. This is also the accepted
-# surface: an encoding with no format here is refused before a topic exists,
-# rather than failing inside the cluster with a run already staged.
+# Map supported wire encodings to source formats; reject others before staging.
 _SOURCE_FORMATS = {
     VALUE_ENCODING_AVRO: "avro",
     VALUE_ENCODING_CONFLUENT: "avro-confluent",
 }
 
-# The plain format's one option. The non-legacy mapping sends a SQL `TIMESTAMP`
-# to Avro's `local-timestamp-*` rather than to `timestamp-*`, which Avro
-# defines as a UTC instant: both annotate the same `long` and the annotation is
-# not on the wire, so this states the column's zoneless meaning rather than
-# changing the bytes read. It belongs to `avro` alone — an unknown
-# `avro-confluent.*` key fails validation.
+# The non-legacy mapping preserves zoneless TIMESTAMP semantics without
+# changing the encoded long. This option belongs to avro only; the confluent
+# format rejects it.
 _AVRO_OPTIONS: tuple[tuple[str, str], ...] = (("avro.timestamp_mapping.legacy", "false"),)
 
-# What each encoding's format takes beside its own name, keyed the way the
-# formats above are: an encoding states its own options rather than inheriting
-# whichever branch happened to cover it. `avro-confluent`'s remaining options
-# name the registry and are read off the site, so it declares none here.
+# Static options by encoding. Confluent registry options come from the site.
 _FORMAT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
     VALUE_ENCODING_AVRO: _AVRO_OPTIONS,
     VALUE_ENCODING_CONFLUENT: (),
 }
 
-# `avro-confluent`'s registry options. It resolves each value's writer schema
-# by the id in that value's header, so the registry is not optional for it. The
-# credentials source has to be named beside the user info, or the format reads
-# the registry unauthenticated and ignores it.
+# Confluent decoding requires the registry to resolve schema IDs. Set the
+# credentials source with user info or the format ignores those credentials.
 _REGISTRY_URL_KEY = "avro-confluent.url"
 _REGISTRY_USER_INFO_SOURCE = ("avro-confluent.basic-auth.credentials-source", "USER_INFO")
 _REGISTRY_USER_INFO_KEY = "avro-confluent.basic-auth.user-info"
 
-# Amazon MSK's IAM authentication, as the Java client spells it. The harness
-# signals it with librdkafka's `OAUTHBEARER` beside its own `aws.region`
-# pseudo-key, because librdkafka has no MSK mechanism and signs the token
-# itself; the Java client has one, under a name of its own, and the login
-# module below signs per connection from whatever credentials the pod holds.
-# So the signal is translated rather than passed through — and neither form
-# carries a credential, which is why an MSK site needs no secret in a file.
+# Translate the harness's OAUTHBEARER + aws.region signal to Java MSK IAM
+# authentication. The login module signs tokens using the pod's credentials.
 _OAUTHBEARER = "OAUTHBEARER"
 _MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
     ("security.protocol", "SASL_SSL"),
@@ -214,33 +161,24 @@ _MSK_IAM_PROPS: tuple[tuple[str, str], ...] = (
     ("sasl.client.callback.handler.class", "software.amazon.msk.auth.iam.IAMClientCallbackHandler"),
 )
 
-# The keys the translation answers for: the four it renders, and the pseudo-key
-# that no Kafka client knows — the region reaches the signer as `AWS_REGION` in
-# the pod's environment instead. Carrying any of them from the site as well
-# would put the same option in the WITH clause twice.
+# Replace these keys to avoid duplicate options. Pass the region through
+# AWS_REGION, since aws.region is a harness key, not a Kafka client option.
 _MSK_IAM_REPLACED = frozenset({key for key, _ in _MSK_IAM_PROPS} | {REGION_KEY})
 
-# The one S3 property that pyiceberg and Iceberg's Java library spell
-# differently. Every other key in a property block is spelled the same, so
-# only the rename is listed and the rest are carried through untouched.
+# Rename the differing PyIceberg S3 key; pass other properties through.
 _CATALOG_PROP_RENAMES = {"s3.region": "client.region"}
 
-# A REST catalog hands back a table's location but not the implementation that
-# reads it, so the scheme of the site's warehouse selects one. Left unset,
-# Iceberg falls back to a Hadoop filesystem, which the bundled jars do not
-# configure.
+# Select FileIO from the warehouse scheme. The default Hadoop fallback lacks
+# the required storage configuration.
 _FILE_IO_BY_SCHEME = {
     "s3://": "org.apache.iceberg.aws.s3.S3FileIO",
     "gs://": "org.apache.iceberg.gcp.gcs.GCSFileIO",
 }
 
-# pyiceberg reads `type` as the name of its own catalog implementation, while
-# Iceberg Flink reads it as the literal `iceberg` and takes the backend from
-# `catalog-type`. The property is therefore translated, never passed through.
+# Flink requires type=iceberg and catalog-type=rest; PyIceberg uses type=rest.
 _PYICEBERG_TYPE = "type"
 
-# Properties the catalog clause states itself, so carrying them again would
-# emit each one twice.
+# Exclude properties already emitted by the catalog clause.
 _STATED_CATALOG_PROPS = frozenset({_PYICEBERG_TYPE, "uri", "warehouse"})
 
 
@@ -262,10 +200,7 @@ def _float_at(value: object, where: str) -> float:
 
 
 def _str_at(value: object, where: str) -> str:
-    # A YAML scalar is not coerced: `checkpoint_interval: 10` reads as an int
-    # that Flink rejects as a duration, and `min_pause: 0s` is only a string
-    # by accident of its suffix. Quoting is the fix, and saying so is more
-    # useful than passing an unusable value along.
+    # Require strings for durations; an integer YAML scalar is not a Flink duration.
     if not isinstance(value, str):
         raise ValueError(f"{where} must be a string; quote it in the YAML. Got {value!r}")
     return value
@@ -285,7 +220,7 @@ def _conf_at(value: object, where: str) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class Knobs:
-    """One run's Flink sizing and tuning, with every default already filled in."""
+    """Flink sizing and tuning with defaults applied."""
 
     taskmanagers: int
     slots: int
@@ -303,35 +238,25 @@ class Knobs:
     extra_flink_conf: dict[str, str]
 
     def slots_total(self) -> int:
-        """The fleet's task slots, which is what the writers can spread over."""
+        """Return the total task slots available to writers."""
         return self.taskmanagers * self.slots
 
     def parallelism_default(self) -> int:
-        """The job's default parallelism, which the Kafka readers inherit.
+        """Return the default parallelism inherited by Kafka readers.
 
-        The pinned Kafka connector exposes no per-source parallelism option,
-        so a reader count below the fleet's slots can only be had by making it
-        the job default and lifting the writers back up with a sink hint.
-        Defaulting to the slot count instead would start a reader per slot,
-        and every reader past the topic's partition count would sit idle.
+        The pinned connector has no source parallelism option. Set the job default
+        to the reader count and use a sink hint to give writers the full fleet.
         """
         return self.source_parallelism
 
 
-# KNOBS is the surface a spec is checked against and `Knobs` is what a checked
-# block becomes, so a name in one and not the other would either be accepted
-# and dropped or set and unreachable.
+# Keep accepted keys aligned with the parsed dataclass so none are dropped.
 if frozenset(KNOBS) != {field.name for field in fields(Knobs)}:
     raise ValueError(f"KNOBS declares {sorted(KNOBS)} and Knobs holds {sorted(field.name for field in fields(Knobs))}")
 
 
 def read(block: dict[str, object]) -> Knobs:
-    """The block's knobs with defaults applied, or a refusal to read it.
-
-    Every default is applied by name rather than through a lookup default, so
-    a knob this module forgot to read cannot masquerade as one a spec left
-    out.
-    """
+    """Validate the knob block and apply explicit defaults."""
     unknown = sorted(set(block) - set(KNOBS))
     if unknown:
         raise ValueError(f"spec.flink has unknown keys {unknown}; the ones it takes are {sorted(KNOBS)}")
@@ -351,8 +276,7 @@ def read(block: dict[str, object]) -> Knobs:
         if "max_parallelism" not in block
         else _int_at(block["max_parallelism"], "spec.flink.max_parallelism")
     )
-    # Each of these becomes a parallelism or a container count, where zero
-    # describes no runnable job rather than a smaller one.
+    # Parallelism and container counts must be positive to run a job.
     for name, count in (
         ("taskmanagers", taskmanagers),
         ("slots", slots),
@@ -395,20 +319,13 @@ def read(block: dict[str, object]) -> Knobs:
 
 
 def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> None:
-    """Refuse a Flink block that cannot describe a runnable cluster, or a run it cannot read.
+    """Validate fleet sizing and the run's wire encoding before staging.
 
-    ``meta`` is unread: every knob here is about the compute, and the corpus
-    constrains none of them. It stays in the signature because the harness
-    calls every managed engine's validator the same way.
-
-    ``spec`` is read for its value encoding, and both of the ones the harness
-    offers pass: each has a source format that reads it, so neither framing
-    needs anything of the compute. What this refuses is an encoding the spec
-    surface grew without such a format, which would otherwise fail on the
-    cluster with a topic and a table already created.
+    ``meta`` is unused but retained for the shared engine validator interface.
+    Reject encodings without a matching Flink source format.
     """
     knobs = read(block)
-    # For its refusal alone: the format it returns is rendered at submit time.
+    # Validate the encoding now; render its format at submission time.
     _source_format(spec)
     if knobs.source_parallelism > spec.kafka.partitions:
         raise ValueError(
@@ -433,14 +350,14 @@ def validate(block: dict[str, object], spec: RunSpec, meta: CorpusMetadata) -> N
 
 
 def flink_ddl_type(iceberg_type: str) -> str:
-    """The Flink SQL type name for a type a corpus publishes."""
+    """Return the Flink SQL type for a corpus type."""
     if iceberg_type not in _DDL_TYPES:
         raise ValueError(f"type {iceberg_type!r} has no Flink SQL name here; the ones read are {sorted(_DDL_TYPES)}")
     return _DDL_TYPES[iceberg_type]
 
 
 def _literal(value: str) -> str:
-    """``value`` as a SQL string literal, with its quotes doubled as SQL wants."""
+    """Quote ``value`` as a SQL string literal, doubling embedded quotes."""
     escaped = value.replace("'", "''")
     return f"'{escaped}'"
 
@@ -450,14 +367,10 @@ def _with_clause(options: list[tuple[str, str]]) -> str:
 
 
 def _column_ddl(name: str, meta: CorpusMetadata) -> str:
-    """One source column, declared required.
+    """Declare a required source column matching the corpus's Avro encoding.
 
-    The `avro` format derives its reader schema from this DDL, so the DDL is
-    what has to describe the bytes the producer wrote. Every column is
-    `NOT NULL` because a nullable one becomes a union with null, and a union
-    is a different wire encoding — a branch index precedes the value — than
-    the non-union schema the corpus published. A row the corpus wrote carries
-    a value in every column anyway.
+    Nullable Avro fields add a union branch index to the wire representation.
+    NOT NULL keeps the DDL-derived reader schema compatible with the corpus.
     """
     published = meta.iceberg_types[name]
     if published not in _DDL_TYPES:
@@ -466,17 +379,14 @@ def _column_ddl(name: str, meta: CorpusMetadata) -> str:
 
 
 def _is_msk_iam(security: dict[str, str]) -> bool:
-    """Whether the site's Kafka properties are the harness's MSK IAM signal."""
+    """Return whether Kafka properties request MSK IAM authentication."""
     return MECHANISM_KEY in security and security[MECHANISM_KEY] == _OAUTHBEARER and REGION_KEY in security
 
 
 def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
-    """The site's Kafka properties as source options, IAM translated.
+    """Translate Kafka properties to source options, including MSK IAM settings.
 
-    A key outside the signal is carried through whatever the authentication is:
-    a TLS or a client setting is orthogonal to how the connection is
-    authenticated, and dropping it would silently undo something the site asked
-    for.
+    Preserve unrelated TLS and client options during authentication translation.
     """
     if not _is_msk_iam(security):
         return [(f"properties.{key}", value) for key, value in security.items()]
@@ -485,7 +395,7 @@ def _kafka_options(security: dict[str, str]) -> list[tuple[str, str]]:
 
 
 def _source_format(spec: RunSpec) -> str:
-    """The format that reads the run's wire encoding, or a refusal to read it."""
+    """Return the source format for the encoding, or reject an unsupported value."""
     if spec.kafka.value_encoding not in _SOURCE_FORMATS:
         raise ValueError(
             f"spec.kafka.value_encoding is {spec.kafka.value_encoding!r} and a Flink source reads "
@@ -495,11 +405,7 @@ def _source_format(spec: RunSpec) -> str:
 
 
 def _format_options(spec: RunSpec, site: SiteConfig) -> list[tuple[str, str]]:
-    """The source's format, and whatever that format needs to decode a value.
-
-    The format is read first, so an encoding no format reads is refused there
-    rather than by the options lookup beside it.
-    """
+    """Return the validated source format and its decoding options."""
     encoding = spec.kafka.value_encoding
     options: list[tuple[str, str]] = [("format", _source_format(spec)), *_FORMAT_OPTIONS[encoding]]
     if encoding != VALUE_ENCODING_CONFLUENT:
@@ -512,9 +418,7 @@ def _format_options(spec: RunSpec, site: SiteConfig) -> list[tuple[str, str]]:
             "against"
         )
     options.append((_REGISTRY_URL_KEY, registry.url))
-    # As the site wrote it, `${env:NAME}` included: the submitter substitutes
-    # the environment over the whole script, so the file names a credential
-    # rather than holding one.
+    # Keep environment placeholders intact for substitution inside the container.
     if registry.basic_auth_user_info is not None:
         options.append(_REGISTRY_USER_INFO_SOURCE)
         options.append((_REGISTRY_USER_INFO_KEY, registry.basic_auth_user_info))
@@ -527,12 +431,9 @@ def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusM
         ("connector", "kafka"),
         ("topic", derived.topic),
         ("properties.bootstrap.servers", site.kafka_bootstrap),
-        # The run id, so a consumer group an abandoned run left behind names
-        # the run that left it.
+        # Use the run ID to identify consumer groups left by abandoned runs.
         ("properties.group.id", derived.run_id),
-        # From the topic's head: the producer publishes before an engine is
-        # asked to consume, and a latest-offset reader would skip that head
-        # and be scored as having lost it.
+        # Read from the beginning because records may arrive before the engine starts.
         ("scan.startup.mode", "earliest-offset"),
         *_kafka_options(site.kafka_security),
         *_format_options(spec, site),
@@ -541,7 +442,7 @@ def _source_ddl(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusM
 
 
 def _catalog_key(key: str) -> str:
-    """The Iceberg Java name of a pyiceberg property name."""
+    """Translate a PyIceberg property name to its Iceberg Java equivalent."""
     return _CATALOG_PROP_RENAMES[key] if key in _CATALOG_PROP_RENAMES else key
 
 
@@ -569,17 +470,12 @@ def _catalog_ddl(site: SiteConfig) -> str:
         ("type", "iceberg"),
         ("catalog-type", REST),
         ("uri", _required_prop(props, "uri")),
-        # The catalog's own addressing, which is not always a location: a Glue
-        # REST endpoint takes the account that owns the catalog here.
+        # A Glue REST warehouse identifies an account, not a storage location.
         ("warehouse", _required_prop(props, "warehouse")),
     ]
-    # Sorted by the name the site wrote, so two runs of one site render
-    # byte-identical catalog clauses and any diff between two scripts is a
-    # difference in their knobs.
+    # Sort properties for deterministic output and readable diffs.
     options += [(_catalog_key(key), props[key]) for key in sorted(set(props) - _STATED_CATALOG_PROPS)]
-    # The site's warehouse and not the catalog property of that name, which
-    # carries no scheme wherever the catalog addresses itself by something
-    # other than a location.
+    # Use the storage URI; the catalog's warehouse property may be an account ID.
     file_io = _file_io_for(site.warehouse)
     if file_io is not None:
         options.append(("io-impl", file_io))
@@ -590,9 +486,7 @@ def _insert(derived: Derived, meta: CorpusMetadata, knobs: Knobs) -> str:
     namespace, table = table_identifier(derived.table)
     hints: list[tuple[str, str]] = [("distribution-mode", knobs.distribution_mode)]
     if knobs.slots_total() != knobs.parallelism_default():
-        # The readers are held at `source_parallelism` by the job default, so
-        # the writers need saying otherwise or they inherit it and leave most
-        # of the fleet's slots idle.
+        # Override the reader default so writers use all fleet slots.
         hints.append(("write-parallelism", str(knobs.slots_total())))
     rendered = ", ".join(f"{_literal(key)} = {_literal(value)}" for key, value in hints)
     columns = ", ".join(meta.field_names())
@@ -603,7 +497,7 @@ def _insert(derived: Derived, meta: CorpusMetadata, knobs: Knobs) -> str:
 
 
 def render_sql(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
-    """The script the job submits: the source, the catalog and the insert."""
+    """Render the source, catalog, and INSERT statements."""
     knobs = read(spec.engine_block)
     return join_statements((_source_ddl(spec, site, derived, meta), _catalog_ddl(site), _insert(derived, meta, knobs)))
 
@@ -618,37 +512,33 @@ def _flag(value: bool) -> str:
 
 
 def render_conf(spec: RunSpec, derived: Derived) -> dict[str, str]:
-    """The Flink settings the script is submitted with.
+    """Render Flink job settings.
 
-    The cluster-shaped settings are here as well as in ``flink.env`` because
-    the two are read at different moments: the stack sizes the containers
-    before any job exists, and this is what the submitted job asks for.
+    Fleet sizing also appears in ``flink.env`` because Compose starts containers
+    before the job is submitted.
     """
     knobs = read(spec.engine_block)
     conf = {
         "execution.checkpointing.interval": knobs.checkpoint_interval,
         "execution.checkpointing.min-pause": knobs.min_pause,
         "execution.checkpointing.unaligned.enabled": _flag(knobs.unaligned_checkpoints),
-        # Exactly once is the promise the benchmark scores duplication
-        # against, so it is not a knob: a run that relaxed it would be scored
-        # against a weaker claim than every other run.
+        # Exactly-once mode is required by the benchmark's duplication metric.
         "execution.checkpointing.mode": "EXACTLY_ONCE",
         "parallelism.default": str(knobs.parallelism_default()),
         "pipeline.max-parallelism": str(knobs.max_parallelism),
         "taskmanager.numberOfTaskSlots": str(knobs.slots),
         "taskmanager.memory.process.size": f"{knobs.tm_mem_mb}m",
         "jobmanager.memory.process.size": f"{knobs.jm_mem_mb}m",
-        # The run id, so a job listing names the run rather than the SQL.
+        # Use the run ID to identify the job in listings.
         "pipeline.name": derived.run_id,
     }
-    # Last, so a run can override any setting above without this module
-    # growing a knob for it.
+    # Apply explicit overrides last.
     conf.update(knobs.extra_flink_conf)
     return conf
 
 
 def _conf_yaml(spec: RunSpec, derived: Derived) -> str:
-    """The settings as the submitter reads them, from a file or from a mount."""
+    """Serialize the submitter's settings as YAML."""
     return yaml.safe_dump(render_conf(spec, derived), sort_keys=True, default_flow_style=False)
 
 
@@ -664,31 +554,27 @@ def _cluster(site: SiteConfig) -> KubernetesConfig:
 
 
 def kubernetes_name(run_id: str) -> str:
-    """The run id as a Kubernetes object name; the rule is `specs.kubernetes`'s."""
+    """Convert the run ID using the shared Kubernetes naming rules."""
     return object_name(run_id)
 
 
 def configmap_name(derived: Derived) -> str:
-    """The ConfigMap the run's rendered files are mounted from."""
+    """Return the name of the ConfigMap containing the run's files."""
     return f"{kubernetes_name(derived.run_id)}-flink-job"
 
 
 def render_flinkdeployment(
     spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, image_tag: str
 ) -> str:
-    """The FlinkDeployment one run is, as the operator takes it.
+    """Render the run's FlinkDeployment.
 
-    ``meta`` is unread — the corpus shapes the SQL and not the cluster — and
-    stays in the signature so both of a run's Kubernetes documents are
-    rendered from the same arguments.
+    ``meta`` is unused but retained for the shared Kubernetes renderer interface.
     """
     knobs = read(spec.engine_block)
     cluster = _cluster(site)
     conf = {
-        # Under the run's own directory, so an abandoned run's state is found
-        # and removed by the name of the run that wrote it. First, because
-        # `extra_flink_conf` is applied last and a run that says where its
-        # checkpoints go means it.
+        # Keep checkpoints under the run for cleanup; allow extra_flink_conf to
+        # override this default.
         "state.checkpoints.dir": uri.join(site.runs_root, derived.run_id, "checkpoints"),
         **render_conf(spec, derived),
     }
@@ -697,22 +583,14 @@ def render_flinkdeployment(
         "volumeMounts": [{"name": _JOB_VOLUME, "mountPath": _RUN_MOUNT, "readOnly": True}],
     }
     if cluster.aws_region is not None:
-        # What an AWS SDK reads when nothing else names a region for it, which
-        # is the case for both halves of an MSK IAM connection: the token
-        # signer in the Kafka client, and S3 under the table's FileIO.
-        #
-        # Both names, because the SDKs disagree about which one carries it.
-        # This container's Java client reads `AWS_REGION`; botocore, which any
-        # Python tooling beside it goes through, reads `AWS_DEFAULT_REGION`
-        # alone and is left with no region at all when only the other is set.
+        # Java SDKs read AWS_REGION; botocore reads AWS_DEFAULT_REGION. Supply both
+        # for broker authentication and S3 access.
         container["env"] = [
             {"name": name, "value": cluster.aws_region} for name in ("AWS_REGION", "AWS_DEFAULT_REGION")
         ]
     if cluster.secret_name is not None:
-        # What the submitter resolves the script's `${env:NAME}` references
-        # against. The rendered script and settings hold the reference — they
-        # travel through a ConfigMap and the run's prefix in the bucket — and
-        # the value exists only in this Secret.
+        # Resolve rendered environment references from the Secret. ConfigMaps and
+        # archived run files retain only the references.
         container["envFrom"] = [{"secretRef": {"name": cluster.secret_name}}]
     pod_spec: dict[str, object] = {
         "nodeSelector": {**cluster.node_selector, **_ARCH_PIN},
@@ -727,28 +605,21 @@ def render_flinkdeployment(
         "spec": {
             "image": f"{cluster.registry}/{IMAGE_REPOSITORY}:{image_tag}",
             "flinkVersion": _FLINK_VERSION_LABEL,
-            # Standalone and not the operator's native mode: native asks
-            # Kubernetes for the taskmanagers the job's parallelism implies,
-            # which would make `taskmanagers` a number nobody honoured.
+            # Standalone mode honors taskmanagers; native mode derives the fleet from
+            # job parallelism.
             "mode": "standalone",
             "serviceAccount": cluster.flink_service_account,
             "flinkConfiguration": conf,
-            # The three fields below are read back out of the effective conf
-            # rather than off the knobs, because the operator applies a CRD
-            # field over `spec.flinkConfiguration`: a run that overrode one of
-            # these through `extra_flink_conf` would otherwise be honoured by
-            # the job it submitted and discarded by the cluster running it.
-            # `replicas` has no conf key and the slot count no CRD field, so
-            # neither can be set in two places, and `cpu` has no conf key at
-            # all — those three stay the knobs' to set.
+            # CRD fields override flinkConfiguration, so read these values from the
+            # effective configuration to preserve extra_flink_conf overrides. Replica
+            # count, slots, and CPU have no competing settings here.
             "jobManager": {"resource": {"memory": conf["jobmanager.memory.process.size"], "cpu": knobs.jm_cpu}},
             "taskManager": {
                 "resource": {"memory": conf["taskmanager.memory.process.size"], "cpu": knobs.tm_cpu},
                 "replicas": knobs.taskmanagers,
             },
             "job": {
-                # PyFlink's own jar and driver: the job is the script the args
-                # name, so a run builds no jar of its own.
+                # Use PyFlink's bundled driver; each run supplies a script, not a custom jar.
                 "jarURI": _PYFLINK_JAR,
                 "entryClass": _PYTHON_DRIVER,
                 "args": [
@@ -760,8 +631,7 @@ def render_flinkdeployment(
                     f"{_RUN_MOUNT}/{CONF_FILE}",
                 ],
                 "parallelism": int(conf["parallelism.default"]),
-                # A run is scored once and never resumed, so there is no state
-                # to carry across an edit of this object.
+                # Runs are scored once, so object updates do not restore prior state.
                 "upgradeMode": "stateless",
                 "state": "running",
             },
@@ -772,7 +642,7 @@ def render_flinkdeployment(
 
 
 def render_job_configmap(spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata) -> str:
-    """The ConfigMap holding the two files the submitter reads off its mount."""
+    """Render the ConfigMap containing SQL and Flink settings."""
     cluster = _cluster(site)
     document = {
         "apiVersion": "v1",
@@ -791,19 +661,16 @@ def render_job_configmap(spec: RunSpec, site: SiteConfig, derived: Derived, meta
 def render(
     spec: RunSpec, site: SiteConfig, derived: Derived, meta: CorpusMetadata, *, image_tag: str | None = None
 ) -> dict[str, str]:
-    """The engine's files for the run directory, keyed by filename.
+    """Return rendered run files keyed by filename.
 
-    A site with a cluster gets the two Kubernetes documents as well, and needs
-    the tag of the image they start. A site without one is the local stack,
-    which builds its own image and submits the job itself.
+    Kubernetes sites also receive deployment manifests and require an image tag.
+    The local stack builds and submits its own image.
     """
     knobs = read(spec.engine_block)
     files = {
         SQL_FILE: render_sql(spec, site, derived, meta),
         CONF_FILE: _conf_yaml(spec, derived),
-        # The cluster's shape is not a job setting: the stack starts the
-        # taskmanagers and sizes the containers before a job is submitted, so
-        # it reads these as environment instead.
+        # Compose needs fleet sizing before submission, so provide it as environment.
         ENV_FILE: (
             f"TASKMANAGERS={knobs.taskmanagers}\n"
             f"SLOTS={knobs.slots}\n"

@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Judge a run that is still going, from the artifacts the scorer publishes.
-#
-# The scorer's two published files rather than the table: the scorer has
-# already paid for that read, and two readers of one table would disagree about
-# when a commit became visible — so the run's freshness figures would depend on
-# which of them was asked.
-#
-# It exits with the gate's own code: 0 PASS, 3 UNDERSIZED, 5 VOID.
-#
-# `--teardown` destroys a fleet, so it waits for the verdict to repeat. The
-# gate judges the lag as of the newest sample, and a fleet still working
-# through a cold start, a checkpoint that took a moment or a poll that read a
-# stale prefix each produce one breaching tick the next one contradicts.
+# Judge a running benchmark from the scorer's artifacts, keeping one source of commit
+# visibility measurements. Exit codes: 0 PASS, 3 UNDERSIZED, 5 VOID.
+# With --teardown, require consecutive non-PASS verdicts to avoid stopping on a transient
+# breach.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
@@ -39,10 +30,7 @@ USAGE
 RUN_ID=""
 TEARDOWN=0
 IMAGE_TAG=""
-# How many consecutive non-PASS verdicts `--teardown` waits for. Three, because
-# the gate is polled about once a minute: two ticks is inside the noise a cold
-# start or one slow checkpoint produces, and three minutes of a fleet that is
-# not passing is minutes rather than hours of a run nobody can publish.
+# Require repeated breaches before teardown; the usual polling interval is one minute.
 BREACHES_REQUIRED=3
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -94,24 +82,15 @@ RUNS_ROOT="$(site_root '.runs_root')"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ingest-bench-gate.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-# The two files `gate` reads, and no others: the rest of the scorer's output is
-# the record of the run, and downloading it every minute would pay for the whole
-# artifact set to answer one question.
+# Fetch only the two artifacts the gate needs.
 for name in summary.json keepup_samples.jsonl; do
 	aws s3 cp "$RUNS_ROOT/$RUN_ID/scores/$name" "$SCRATCH/$name" --only-show-errors >&2 ||
 		die "the scorer has published no $name under $RUNS_ROOT/$RUN_ID/scores/; it may not have read the table yet"
 done
 
 GATE=(gate --out "$SCRATCH")
-# The gate's own windows are its defaults, and a run overrides them only where
-# it said so — see spec.scoring in the copied spec.
-#
-# Fetched from the runs prefix like the two artifacts above, rather than read
-# out of a local run directory: staging published it there, and a driver that
-# read the local copy would judge the same run differently depending on whether
-# one existed. A run that asked for a longer adaptation precisely to survive
-# its cold start would then be judged at the default and torn down. So a spec
-# that cannot be read is a refusal, never a fallback to windows nobody chose.
+# Read scoring overrides from the uploaded spec so every operator uses the same windows.
+# An unreadable spec is an error, not permission to substitute defaults.
 SPEC="$SCRATCH/spec.yaml"
 aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/spec.yaml" "$SPEC" --only-show-errors >&2 ||
 	die "could not read $RUNS_ROOT/$RUN_ID/stage/spec.yaml, and the run's own gate windows are in it"
@@ -123,14 +102,11 @@ WINDOW_S="$(yq '.scoring.gate_window_s' "$SPEC")"
 VERDICT_STATUS=0
 harness_local "${GATE[@]}" || VERDICT_STATUS=$?
 
-# How many ticks in a row have not been PASS, kept beside the run because each
-# tick is its own process: an operator runs this every minute or so, and a
-# count held in memory would be one tick long.
+# Persist consecutive non-PASS counts because each gate invocation is a separate process.
 BREACH_FILE="$RUNS_DIR/$RUN_ID/gate-breaches"
 BREACHES=0
 if ((VERDICT_STATUS == 0)); then
-	# Consecutive means consecutive: a passing tick starts the count again, so
-	# two breaches hours apart cannot be joined by an unrelated third.
+	# Reset on PASS so separated breaches do not accumulate.
 	rm -f "$BREACH_FILE"
 else
 	if [[ -f $BREACH_FILE ]]; then
@@ -148,18 +124,13 @@ if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)) && ((BREACHES < BREACHES_REQUIRE
 fi
 
 if ((VERDICT_STATUS != 0)) && ((TEARDOWN == 1)) && ((BREACHES >= BREACHES_REQUIRED)); then
-	# Any non-zero answer, including a gate that found no measurement to judge:
-	# each of them says the run is not worth paying for another minute of.
+	# Count all nonzero statuses, including unavailable measurements.
 	log "the verdict has not been PASS for $BREACHES consecutive ticks, so tearing $RUN_ID down"
-	# The tag reaches teardown.sh, whose drop-topic Job would otherwise default
-	# to this checkout's commit — which need not be the commit that was pushed.
+	# Pass the image tag through to teardown's drop-topic Job.
 	TEARDOWN_ARGS=("$RUN_ID" --site "$SITE_FILE")
 	[[ -z $IMAGE_TAG ]] || TEARDOWN_ARGS+=(--image-tag "$IMAGE_TAG")
-	# The verdict is what this script exits with, so a teardown that failed is
-	# reported rather than left to replace it: the exit codes here are the
-	# gate's own, and a caller reading one this script never defines would have
-	# to guess whether the run passed. The fleet outliving its verdict is the
-	# operator's to act on, which is what the line below is for.
+	# Report teardown failures without replacing the gate's exit code. The operator must
+	# check any fleet left running.
 	TEARDOWN_STATUS=0
 	"$REPO_ROOT/scripts/teardown.sh" "${TEARDOWN_ARGS[@]}" || TEARDOWN_STATUS=$?
 	((TEARDOWN_STATUS == 0)) ||

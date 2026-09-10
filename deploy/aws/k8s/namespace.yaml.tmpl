@@ -1,10 +1,6 @@
-# The namespace every harness Job and every engine of a run lives in, and the
-# three identities they run as. Rendered by deploy/aws/setup.sh with envsubst;
-# ${NAMESPACE} is the only variable in it.
-#
-# The ServiceAccount names are fixed rather than derived: an EKS Pod Identity
-# association is made per (namespace, ServiceAccount), so a name that varied
-# per run would need an association per run.
+# Shared namespace and service accounts, rendered by setup.sh with envsubst.
+# ${NAMESPACE} is the only variable. Keep account names stable because EKS
+# Pod Identity binds to each namespace/service-account pair.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -28,12 +24,8 @@ metadata:
   labels:
     lakehouse-ingest-bench: "true"
 ---
-# The JobManager runs under this identity and creates the TaskManager pods and
-# the ConfigMaps that carry the cluster's configuration itself — the operator
-# does not create them on its behalf — so without these rules a FlinkDeployment
-# reaches RUNNING with a JobManager that can never raise a fleet. The rules are
-# the ones the operator's own chart grants the `flink` role it installs for the
-# namespaces it watches.
+# Grant the JobManager the pod and ConfigMap permissions required to manage
+# TaskManagers, matching the operator chart's Flink role.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -73,13 +65,9 @@ metadata:
   labels:
     lakehouse-ingest-bench: "true"
 ---
-# A Spark driver creates its own executor pods, their configuration ConfigMap
-# and the headless Service they find it by, so without these rules a
-# SparkApplication is submitted and the driver then fails to raise a fleet. The
-# rules are the ones the spark-operator's own chart grants the account it would
-# have created — which is not the account a run uses, because a Pod Identity
-# association is made per (namespace, service account) and the name above is
-# the one bound to the harness role.
+# Grant the driver permissions to create executors, their ConfigMap, and
+# headless Service. Bind the benchmark's pod-identity account instead of
+# the account the Spark operator chart would create.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

@@ -1,29 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What a running query actually honours, read back and compared with the spec.
+"""Compare the running Spark fleet with the requested configuration.
 
-Staging waits for the SparkApplication to reach RUNNING, which says the
-operator submitted something. It does not say that what it submitted is the run
-the spec describes: Spark accepts a setting it does not use, an executor the
-scheduler could not place leaves the fleet short of what the run was costed
-for, and a pod whose CPU request and limit differ runs on cores the node may
-reclaim. None of that fails a submission. A run measured under settings nobody
-chose is worse than a run that never started, because it publishes a number
-attributed to the wrong knobs.
+Read effective settings from the driver API and verify pod counts, Running
+state, and Guaranteed QoS through kubectl. RUNNING at the operator level alone
+does not prove that all settings took effect or all executors started.
 
-So the sizing a result means something under — how wide the fleet is, how much
-each half of it was given, and whether it holds those cores rather than borrows
-them — is read off the driver's own API and off the pods the operator made.
-`verify` is a function of the spec and two documents, so every drift it can
-report is checked against recorded answers instead of a cluster.
-
-The cadence is the one setting that cannot be read back here. A processing-time
-trigger is an argument to `writeStream`, not a session setting, and Spark 3.5
-publishes no REST resource for a Structured Streaming query — so the interval
-is only observable once a batch has run, which is after the producer starts and
-long after staging has to decide. What is checkable is that nothing pretends
-otherwise: the interval reaches the query through `job.json`, and a setting
-under Spark's streaming-trigger prefix would be a run trying to move its own
-cadence through configuration that nothing honours.
+Spark 3.5 exposes no Structured Streaming REST endpoint for reading the trigger
+interval during staging. The job receives it through job.json; reject unsupported
+session settings that attempt to configure the trigger instead.
 """
 
 from __future__ import annotations
@@ -51,74 +35,49 @@ from ingest_bench.readings import (
 )
 from ingest_bench.specs.model import RunSpec, load_run_spec
 
-# The one resource whose path holds no application id. The other is built per
-# application, in the function that reads it, so each path is written once and
-# the request and the name in an error message cannot disagree.
+# Application-independent endpoint; build per-application paths where read.
 APPLICATIONS = "/api/v1/applications"
 
-# Where the pod list came from, for the refusals about it. Not a path: the
-# document is `kubectl`'s answer, handed to this as a file.
+# Diagnostic label for the pod list supplied by kubectl.
 PODS = "the pod list"
 
-# What the operator labels the two halves of a fleet with, and the phase and
-# QoS class each of their pods has to report.
+# Operator role labels and required pod phase and QoS class.
 _ROLE_LABEL = "spark-role"
 _DRIVER = "driver"
 _EXECUTOR = "executor"
 _RUNNING_PHASE = "Running"
 _GUARANTEED = "Guaranteed"
 
-# A setting under this prefix would be a run moving its own commit cadence
-# somewhere nothing reads it. Spark has no such setting, which is exactly what
-# makes its absence the checkable half of the cadence — see the module note.
+# Reject unsupported trigger settings; cadence belongs in job.json.
 _TRIGGER_PREFIX = "spark.sql.streaming.trigger"
 
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
-    """The value the query was submitted with for ``key``.
-
-    An override in `extra_spark_conf` is applied after the knob it displaces,
-    so it is what the engine was told — and reporting the knob instead would be
-    drift on a run whose author chose the override.
-    """
+    """Return the submitted setting, including extra_spark_conf overrides."""
     if key in knobs.extra_spark_conf:
         return knobs.extra_spark_conf[key]
     return knob
 
 
 def _application(run_id: str, answer: object) -> tuple[str, list[str]]:
-    """The run's application id, and the drift when there is not exactly one.
+    """Find exactly one application matching the run and report any mismatch.
 
-    Read by name rather than taken as the only one listed: the endpoint is
-    reached through a tunnel, which is addressed by a port and not by a pod, so
-    the name is what says the application read is the run just applied.
-
-    Either spelling of that name is accepted. `render_conf` submits
-    `spark.app.name` as the run id, whose stamp carries an uppercase `T` and
-    `Z`, while the SparkApplication object is named by `kubernetes_name` — the
-    same id lowercased, because an RFC 1123 name has to be. Whether the
-    operator's own `spark.app.name` displaces the submitted one decides which
-    of the two the driver reports, and both name this run, so holding out for
-    one of them would fail a staging over a letter's case.
+    Match by name to detect a tunnel reaching the wrong application. Accept the
+    original run ID and its lowercase Kubernetes name: the operator may replace
+    the submitted spark.app.name with the latter.
     """
     accepted = sorted({run_id, kubernetes_name(run_id)})
     applications = documents(answer, APPLICATIONS)
     listed = [str_field(entry, "name", APPLICATIONS) for entry in applications]
     named = [name for name in listed if name in accepted]
     if len(named) != 1:
-        # The names and not only how many: the likeliest cause of this line is
-        # an application called something nobody predicted, and neither the
-        # operator nor this says what that was.
+        # Include observed names to diagnose a misdirected tunnel or unexpected app name.
         return "", [line("applications named after the run", f"one of {accepted}", listed or "none listed")]
     return str_field(applications[listed.index(named[0])], "id", APPLICATIONS), []
 
 
 def _properties(answer: object, where: str) -> dict[str, str]:
-    """The driver's Spark settings, from the pairs the environment reports them as.
-
-    The endpoint answers `sparkProperties` as a list of two-element arrays
-    rather than an object, so the pairs are folded into a mapping here.
-    """
+    """Convert the driver's sparkProperties pairs into a settings mapping."""
     reported = document(answer, where)
     pairs = field(reported, "sparkProperties", where)
     if not isinstance(pairs, list):
@@ -133,12 +92,10 @@ def _properties(answer: object, where: str) -> dict[str, str]:
 
 
 def _conf_drift(knobs: Knobs, fetch: Callable[[str], object], application: str) -> list[str]:
-    """Every setting the driver was submitted with that is not the one asked for.
+    """Report effective driver settings that differ from the request.
 
-    Read off the driver rather than off the document that was applied, because
-    the operator restates the fleet's sizing as `spark-submit` arguments: a
-    knob that reached the object and not the session would otherwise pass
-    unnoticed.
+    Read the driver because the operator can override manifest settings through
+    spark-submit arguments.
     """
     where = f"{APPLICATIONS}/{application}/environment"
     properties = _properties(fetch(where), where)
@@ -153,8 +110,7 @@ def _conf_drift(knobs: Knobs, fetch: Callable[[str], object], application: str) 
     lines: list[str] = []
     for what, key, knob in settings:
         expected = _effective(knobs, key, knob)
-        # Absence is a reading about the run rather than an unreadable
-        # document, so it is compared like any other value.
+        # A missing setting is drift, not a malformed response.
         actual = properties[key] if key in properties else NOT_REPORTED
         if expected != actual:
             lines.append(line(what, expected, actual))
@@ -166,7 +122,7 @@ def _conf_drift(knobs: Knobs, fetch: Callable[[str], object], application: str) 
 
 @dataclass(frozen=True)
 class _Pod:
-    """One pod of a run's fleet, as far as this reads them."""
+    """Pod fields used to verify the fleet."""
 
     name: str
     role: str
@@ -186,9 +142,7 @@ def _pods(answer: object) -> list[_Pod]:
                 name=str_field(metadata, "name", PODS),
                 role=optional_str_field(labels, _ROLE_LABEL, PODS),
                 phase=optional_str_field(status, "phase", PODS),
-                # A pod carries no QoS class until the API server admits it, so
-                # absence here is a pod that is not yet running rather than a
-                # document that could not be read.
+                # A pod may lack QoS before admission; treat that as pending readiness.
                 qos_class=optional_str_field(status, "qosClass", PODS),
             )
         )
@@ -196,12 +150,7 @@ def _pods(answer: object) -> list[_Pod]:
 
 
 class FleetNotPlaced(Exception):
-    """The fleet is not yet what the run asked for, and nothing has drifted.
-
-    Raised rather than returned so that a caller reading a verdict cannot
-    mistake a fleet still being scheduled for one that dropped a setting: the
-    first is waited for, the second is refused.
-    """
+    """Signal that the fleet is still being scheduled and should be retried."""
 
     def __init__(self, lines: list[str]) -> None:
         super().__init__("; ".join(lines))
@@ -209,14 +158,7 @@ class FleetNotPlaced(Exception):
 
 
 def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
-    """Every pod of the fleet that is not one the run asked for.
-
-    Two readings the driver cannot make about itself. The count is the fleet a
-    result is costed for, and an executor the scheduler never placed leaves a
-    run measured on fewer. Guaranteed is the other: a Burstable pod's cores are
-    a share the node may reclaim under pressure, so a rate measured on one is
-    the node's answer rather than the engine's.
-    """
+    """Report fleet count, role, phase, or Guaranteed QoS mismatches."""
     fleet = _pods(pods)
     drivers = [pod for pod in fleet if pod.role == _DRIVER]
     executors = [pod for pod in fleet if pod.role == _EXECUTOR]
@@ -224,26 +166,21 @@ def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
     pending: list[str] = []
     if len(drivers) != 1:
         lines.append(line("driver pods", 1, len(drivers)))
-    # The operator reports RUNNING once the driver is up, and the driver asks
-    # for its executors only then; a fleet still short of them, or with a pod
-    # still pulling its image, is one the scheduler has not finished placing
-    # rather than one that dropped a setting.
+    # The operator can report RUNNING before executors are scheduled or images
+    # are pulled. Retry an incomplete fleet instead of reporting drift.
     if len(executors) < knobs.executors:
         pending.append(line("executor pods", knobs.executors, len(executors)))
     elif len(executors) > knobs.executors:
         lines.append(line("executor pods", knobs.executors, len(executors)))
     for pod in (*drivers, *executors):
         if pod.phase != _RUNNING_PHASE:
-            # The QoS class is judged once the pod runs: a Pending pod's is
-            # not yet a fact about the cores it will hold.
+            # Check QoS once the pod is running.
             pending.append(line(f"pod {pod.name} phase", _RUNNING_PHASE, pod.phase or NOT_REPORTED))
         elif pod.qos_class != _GUARANTEED:
             lines.append(line(f"pod {pod.name} qos class", _GUARANTEED, pod.qos_class or NOT_REPORTED))
     for pod in fleet:
         if pod.role not in (_DRIVER, _EXECUTOR):
-            # A pod the selector matched and the operator did not label as
-            # either half of the fleet is not part of the run this measures,
-            # and it is sharing the run's namespace with it.
+            # Reject selected pods without an expected fleet role.
             lines.append(line(f"pod {pod.name} role", f"{_DRIVER} or {_EXECUTOR}", pod.role or NOT_REPORTED))
     if pending and not lines:
         raise FleetNotPlaced(pending)
@@ -251,12 +188,10 @@ def _pod_drift(knobs: Knobs, pods: object) -> list[str]:
 
 
 def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object], pods: object) -> list[str]:
-    """One line per setting the running query does not honour; empty when it does.
+    """Return one line per configuration mismatch, or an empty list.
 
-    ``fetch`` answers a path on the driver's API with the parsed document and
-    ``pods`` is the run's pod list as `kubectl` reports it, which is what keeps
-    this a function of recorded JSON. A document that cannot be read as the one
-    it should be raises rather than returning a clean verdict.
+    ``fetch`` supplies parsed driver API responses; ``pods`` supplies kubectl JSON.
+    Malformed documents raise instead of producing a successful verdict.
     """
     knobs = read(spec.engine_block)
     application, lines = _application(run_id, fetch(APPLICATIONS))
@@ -304,8 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pods = _read_pods(Path(str(args.pods)))
         drift = verify(load_run_spec(Path(str(args.spec))), run_id, fetch_json(str(args.rest)), pods)
     except ValueError as error:
-        # Not a verdict: the run could not be judged at all, which a caller
-        # answers by looking again rather than by refusing the run.
+        # An unreadable response is retryable, not evidence of configuration drift.
         print(error, file=sys.stderr)
         return UNVERIFIED_EXIT
     except FleetNotPlaced as not_placed:
@@ -316,19 +250,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(drifted)
     if drift:
         return DRIFT_EXIT
-    # On stderr, because the drift lines are this command's answer and a caller
-    # that captures them should not have to filter this out of them.
+    # Keep diagnostics on stderr so stdout contains only drift findings.
     print(f"verified: {run_id} is running the settings its spec asked for", file=sys.stderr)
     return 0
 
 
 def _read_pods(path: Path) -> object:
-    """The pod list off a file, or a refusal naming it.
-
-    A file the driver could not write is the same kind of answer as an endpoint
-    that did not respond — worth another look rather than a run refused — so it
-    raises the same way every other unreadable document does.
-    """
+    """Read a pod-list file, raising a retryable error if it cannot be read."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:

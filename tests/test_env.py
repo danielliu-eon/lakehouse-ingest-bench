@@ -48,11 +48,6 @@ def test_an_unset_variable_names_itself_and_the_property(monkeypatch: pytest.Mon
 
 
 def test_a_credential_named_key_is_recognised_by_its_name() -> None:
-    """The name and not the value, so a key whose value is empty today is still one.
-
-    A value-shaped rule cannot tell a token from a hostname, and the point of
-    this rule is to refuse a credential before anything has been done with it.
-    """
     for key in ("sasl.password", "s3.secret-access-key", "rest.token", "MY_CREDENTIALS", "basic_auth_user_info"):
         assert names_a_secret(key), key
     for key in ("sasl.mechanism", "uri", "warehouse", "s3.region"):
@@ -60,7 +55,6 @@ def test_a_credential_named_key_is_recognised_by_its_name() -> None:
 
 
 def test_a_literal_credential_is_refused_where_a_reference_is_required() -> None:
-    """The key, the form and the reason, since the fix is a one-line edit of the file."""
     with pytest.raises(ValueError, match=r"sasl\.password.*\$\{env:NAME\}"):
         refuse_literal_secrets({"sasl.password": "hunter2"}, "site.kafka.security")
     # A reference passes, and so does everything that is not a credential.

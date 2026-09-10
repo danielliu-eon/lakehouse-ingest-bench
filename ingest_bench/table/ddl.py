@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Render the Spark SQL that creates the same table ``create`` would.
+"""Render Spark SQL equivalent to harness table creation.
 
-An engine that manages its own table is given DDL rather than a pre-created
-table, because its own writer path applies table properties only to a table it
-created. The rendered statement therefore has to agree with `create` on the
-column set, the required-ness and the partition scheme, or the two engines in
-one run would be scored against differently shaped tables.
+Preserve corpus field types, required status, partitioning, and properties
+for engines that create their own tables.
 """
 
 from __future__ import annotations
@@ -13,10 +10,7 @@ from __future__ import annotations
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.table.create import IDENTITY, UNPARTITIONED, Partition
 
-# The Spark SQL type each type name a corpus publishes is declared as.
-# `TIMESTAMP_NTZ` rather than `TIMESTAMP`: the corpus carries wall-clock
-# milliseconds with no zone, and Spark's zoned `TIMESTAMP` maps to Iceberg's
-# `timestamptz`, which is a different Iceberg type than `create` builds.
+# Use TIMESTAMP_NTZ to match Iceberg timestamp without a timezone.
 _TYPES = {
     "long": "BIGINT",
     "string": "STRING",

@@ -1,248 +1,208 @@
 # Methodology
 
-What the benchmark asks of an engine, how each answer is defined, and why. Every
-term the other documents use is defined here.
+This document defines the benchmark's measurements, validity rules and cost model.
 
 ## Glossary
 
-- **Batch** — one interval of the corpus, encoded once and frozen. A preset's
-  `batch_interval_ms` is its width, and the corpus's manifest carries one record
-  per batch: its row count, its row-id range and a checksum over those ids.
+- **Batch** — one frozen corpus interval, with width `batch_interval_ms`. Its
+  manifest record gives the row count, row-id range and checksum.
 - **The offer** — the producer replaying the corpus on its original timeline.
-  The **offered rate** is the corpus's `offered_bytes_per_s`, scaled by
-  `producer.speed`.
-- **Epoch** — the run's time origin, chosen when the producer starts. Batch *k*
-  is due at `epoch + k * batch_interval_ms`, and every figure below is measured
-  from it.
-- **Contiguous prefix** — the largest *k* such that every batch `0..k` has all
-  its rows in the table. This is the completeness watermark freshness is read
-  off.
+  The **offered rate** is `offered_bytes_per_s` scaled by `producer.speed`.
+- **Epoch** — the run's time origin, chosen when the producer starts. At normal
+  speed, batch *k* is due at `epoch_ms + k * batch_interval_ms`, in milliseconds.
+- **Contiguous prefix** — the largest *k* for which every batch `0..k` is covered.
+  This is the watermark used to measure freshness.
 - **Window vs full** — the freshness window excludes `scoring.warmup_s` after
-  the epoch; the full series covers the whole run. The bound is judged on the
-  window.
-- **PASS / UNDERSIZED / VOID** — the in-flight gate's three answers, so a sweep
-  can abandon a fleet that will not pass without paying for its full duration.
+  the epoch; the full series covers the whole run. The verdict uses the window.
+- **PASS / UNDERSIZED / VOID** — the in-flight gate's verdicts. They let a sweep
+  stop a failing fleet before the full run ends.
 
 ## The corpus is the ground truth
 
-A corpus is generated once and never regenerated during a run. Each batch is
-judged on two figures the generator froze: its row count, and the sum of its row
-ids modulo a prime. The count alone cannot tell a lost row from a row that
-arrived twice; the two together cannot be satisfied by any wrong set of ids an
-engine fault would produce. Every figure in the manifest is re-derived from the
-stored bytes before the corpus is published, so the scorer trusts the manifest
-without trusting the encoder that wrote it.
+A corpus is generated once and reused unchanged. The scorer compares each batch
+against its frozen row count and sum of row ids modulo a prime. The checksum
+helps detect substitutions that a count alone would miss; it is not a proof of
+row-by-row identity. The generator verifies the manifest against the stored bytes
+before publishing the corpus.
 
-Row ids carry their batch in their high bits, so a commit's rows are attributed
-to their batches with no join. The scorer reads only the id column out of each
-data file: it is everything exactness needs, and a corpus row is mostly payload.
+Row ids encode their batch in their high bits, so the scorer can attribute rows
+without a join. It reads only the id column from each data file, avoiding the
+payload that makes up most of each row.
 
 ## Coverage and completeness
 
-Two predicates come out of those two figures, and they answer different
-questions.
+The tally uses two checks:
 
-- **Coverage** — have this batch's rows arrived, whatever else arrived with
-  them? This is what freshness times.
-- **Completeness** — did exactly this batch's rows arrive, and nothing else?
-  This is what exactness judges.
+- **Coverage** — the observed row count is at least the expected count. Freshness
+  uses this check to advance the contiguous prefix.
+- **Completeness** — both the row count and checksum match. Exactness uses this
+  check to identify faulty batches.
 
-Keeping them apart is what lets a late duplicate be a fault without also
-rewriting when the rows before it became visible. Counts only grow, so the
-prefix only advances, which is why it is carried forward from where the last
-commit left it rather than rescanned.
+A late duplicate can therefore fail exactness without changing an earlier
+freshness observation. Counts only grow, so the prefix advances incrementally.
+A duplicate can mask loss in the coverage count; exactness checks the checksum
+as well as the count before a result can pass.
 
 ## Freshness
 
-Freshness is one number about a whole run, and the honest one is a quantile of
-the lag a reader would have seen at an arbitrary instant. That is not a quantile
-over commits: a fleet that commits ten times in one second and then stalls for
-five minutes looks excellent per commit and terrible to a reader. So the lag is
-sampled on a one-second grid, which weights every second of the run equally and
-is what makes the p95 mean what the bound claims.
+Freshness measures the lag a reader would see over time. The scorer samples lag
+on a one-second grid so every second has equal weight. Sampling only at commits
+would underweight stalls: ten commits in one second followed by five idle minutes
+would produce mostly low-lag samples.
 
-The lag at instant *t* is `t` minus the emit time of the newest batch whose rows
-are **all** present — the contiguous prefix — so a batch that is half in the
-table has not arrived. Before any batch is complete the lag is measured from the
-epoch: an engine that has committed nothing has been late since the offer began.
+At instant *t*, lag is `t` minus the emit time of the batch at the contiguous
+prefix. A partially covered batch does not advance that prefix. Before any batch
+is covered, lag is measured from the epoch.
 
-The **window** starts `scoring.warmup_s` after the epoch, because a fleet that
-has just been handed its first rows is provisioning rather than lagging, and the
-bound is a claim about steady state. Both series are published: the full run says
-how much lag the warmup hid, so a run whose window passes only because its warmup
-swallowed a cold start is distinguishable from one that was fresh throughout. A
-warmup longer than the run leaves the window empty, and the run's last grid point
-stands in — which is why a corpus shorter than the warmup reports one sample four
-times over.
+The **window** starts `scoring.warmup_s` after the epoch to exclude startup from
+the steady-state bound. The full series remains available to show startup lag.
+If warmup exceeds the run's duration, the window uses the final grid point, so
+all four window quantiles report the same sample.
 
-**Draining is a separate condition, not a lag sample.** A run that ends with rows
-still outside the table has no lag to measure for them, and quantiles over the
-samples that do exist would score it as though those rows were never offered.
+Draining is also required: passing lag quantiles alone does not establish that
+all offered batches arrived. The freshness verdict is true only when:
 
-The freshness verdict is true when four things hold: the prefix reached the last
-offered batch, the lag series has no gap, the window p95 is inside
-`scoring.freshness_bound_s`, and the window max is inside twice it.
+1. the prefix reaches the last offered batch;
+2. the lag series has no coverage gap;
+3. window p95 is at most `scoring.freshness_bound_s`;
+4. window max is at most twice that bound.
 
-A gap is a **coverage failure**: a sampled prefix whose batch has no emit time in
-the publish logs. One such sample voids the quantiles rather than being dropped,
-because computing them over the rest would report a flattering number for a run
-that cannot be scored.
+A **coverage gap** is a sampled prefix whose batch has no emit time in the publish
+logs. Any gap invalidates the affected series' quantiles and fails freshness.
+Dropping the sample would hide missing evidence.
 
 ### Two clocks, and clock sanity
 
-Every lag is published on both time bases: the table's own commit timestamps —
-what a reader of the table sees, and the default — and the wall time at which the
-scorer first saw each commit, which is immune to a writer whose clock disagrees
-with the producer's.
+Lag is published on two time bases: the table's commit timestamps (the default)
+and the scorer's wall time when it first observed each commit. The second avoids
+dependence on the writer's clock.
 
-`min_lag_s` is the smallest per-commit lag on the table's clock. A batch cannot
-be queryable before it was acknowledged in any single frame of reference, so a
-negative minimum means those two clocks disagree and every figure drawn from the
-table's timestamps is suspect. `clock_skew_suspected` is exactly that figure
-being negative, so the two cannot contradict each other.
+`min_lag_s` is the smallest per-commit lag on the table's clock. A negative value
+means a commit timestamp precedes the corresponding producer acknowledgement and
+sets `clock_skew_suspected` to true. Treat measurements from those timestamps as
+suspect and inspect the series on the scorer's clock.
 
 ## Exactness
 
-Only the batches the publish logs say were sent are judged. A replay over a
-prefix of the corpus never offered the rest, and scoring them would report rows
-nobody sent as rows the engine lost.
+Only batches recorded as sent in the publish logs are scored. A replay of a
+corpus prefix must not report unsent batches as lost.
 
-| Fault | What it is |
+| Fault | Definition |
 |---|---|
-| `loss_rows` | rows of an offered batch that never arrived |
-| `duplicate_rows` | rows that arrived more than once, also given as `duplicate_ppm` |
-| `corrupt_batches` | the right row count with the wrong checksum |
+| `loss_rows` | sum of row-count deficits across offered batches |
+| `duplicate_rows` | sum of row-count excesses across offered batches; also reported as `duplicate_ppm` |
+| `corrupt_batches` | batches with the expected row count but a different checksum |
 
-Loss and duplication are counted separately because they are different faults
-with different causes, and a run that loses a thousand rows and duplicates a
-thousand others is not a run that got the answer right. `exact` is true only when
-no batch disagrees at all. The violation list is capped: it exists to name the
-first faults, and the counts above it are the complete figures.
+Loss and duplication are counted separately across batches. Within one batch,
+equal loss and duplication can leave the count unchanged; a checksum mismatch is
+reported as corruption. `exact` is true only when every scored batch's count and
+checksum match. The violation list shows the first faults up to a cap; the totals
+cover all scored batches.
 
 ## Keep-up
 
-Freshness says how stale the table was; keep-up says whether the staleness was
-bounded work or a growing debt. The two come apart at the end of a run: a fleet
-that fell an hour behind and then drained still shows a small final lag, and only
-the backlog it carried while the offer was running says it never kept pace.
+Keep-up measures whether the engine absorbs the offer as it arrives. A fleet
+that falls behind can eventually drain and finish with little lag; its backlog
+during the offer reveals that it failed to keep pace.
 
-| Figure | What it is |
+| Figure | Definition |
 |---|---|
-| `absorbed_at_offer_end` | committed rows over offered rows at the instant the last batch was acknowledged. `1.0` is no standing debt |
-| `drain_s` | seconds from that instant until the prefix reached the last batch |
-| `backlog_rows_max`, `backlog_rows_p50` | the debt over the whole run |
+| `absorbed_at_offer_end` | committed rows divided by offered rows when the last batch was acknowledged; `1.0` means no remaining backlog |
+| `drain_s` | seconds from the last acknowledgement until the prefix reached the last batch |
+| `backlog_rows_max`, `backlog_rows_p50` | backlog over the whole run |
 
-The absorbed fraction is read at the instant the offer stopped and not at the end
-of the run, because everything after that instant is drain: given long enough
-every fleet absorbs the whole offer, and the fraction only distinguishes fleets
-while rows are still arriving. Both sides are counted in rows rather than bytes
-or offsets, so the backlog is the same quantity on either side of the
-subtraction.
+The absorbed fraction is measured when the offer stops, before subsequent drain
+can erase the difference between fleets. Both offered and committed quantities
+are row counts.
 
 ## Geometry
 
-Geometry is what no verdict field covers: the live files, rows and bytes, the
-file-size p50/p90/p99 with min and max, the share of files under 32 MiB and under
-8 MiB, a log2 histogram of sizes, and per-commit quantiles of files added and of
-their sizes. It is measured at each of `scoring.geometry_offsets_s` and at the
-final snapshot; a rung the run never reached reads `absent`, so a run shorter
-than the first offset has only a final point.
+Geometry describes the live files, rows and bytes independently of the verdict:
+file-size p50/p90/p99, min and max; the share under 32 MiB and under 8 MiB; a log2
+size histogram; and per-commit quantiles of file counts and sizes. It is measured
+at each `scoring.geometry_offsets_s` offset and at the final snapshot. An offset
+the run did not reach is `absent`.
 
-It is read from the table's own metadata document and its manifests, after the
-fleet is gone — a read of metadata costs nothing to defer, and deferring it keeps
-a manifest walk off the poll loop that is timing commits.
+Geometry is read from the table's metadata document and manifests after teardown.
+This keeps manifest scans out of the poll loop used to time commits.
 
 ## The verdict
 
-`run_valid` is the only field that decides whether a result may be published. It
-is true when all of these hold:
+`run_valid` determines whether the scorer considers the run valid. It is true
+only when:
 
-1. the loop reached a verdict rather than abandoning the run;
-2. the table held the corpus's columns, with their types and their
-   required-ness;
-3. the freshness verdict above — drained, no gap, p95 inside the bound, max
-   inside twice it;
-4. exactness found no loss, no duplication and no corruption;
-5. the producer kept to its schedule.
+1. the scoring loop finishes normally;
+2. the table has every corpus column with the required type and nullability;
+3. freshness passes: drained, no gap, p95 within the bound, max within twice it;
+4. exactness finds no loss, duplication or corruption;
+5. the producer meets its schedule.
 
-It is false for a run still going: a partial run's lag is a lower bound and its
-exactness an upper one. And false for one the loop abandoned even where the
-figures beneath it are clean, since an idle stop with every batch landed reads
-as exact and fresh.
+Running and abandoned runs are invalid even if their current measurements pass.
+Publication also requires the checks in [`../results/README.md`](../results/README.md).
 
-`reason` names the clause that failed, and is null for a valid run and for one
-still going. A void names every column the table got wrong, a run the loop
-abandoned says `idle_stop_before_drain`, and a scorer that died says
-`scorer_failed:` with its exception type. Any other invalid run takes the first
-of three clauses to fail — `producer_bound:` before `exactness:` before
-`freshness:`, since each makes the ones after it moot — and states its figures
-after that prefix: `producer_bound: a batch was acknowledged 9250 ms after it
-was due, over behind_max_ms 5000`; `exactness:` with whichever of `loss_rows`,
-`duplicate_rows` and `corrupt_batches` are not zero; `freshness: window p95
-79.40 s exceeds bound 60.00 s`, or its `window max`, `the table never drained`
-and `missing_emit_prefixes=` variants.
+`reason` explains an invalid result. It is null for a valid or still-running run.
+A schema violation names each mismatched column; an abandoned run reports
+`idle_stop_before_drain`; a scorer exception reports `scorer_failed:` followed by
+the exception type. Other failures use the first applicable category, in order:
+`producer_bound:`, `exactness:`, then `freshness:`. The reason includes the
+relevant values, for example:
 
-`state` says how the run ended.
+- `producer_bound: a batch was acknowledged 9250 ms after it was due, over behind_max_ms 5000`;
+- `exactness:` followed by nonzero `loss_rows`, `duplicate_rows` or `corrupt_batches`;
+- `freshness: window p95 79.40 s exceeds bound 60.00 s`, or a reason naming
+  `window max`, `the table never drained` or `missing_emit_prefixes=`.
 
-| `state` | What it means |
+`state` records the scoring loop's status:
+
+| `state` | Meaning |
 |---|---|
-| `running` | the run is still going, and every figure beside it is provisional |
-| `drained` | every offered batch arrived complete. The normal ending |
-| `idle_stop` | the table stopped taking commits with rows still outstanding: the engine died, fell behind past the scorer's patience, or never consumed |
-| `producer_bound` | the offer, not the engine, set the rate |
-| `void` | the table's columns are not the ones the corpus published, so nothing measured against it describes the corpus. `reason` names each column that is missing, of the wrong type, or optional where the corpus is required |
+| `running` | measurements are provisional |
+| `drained` | the prefix reached the last offered batch; exactness may still fail |
+| `idle_stop` | commits stopped while rows remained outstanding: the engine stopped, never consumed, or exceeded the scorer's idle timeout |
+| `producer_bound` | the producer failed to deliver the scheduled offer |
+| `void` | table columns differ from the corpus schema; `reason` names missing columns, wrong types or optional corpus columns |
 
-`producer_bound` is true when a batch was acknowledged more than
-`producer.behind_max_ms` after it was due, or a delivery errored. Such a run says
-nothing about how fresh an engine kept the table. It usually means the producer
-was starved of CPU by everything else on the machine, so offer less: a shorter
-corpus with `--set duration_s=…`, a spec whose `producer.speed` is below 1, or
-more `producer.shards` on a cluster. The first two are different dials — `--set`
-reaches the corpus, and only the spec reaches the offer. A void outranks a bound
-producer: the table is not the one the corpus describes, so no figure from either
-side describes anything.
+`producer_bound` is true when a batch acknowledgement exceeds
+`producer.behind_max_ms` after its due time, or a delivery errors. The run cannot
+establish engine capacity at the intended rate. Check producer CPU and shard
+count. A shorter corpus (`--set duration_s=…`) can reduce a local probe's resource
+needs; `producer.speed` below 1 lowers the replay rate. Corpus overrides and
+producer settings affect different parts of the workload. A schema violation
+(`void`) takes precedence over a producer failure.
 
-A breached freshness bound with clean exactness and a `drained` state is not a
-malfunction. It is the fleet being too small for the offer, which is what the
-benchmark exists to detect.
+A drained, exact run that exceeds the freshness bound indicates insufficient
+capacity for the offer, rather than a correctness failure.
 
 ## The gate
 
-The gate answers `PASS`, `UNDERSIZED` or `VOID` from the scorer's published
-artifacts while a run is still going — as exit codes 0, 3 and 5. It reads those
-artifacts rather than the table, because the scorer has already paid for that
-read and two readers of one table would disagree about when a commit became
-visible.
+The gate reads the scorer's published artifacts and returns `PASS`, `UNDERSIZED`
+or `VOID` with exit codes 0, 3 and 5. Reusing those artifacts avoids a second table
+reader with different commit-observation times.
 
-It reads three signals. The first is whether anything is still measuring: past
-the staleness bound the newest keep-up sample is not a reading, whatever the
-summary says. Then the lag right now, against twice the bound. The third is
-whether the backlog's **floor** is climbing: backlog is sawtoothed,
-filling between commits and emptying at each one, so its instantaneous value says
-almost nothing, while the minimum over a window is the debt the fleet failed to
-clear. A minimum that climbs window over window is a fleet falling behind however
-busy each individual commit looked.
+It checks three signals:
 
-Nothing is judged undersized before the adaptation period is up, because a fleet
-scaling out to meet its first rows is lagging for a reason that will pass.
-UNDERSIZED and VOID are kept apart on purpose: the first is an answer about the
-fleet, the second is the absence of an answer, and a sweep that conflated them
-would report missing measurements as capacity limits.
+1. **Measurement age.** A keep-up sample older than the staleness bound is invalid,
+   regardless of the summary's verdict.
+2. **Current lag.** Lag is compared against twice the freshness bound.
+3. **Backlog floor.** The minimum backlog in successive windows shows work the
+   fleet failed to clear. Instantaneous backlog naturally rises between commits
+   and falls after them, so a rising floor is the more useful capacity signal.
+
+Capacity checks wait until the adaptation period ends. `UNDERSIZED` means the
+fleet failed those checks; `VOID` means the measurements cannot support a capacity
+judgment.
 
 ## Cost
 
-A result's cost is `Σ count × (vcpu × vcpu_hour_usd + gib × gib_hour_usd)` over
-the fleet, times the run's hours. The fleet is what the run *asked for* —
-container requests, not the nodes they landed on — so it is the same number
-however the cluster packed it. The hours run from the epoch to the later of the
-producer's last acknowledgement and the table's last commit: a fleet is not
-released when the offer stops, and the drain is on the bill.
+Hourly cost is `Σ count × (vcpu × vcpu_hour_usd + gib × gib_hour_usd)` across the
+fleet. Multiply by run hours for total cost. The fleet uses requested container
+resources, independent of how the cluster packs pods onto nodes. Run hours extend
+from the epoch to the later of the producer's last acknowledgement and the table's
+last commit, including drain time.
 
-Both rates come from one rule, so that two sites' figures are comparable. Take
-the hourly price of the instance type the fleet runs on and split it evenly
-between the two terms: for an instance of `vcpu` cores and `gib` GiB at `P` an
-hour, `vcpu_hour_usd = P / vcpu / 2` and `gib_hour_usd = P / gib / 2`. A 4 vCPU
-/ 16 GiB instance at `P` therefore gives `P/8` and `P/32`, so a pod that fills
-the node costs `4 × P/8 + 16 × P/32 = P`, the instance's own price, and a pod
-asking for half the node costs half of it. Use the price the account actually
-pays — on-demand or spot — and the same basis for every run compared.
+Use one pricing rule across compared runs. Split the instance's hourly price `P`
+equally between CPU and memory: `vcpu_hour_usd = P / vcpu / 2` and
+`gib_hour_usd = P / gib / 2`. For a 4-vCPU, 16-GiB instance, the rates are `P/8`
+and `P/32`. A pod requesting the whole node costs `P` per hour; one requesting
+half of each resource costs `P/2`. Use the account's actual price basis, on-demand
+or spot, consistently across runs.

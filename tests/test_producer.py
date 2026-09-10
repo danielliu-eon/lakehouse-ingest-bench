@@ -122,10 +122,7 @@ def test_run_writes_publish_log_and_fails_on_delivery_error(tmp_path: Path, corp
     assert [r.scheduled_ms for r in records] == [args.epoch_ms + o for o in (0, 500, 1000, 1500)]
     assert all(r.first_ack_ms >= r.scheduled_ms and r.last_ack_ms >= r.first_ack_ms and r.errors == 0 for r in records)
     assert sum(r.rows for r in records) == len(fp.sent)
-    # `user_id`'s vocabulary is the single prefix "u", and a categorical label is the
-    # bare vocabulary entry for the ranks it covers, so rank 0 is "u" and every other
-    # rank is "u-<n>". Rank 0 is the modal value under the column's Zipf draw, which
-    # is why the suffixed form alone does not cover a batch.
+    # Rank 0 uses the bare vocabulary entry "u"; other ranks use "u-<n>".
     keys_sent = [key for _, _, key in fp.sent]
     assert all(key is not None and key.startswith(b"u") for key in keys_sent)
     assert sum(1 for key in keys_sent if key is not None and key.startswith(b"u-")) > len(keys_sent) // 2
@@ -168,11 +165,6 @@ def test_key_column_must_have_a_sidecar(tmp_path: Path, corpus_uri: str) -> None
 
 
 def test_the_confluent_header_precedes_every_value_and_is_counted(tmp_path: Path, corpus_uri: str) -> None:
-    """The corpus's bytes, unchanged, behind five bytes that name the schema.
-
-    Nothing is re-encoded: a frame is already one value's Avro binary, so the
-    header is a prefix and the row's bytes are what the broker was sent.
-    """
     clock = FakeClock(1_700_000_000_000)
     header = b"\x00\x00\x00\x00\x07"
     args = produce.ProduceArgs(
@@ -378,12 +370,6 @@ def test_kafka_props_apply_over_the_producer_defaults(tmp_path: Path, corpus_uri
 
 
 def test_the_offer_is_compressed_with_the_codec_the_run_asked_for(tmp_path: Path, corpus_uri: str) -> None:
-    """The run's codec is what librdkafka is configured with, whatever it is.
-
-    A consumer that cannot decode the codec reads nothing, so the offer is
-    framed with the one the run states rather than with a constant the spec
-    cannot reach.
-    """
     assert produce.default_producer_config("fake:9092", "lz4")["compression.type"] == "lz4"
     assert produce.default_producer_config("fake:9092", "none")["compression.type"] == "none"
 
@@ -418,7 +404,6 @@ def test_the_offer_is_compressed_with_the_codec_the_run_asked_for(tmp_path: Path
 def test_the_cli_takes_the_codec_and_refuses_one_no_client_has(
     tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--compression` carries the spec's codec, and `zstd` is the unstated one."""
     seen: list[produce.ProduceArgs] = []
 
     def capture(
@@ -454,12 +439,8 @@ def test_the_cli_takes_the_codec_and_refuses_one_no_client_has(
 
 
 def test_a_kafka_prop_may_not_choose_the_wire_codec(tmp_path: Path, corpus_uri: str) -> None:
-    """The second gate: a client property naming the codec stops the offer.
-
-    Client properties are applied over the producer's configuration, so this one
-    would frame the wire with a codec the run's published facts do not name. It
-    reaches the producer from a site or from a command line, and either way the
-    offer does not start.
+    """Client properties override producer configuration, so accepting compression
+    here could contradict the published spec.
     """
     clock = FakeClock(1_700_000_000_000)
     args = produce.ProduceArgs(
@@ -498,8 +479,7 @@ def test_the_cli_resolves_a_kafka_prop_reference(
         seen.append(args)
         return 0
 
-    # The CLI reaches the loop through its own module attribute, so this is the
-    # function it will call.
+    # Patch the module attribute used by the CLI.
     monkeypatch.setattr(producer_cli, "run", capture)
     assert (
         producer_cli.main(
@@ -547,7 +527,6 @@ def test_the_cli_resolves_a_kafka_prop_reference(
 def test_the_region_pseudo_key_never_reaches_the_producer(
     tmp_path: Path, corpus_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A driver may pass `aws.region` as a `--kafka-prop`, and librdkafka would refuse it."""
 
     def signed(region: str) -> tuple[str, int]:
         return "token", 1_700_000_000_000

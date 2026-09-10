@@ -221,9 +221,7 @@ def _run_dir(
     (scores / "keepup_samples.jsonl").write_text(
         json.dumps({"at_ms": EPOCH_MS, "offered_rows": 0, "committed_rows": 0, "backlog_rows": 0}) + "\n"
     )
-    # The scorer's own snapshot records carry no path today. One is written here
-    # anyway: the redaction must hold for whatever fields an artifact carries,
-    # not for the fields it carries at the moment the test was written.
+    # Include a new path field to check that redaction is independent of field names.
     (scores / "snapshots.jsonl").write_text(
         "\n".join(
             json.dumps(
@@ -404,8 +402,7 @@ def test_redact_props_replaces_literal_credentials_and_site_roots(tmp_path: Path
         "token": "<redacted>",
         "s3.secret-access-key": "${env:AWS_SECRET_ACCESS_KEY}",
     }
-    # Without a site the URIs survive: `facts.json` is what an engine is
-    # configured from, and a placeholder there points it at nothing.
+    # facts.json must retain usable connection URIs.
     assert redact_props(props, None)["warehouse"] == f"{BUCKET}/warehouse"
 
 
@@ -476,13 +473,6 @@ def test_run_json_redacts_the_catalog_properties(tmp_path: Path) -> None:
 
 
 def test_run_json_states_the_wire_format_the_offer_used(tmp_path: Path) -> None:
-    """Both halves of the wire are resolved in the result, not left to the copied spec.
-
-    The spec is embedded verbatim, so a run that said nothing about its framing
-    or its codec says nothing about either there — and two results compare only
-    at one of each. The framing comes from the run's own facts, which is the
-    document every reader of the run was pointed at.
-    """
     site_path = _site(tmp_path)
     default = _build(_run_dir(tmp_path / "default"), site_path)
     run = default["run"]
@@ -512,7 +502,7 @@ def test_run_json_derives_the_figures_a_result_is_read_by(tmp_path: Path) -> Non
     exactness = derived["exactness"]
     assert isinstance(exactness, dict)
     assert exactness["loss_rows"] == 0 and exactness["duplicate_rows"] == 0 and exactness["exact"] is True
-    # The violation list is evidence rather than a figure and stays in `data`.
+    # Detailed violations remain in data.
     assert "violations" not in exactness
     data = document["data"]
     assert isinstance(data, dict)
@@ -624,8 +614,7 @@ def test_run_json_names_every_optional_input_it_could_not_read(tmp_path: Path) -
     assert run["engine_versions"] is None
     derived = document["derived"]
     assert isinstance(derived, dict)
-    # Without the logs the scorer's own reading of them stands in, and the rate
-    # it would have been divided from is left unmeasured.
+    # Without publish logs, use scorer totals and leave the rate unknown.
     assert derived["producer"] == {
         "behind_ms_max": 315,
         "errors": 0,

@@ -59,15 +59,6 @@ def test_create_and_drop(tmp_path: Path, corpus: metadata.CorpusMetadata) -> Non
 def test_a_table_location_places_the_namespace_a_warehouse_cannot(
     tmp_path: Path, corpus: metadata.CorpusMetadata
 ) -> None:
-    """A catalog whose warehouse is not a storage URI needs both locations.
-
-    `--location` exists for exactly that catalog — AWS Glue's Iceberg REST
-    endpoint reads an account id in `warehouse` — and a namespace created with
-    no location is refused by some of them, so the directory the table was put
-    in is where the namespace goes. A warehouse that can carry a namespace
-    still does: it is the root every later table goes under, and one table's
-    location is not.
-    """
     unusable = {"type": "sql", "uri": f"sqlite:///{tmp_path}/catalog.db", "warehouse": "123456789012"}
     location = f"file://{tmp_path}/wh/bench/t_placed"
     table = create.create_table(
@@ -165,12 +156,6 @@ def test_ddl_only_prints_the_ddl_and_reaches_no_catalog(
 def test_table_metadata_prints_the_metadata_location(
     tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One line, so a teardown can copy the document `aws s3 cp` is pointed at.
-
-    The path is the catalog's answer rather than a guess assembled from the
-    table's location: only the catalog knows which metadata document is the
-    current one.
-    """
     props = sqlite_props(tmp_path)
     table = create.create_table(props, "bench.m", corpus, create.parse_partition("unpartitioned"), {})
     flags = [flag for key, value in props.items() for flag in ("--catalog-prop", f"{key}={value}")]
@@ -181,12 +166,8 @@ def test_table_metadata_prints_the_metadata_location(
 def test_table_metadata_reads_a_three_part_name_as_the_same_table(
     tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`catalog.namespace.table` and `namespace.table` must reach one table.
-
-    A query engine addresses a table with the catalog in front, and a client is
-    already scoped to one catalog. Handing the dotted string straight to the
-    catalog would make the leading segment part of the namespace, so the same
-    `--table` value would name two different tables across two commands.
+    """The catalog client is already scoped to a catalog, so a catalog prefix must
+    not become part of the namespace.
     """
     props = sqlite_props(tmp_path)
     table = create.create_table(props, "bench.m", corpus, create.parse_partition("unpartitioned"), {})
@@ -198,12 +179,6 @@ def test_table_metadata_reads_a_three_part_name_as_the_same_table(
 def test_table_metadata_answers_an_absent_table_with_a_code(
     tmp_path: Path, corpus: metadata.CorpusMetadata, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A table the catalog does not hold is a code, never a traceback.
-
-    A teardown has to tell a table that was never created — the normal end of a
-    run that failed early — from a catalog it could not reach. Both are non-zero
-    exits, and only a distinct code separates them.
-    """
     props = sqlite_props(tmp_path)
     # One table in the namespace, so what is missing is the table and not the
     # namespace around it.

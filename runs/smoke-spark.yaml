@@ -12,12 +12,8 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 spark:
-  # Four cores, because a smoke run that cannot absorb its own corpus reports a
-  # freshness breach rather than whether the pieces agree. Under
-  # `--master local[N]` the two counts multiply into that one number and
-  # `executor_mem_mb` is never spent — the driver's own heap holds the whole
-  # fleet — so it is carried for the cost column and `driver_mem_mb` is what
-  # the run actually gets.
+  # In local[N] mode, executors * executor_cores sets N. All work uses the driver's heap;
+  # executor_mem_mb is only used for fleet costing in this mode.
   executors: 2
   executor_cores: 2
   executor_mem_mb: 2048

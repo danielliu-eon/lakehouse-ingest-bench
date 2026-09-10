@@ -1,16 +1,14 @@
 # The corpus
 
-A corpus is the workload, frozen. It is generated once, read by every run scored
-against it, and it carries its own ground truth: the row count and the row-id
-checksum of every batch, plus the partition and column statistics the generator
-verified before publishing. Terms are defined in
+A corpus is an immutable workload reused across runs. It includes each batch's
+row count and row-id checksum, plus verified partition and column statistics.
+Terms are defined in
 [`methodology.md`](methodology.md).
 
-A corpus shape is two files: a **schema** under `workloads/schemas/` naming the
-columns, and a **preset** under `workloads/presets/` naming the stream. The
-preset is hashed in full and the hash names the corpus directory, so two shapes
-can never share one — and a change to either produces a new corpus rather than
-silently rescoring an old one.
+Two files define the workload: a **schema** under `workloads/schemas/` defines
+columns, and a **preset** under `workloads/presets/` defines the stream. The
+effective preset, including the schema, is hashed to name the corpus directory.
+Changing either produces a new corpus.
 
 ## Shipped presets
 
@@ -26,8 +24,7 @@ All five use the `events` schema, 256-byte target rows and one-second batches.
 
 ## Preset keys
 
-Every key is required — there are no defaults, so a preset states its whole
-shape and a reader of one does not have to know the loader.
+Every key is required; presets have no implicit defaults.
 
 | Key | What it sets |
 |---|---|
@@ -37,19 +34,19 @@ shape and a reader of one does not have to know the loader.
 | `partition_count` | the key space: how many distinct `partition_key` values exist |
 | `alpha` | the Zipf exponent over those keys. `0.0` is uniform; higher is more skewed |
 | `target_row_bytes` | the encoded row size the payload column is calibrated to |
-| `batch_interval_ms` | one batch's width, and so the commit cadence a reader sees |
+| `batch_interval_ms` | duration of one batch; sets the workload's time granularity |
 | `corpus_epoch` | the instant the first batch's event times start from. Needs an explicit UTC offset, since the offset is not part of the hash |
 | `kafka_key_columns` | which columns get a key sidecar. Must be string columns; `partition_key` is added if left out, because the Iceberg partition column is written from its sidecar |
 | `column_overrides` | per-column changes to the schema's declarations, keyed by column name |
 
-`--set KEY=VALUE` overrides one key on the command line, repeatable, and
-`--set column_overrides.<column>.<attribute>=VALUE` reaches one column. An
-override changes the hash, so it names a different corpus — which is why a run
-against an overridden preset is a probe and not a publishable result.
+Use repeatable `--set KEY=VALUE` flags to override preset keys, or
+`--set column_overrides.<column>.<attribute>=VALUE` for a column attribute.
+Overrides change the corpus hash. Runs using them are probes; publishable
+results must match a shipped preset.
 
 ## Shape axes
 
-The four axes a campaign varies, and what each one is for:
+A campaign can vary four workload dimensions:
 
 - **Rate** (`offered_bytes_per_s`) — the load. It sets the batch size, so it
   also sets the generator's memory needs.
@@ -61,20 +58,17 @@ The four axes a campaign varies, and what each one is for:
 - **Batch interval** (`batch_interval_ms`) — the granularity freshness is
   measured at. A batch is the unit that arrives or does not.
 
-Beyond those, a column's own `cardinality` and `alpha` shape what compresses:
-`cardinality: 0` means a fresh value per row, which denies Parquet a dictionary
-and makes that column's bytes survive compression.
+Per-column `cardinality` and `alpha` also affect compressibility.
+`cardinality: 0` generates a fresh value per row, limiting dictionary reuse.
 
 ## Schemas
 
-The two reserved columns lead every schema and are implicit: `id` (long) carries
-row identity, and `partition_key` (string) carries partition truth. Exactness is
-scored off the first and the table is partitioned on the second, so a schema may
-neither rename nor retype them.
+Every schema starts with two implicit reserved columns: `id` (long), used for
+exactness, and `partition_key` (string), used for partition statistics and table
+partitioning. Schemas cannot rename or retype them.
 
-Everything else is declared. A column declares a **kind**, which fixes its Avro
-type, and optionally a **role**, which is what the benchmark asks of it
-irrespective of its name.
+Declare all other columns with a **kind**, which determines their type, and an
+optional **role**, which identifies their purpose independently of their name.
 
 | Kind | Avro type | Iceberg type |
 |---|---|---|
@@ -94,16 +88,15 @@ irrespective of its name.
 
 Any other column is `generic`.
 
-### Declaring one
+### Declaring a column
 
 A declaration is `{"name": ..., "kind": ...}` plus any distribution key —
 `role`, `cardinality`, `alpha`, `vocabulary`, `minimum`, `maximum`, `width` —
-and everything unstated falls back to the default, so a schema says only what it
-means to bend. `workloads/schemas/events.json` is the worked example.
+with defaults for omitted attributes. See `workloads/schemas/events.json` for
+an example.
 
-The loader refuses a declaration whose value space cannot realize what it
-declares, because `corpus.json` would otherwise publish an axis the corpus then
-flattened:
+The loader rejects declarations whose value ranges cannot support the requested
+distribution:
 
 - `alpha` above zero needs a bounded cardinality, at most 1,000,000: a skewed
   rank is drawn through a materialized CDF, and an unbounded column's values
@@ -118,26 +111,18 @@ flattened:
 - The `payload` column declares no `width` — its width is the calibrated
   remainder — and any other blob declares a positive one.
 
-Generation then gates the corpus it produced, and refuses to publish one that
-missed its own declaration: the mean encoded row size within 2% of
-`target_row_bytes`, each checked column's realized cardinality within 10%, and
-an unbounded blob column's entropy at or above 7.5 bits per byte — a payload a
-codec could fold away is not the incompressibility axis it claims to be.
+Before publication, the generator requires mean encoded row size within 2% of
+`target_row_bytes`, checked column cardinalities within 10% of their targets, and
+unbounded blob entropy of at least 7.5 bits per byte.
 
-The key space is gated too, differently under skew and without it. A skewed
-corpus (`alpha` above zero) is held to its Zipf weights: the **worst** key's
-realized byte share may not deviate from the weight it was asked for by more
-than 5%. Bytes rather than rows, because what a skewed key costs an engine is
-the data it has to write for it. That comparison only means anything once there
-are enough rows behind the thinnest key to out-weigh sampling noise, so it is
-enforced only when the coldest key expects at least 10,000 rows. Under no skew
-the shares carry no information, and what is checked instead is that every key
-received some rows at all.
+For a skewed corpus (`alpha > 0`), each key's byte share must be within 5% of
+its Zipf weight. This check uses bytes to reflect write volume and applies only
+when the least frequent key expects at least 10,000 rows, limiting sampling
+noise. For a uniform corpus, the check requires every key to receive rows.
 
 **Ship the schema and the preset before publishing any result from them.**
 `validate-results.py` refuses a result whose `corpus_hash` does not match a
-shipped preset's, so a shape that lives only on one machine cannot be published
-from.
+shipped preset's. Local-only workload definitions are not publishable.
 
 ## What a corpus directory holds
 
@@ -153,10 +138,9 @@ from.
 | `column_stats.json` | the sampled per-column statistics, in the form a merge re-derives from |
 | `corpus.json` | what the corpus publishes about itself: the effective preset, the schema, the column roles, the Iceberg type of every column, the row count, the rates, the generator version |
 
-`corpus.json` is the only authority for what was built. Everything downstream —
-the producer, the table creator, the scorer, an engine on the external tier —
-takes a corpus URI and reads that document; a consumer that re-derived a figure
-from the preset could disagree with the corpus it is scoring.
+`corpus.json` is authoritative. The producer, table creator, scorer and external
+engines read it through the corpus URI. Use its recorded values rather than
+recomputing them from a preset.
 
 ## Generating
 
@@ -167,10 +151,9 @@ gen-corpus --preset events-100mbs-skew --out s3://<corpus_root> --plan   # write
 
 `--plan` prints the preset's hash, the batch count and size, the estimated rows,
 the mean row size and the estimated encoded and stored bytes without writing a
-byte. The row figures come from the same calibration the generator runs, and are
-lower bounds: a batch is filled in whole row blocks and stops on the first block
-that crosses its byte budget, so it overshoots slightly. Run it before committing
-hours to a full-scale corpus.
+byte. Row estimates use the generator's calibration and are lower bounds: batches
+contain whole row blocks and may slightly exceed their byte budget. Preview a
+large corpus before generating it.
 
 ### Memory
 
@@ -186,9 +169,8 @@ factor, not a property of the code. A batch is
 | `events-600mbs-{uniform,skew}` | 600 MB | about 6 GB |
 
 `--shard-index` / `--shard-count` split the batches across processes, which is
-how a large corpus is generated in parallel. Every shard still builds whole
-batches, so sharding buys throughput and not headroom: either 600 MB/s preset
-needs about 6 GB free per process.
+how large corpora are generated in parallel. Each shard still builds whole
+batches, so the 600 MB/s presets need about 6 GB free per process.
 
 On a cluster the same figure is a pod's memory request, and `gen-corpus.sh` takes
 it as `GEN_MEMORY` — `GEN_MEMORY=8Gi scripts/gen-corpus.sh events-600mbs-skew
@@ -223,9 +205,7 @@ Size a shard count from the figure it prints:
 shards = ceil(offered_bytes_per_s / measured_bytes_per_s * 1.5)
 ```
 
-**Measure on the machine that will offer.** One process's rate is a property of
-that machine, its broker and the encoder, so no figure recorded elsewhere sizes
-your offer. The shipped cluster specs state the shard count one node class's
-measured rate implied for their own corpus, as the starting point a probe ladder
-needs and not as a figure to reuse. Re-measure after any change to the producer
-or the encoder as well.
+**Measure on the machine that will run the producer.** Throughput depends on
+the machine, broker and encoder. Shipped shard counts are starting points for
+capacity probes; measure your own setup and repeat after producer or encoder
+changes.

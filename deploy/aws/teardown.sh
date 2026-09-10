@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Remove what `setup.sh` created, in the order that lets each deletion succeed:
-# the workloads first, then the identity they ran as, then the broker, then the
-# security group the broker's network interfaces were holding.
+# Remove shared resources in dependency order: workloads, identity, MSK,
+# then its security group. Check existence before deletion so reruns can finish
+# partial teardown.
 #
-# By default the bucket, the ECR repositories and both engine operators stay:
-# the corpus is the expensive thing to rebuild, the images are the slow thing to
-# push, and an operator is shared with whatever else runs on the cluster.
-# `--all` removes those as well, corpus included — and asks first about the
-# bucket, which is the one step that destroys measured data.
-#
-# Like `setup.sh` it never creates, deletes or reconfigures the EKS cluster, and
-# it leaves the eks-pod-identity-agent add-on installed — the add-on is free and
-# is a property of the cluster rather than of this benchmark.
-#
-# Every step describes before it deletes, so a re-run after a partial teardown
-# finishes the job instead of failing on what has already gone.
+# Keep S3, ECR, and both operators unless --all is set. Bucket deletion
+# requires confirmation because it removes corpus data and measured results.
+# Leave the EKS cluster and Pod Identity agent installed.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,8 +57,8 @@ CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME must name the EKS cluster setup.sh wa
 KUBE_CONTEXT="${KUBE_CONTEXT:-$CLUSTER_NAME}"
 MSK_NAME="${MSK_NAME:-lakehouse-ingest-bench}"
 NAMESPACE="${NAMESPACE:-ingest-bench}"
-# How long to wait for a deleted MSK cluster to disappear. The security group
-# cannot go until it has, so giving up here leaves the group for the next run.
+# Wait for MSK deletion before removing its security group; a timeout leaves
+# the group for the next teardown attempt.
 MSK_DELETED_WAIT_S="${MSK_DELETED_WAIT_S:-1800}"
 
 TAG_KEY=lakehouse-ingest-bench
@@ -92,10 +83,8 @@ if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"
 fi
 BUCKET="${BUCKET:-lakehouse-ingest-bench-$ACCOUNT}"
 
-# Everything in the cluster — the namespace, the associations, the operator — is
-# gone with the cluster, so its absence is a reason to skip those steps rather
-# than an error. Asked once, so that a later failure is a real failure and not
-# an unreachable cluster read as an empty answer.
+# Skip Kubernetes cleanup if the cluster is gone. Check once so later errors
+# are not mistaken for absent resources.
 if aws eks describe-cluster --name "$CLUSTER_NAME" >/dev/null 2>&1; then
 	CLUSTER_PRESENT=1
 	if ! kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$KUBE_CONTEXT"; then
@@ -111,9 +100,7 @@ fi
 # The workloads
 # ---------------------------------------------------------------------------
 
-# First, and waited on: the namespace holds every engine of a run and the
-# harness Jobs, and a pod still running would keep speaking to MSK and to the
-# role while the rest of this deletes them.
+# Delete the namespace first and wait until no pods can use MSK or the IAM role.
 if ((CLUSTER_PRESENT == 1)); then
 	if kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1; then
 		log "deleting namespace $NAMESPACE and everything in it"
@@ -146,8 +133,7 @@ if ((CLUSTER_PRESENT == 1)); then
 fi
 
 if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-	# The inline policy goes first: IAM refuses to delete a role that still
-	# carries one.
+	# IAM requires inline policies to be deleted before their role.
 	if aws iam get-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME" >/dev/null 2>&1; then
 		log "deleting inline policy $POLICY_NAME from $ROLE_NAME"
 		aws iam delete-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME"
@@ -170,8 +156,7 @@ if [[ -n $MSK_ARN && $MSK_ARN != None ]]; then
 		log "deleting MSK cluster $MSK_NAME"
 		aws kafka delete-cluster --cluster-arn "$MSK_ARN" >/dev/null
 	fi
-	# Waited on because the brokers' network interfaces hold the security group,
-	# and DeleteSecurityGroup fails with DependencyViolation until they are gone.
+	# Wait for broker network interfaces to release the security group.
 	log "waiting for $MSK_NAME to disappear (several minutes)"
 	waited=0
 	while aws kafka describe-cluster --cluster-arn "$MSK_ARN" >/dev/null 2>&1; do
@@ -189,8 +174,7 @@ else
 fi
 
 MSK_SG_NAME="$MSK_NAME-msk"
-# Matched on the tag as well as the name, so a group of the same name that this
-# benchmark did not create is not the one deleted.
+# Require the ownership tag as well as the name before deleting the group.
 MSK_SG_ID="$(aws ec2 describe-security-groups \
 	--filters "Name=group-name,Values=$MSK_SG_NAME" "Name=tag:$TAG_KEY,Values=true" \
 	--query 'SecurityGroups[0].GroupId' --output text)"
@@ -253,9 +237,7 @@ fi
 # The bucket, last and asked about
 # ---------------------------------------------------------------------------
 
-# Whether the bucket carries the tag `setup.sh` puts on everything it creates.
-# A bucket with no tag set at all answers with an API error rather than an empty
-# tag list, and both mean the same thing here.
+# Treat both a missing tag set and an empty tag list as unowned.
 bucket_is_ours() {
 	local tags
 	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
@@ -263,11 +245,8 @@ bucket_is_ours() {
 	[[ $tags == true ]]
 }
 
-# The corpus, every run's artifacts and the warehouse. Matched on the tag the
-# way the security group above is, so a bucket of this name that this benchmark
-# did not create is not the one emptied — `BUCKET` defaults to a name derived
-# from the account id, which an operator may well have used for something else.
-# And asked about, because describing a deletion is not the same as asking.
+# Require the benchmark tag before deleting corpus, run artifacts, and
+# warehouse data. A matching bucket name alone does not establish ownership.
 remove_bucket() {
 	if ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 		log "s3://$BUCKET is already gone"
@@ -298,7 +277,5 @@ remove_bucket() {
 	fi
 }
 
-# Last of the three, because it is the one that destroys measured data: a
-# refusal here leaves the images and the operators already gone rather than
-# leaving a teardown to be run again.
+# Delete the bucket last; declining leaves ECR and operators already removed.
 remove_bucket

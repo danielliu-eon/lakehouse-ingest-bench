@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Every drift `verify-flink` can report, against recorded JobManager answers.
-
-Staging's RUNNING wait says the operator started something. What it cannot say
-is that what it started is the run the spec asked for: Flink drops a setting it
-does not know, a connector ignores a hint it does not implement, and a vertex is
-sized by whatever configuration reached it — each of them silently. So these
-readings are what stands between a published figure and one attributed to knobs
-the engine never honoured, and each is exercised here against the documents the
-REST endpoint answers rather than against a cluster.
-"""
+"""Check Flink configuration drift against recorded JobManager responses."""
 
 from __future__ import annotations
 
@@ -61,11 +52,8 @@ def _answers(
     vertices: list[dict[str, object]] | None = None,
     others: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """The four documents a jobmanager answers, with one reading changed.
-
-    Shaped after a live 1.20.1 endpoint: the keys read here are the keys it
-    holds, and the ones it holds beside them are carried so that a reader
-    which started matching on position rather than on name would fail.
+    """Build recorded endpoint responses with one reading changed. Preserve unrelated
+    fields to catch parsing by position instead of by name.
     """
     graph = (
         vertices
@@ -124,12 +112,6 @@ def test_an_engine_that_honours_the_spec_reports_nothing() -> None:
 
 
 def test_the_registry_finds_this_module_beside_the_knobs() -> None:
-    """A managed engine registers one module, and its siblings are found by it.
-
-    So a driver that has a spec's engine name can reach this check without the
-    name of the module holding it, and an engine that ships none is a refusal
-    naming the engine rather than an import error from inside the harness.
-    """
     assert engines.verify_for("flink") is verify_module
     with pytest.raises(ValueError, match="unicorn"):
         engines.verify_for("unicorn")
@@ -161,36 +143,17 @@ def test_the_registry_finds_this_module_beside_the_knobs() -> None:
     ],
 )
 def test_one_setting_the_engine_dropped_is_one_line(answers: dict[str, object], expected: str) -> None:
-    """One reading at a time, so a line names the setting it is about.
-
-    A report is read to decide whether to rerun the staging or to fix the
-    spec, and a line that lumped two readings together would answer neither
-    question. A job that is not RUNNING is the exception and reports only
-    itself: the vertices of a failed job carry the parallelism it had, which
-    says nothing about the run being staged.
-    """
     assert verify(_spec(), RUN_ID, _fetch(answers)) == [expected]
 
 
 def test_a_restarted_job_is_read_off_its_live_attempt() -> None:
-    """An attempt the cluster gave up on keeps the run's name.
-
-    `/jobs/overview` holds the jobs the jobmanager has archived as well as the
-    one it is running, so a name is not unique across a restart — and reading
-    the first match would report the state of an attempt that has been
-    superseded.
-    """
+    """Job overview includes archived attempts with the same name. Select the live one."""
     earlier = {"jid": "0" * 32, "name": RUN_ID, "state": "FAILED", "start-time": 1, "end-time": 2}
     assert verify(_spec(), RUN_ID, _fetch(_answers(others=[earlier]))) == []
 
 
 def test_an_override_the_job_was_submitted_with_is_not_drift() -> None:
-    """`extra_flink_conf` is applied last, so it is what the engine was told.
-
-    Comparing against the knob it displaced would report drift on a run whose
-    author chose the override, which is the one case where the knob is not the
-    effective setting.
-    """
+    """extra_flink_conf overrides knobs and defines the effective value to verify."""
     spec = _spec()
     overridden = replace(
         spec,
@@ -201,12 +164,7 @@ def test_an_override_the_job_was_submitted_with_is_not_drift() -> None:
 
 
 def test_exactly_once_is_not_something_a_spec_can_override() -> None:
-    """The mode is the promise duplication is scored against, not a knob.
-
-    A run that relaxed it would be scored against a weaker claim than every
-    other run, so the reading is against the constant rather than against the
-    configuration the job carried.
-    """
+    """Exactly-once mode is part of the benchmark contract, not an overridable knob."""
     spec = _spec()
     relaxed = replace(
         spec,
@@ -222,12 +180,7 @@ def test_exactly_once_is_not_something_a_spec_can_override() -> None:
     [("10s", 10_000), ("2 s", 2_000), ("500ms", 500), ("1m", 60_000), ("2h", 7_200_000), ("250", 250)],
 )
 def test_a_duration_knob_is_read_the_way_flink_reads_it(written: str, milliseconds: int) -> None:
-    """Flink's own grammar: an integer, optional space, and a unit label.
-
-    A label-less number is milliseconds there, so it has to be here too — the
-    endpoint answers milliseconds, and reading `250` as seconds would compare
-    two numbers three orders of magnitude apart.
-    """
+    """Flink interprets a unitless duration as milliseconds."""
     assert duration_ms(written, "spec.flink.checkpoint_interval") == milliseconds
 
 
@@ -238,12 +191,6 @@ def test_a_duration_this_cannot_read_is_refused_by_name(written: str) -> None:
 
 
 def test_an_answer_that_is_not_the_document_it_should_be_names_the_endpoint() -> None:
-    """A shape the endpoint did not answer is unreadable, never a clean verdict.
-
-    Returning an empty list for a document with no `vertices` in it would read
-    as a verified run, which is the one answer a reader must not be given
-    without having looked.
-    """
     answers = _answers()
     answers[f"/jobs/{JID}"] = {"jid": JID, "name": RUN_ID, "state": "RUNNING"}
     with pytest.raises(ValueError, match=f"/jobs/{JID} answered no 'vertices'"):
@@ -260,13 +207,7 @@ def _reader(answers: dict[str, object]) -> Callable[[str], Callable[[str], objec
 def test_the_console_script_separates_drift_from_not_having_looked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Three exits, because staging does three different things with them.
-
-    A verified run carries on, a drifted one is refused with the lines
-    printed, and an endpoint that could not be read is retried — so a single
-    non-zero status would make staging either retry a real drift forever or
-    refuse a run over a tunnel that was not up yet.
-    """
+    """Staging continues on success, rejects drift and retries unreadable endpoints."""
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(SPEC_FILE.read_text())
     arguments = ["--spec", str(spec_path), "--run-id", RUN_ID, "--rest", "http://localhost:18081/"]

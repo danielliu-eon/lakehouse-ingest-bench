@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Everything on an AWS account that a run needs and no run creates for itself:
-# a bucket, three ECR repositories, an MSK cluster with its security group, one
-# IAM role reached through EKS Pod Identity, and the namespace and
-# ServiceAccounts the harness Jobs and both engines' runs live under.
-#
-# Every step describes before it creates, so a re-run converges rather than
-# failing on what is already there — which is what makes this safe to run
-# again after a timeout, a revoked token or a half-finished first attempt.
-#
-# It never creates, deletes or reconfigures the EKS cluster. That is the
-# operator's; deploy/aws/eksctl-cluster.example.yaml makes a minimal one.
+# Provision shared AWS resources: S3, ECR, MSK, IAM, and Kubernetes identities.
+# Check existing resources before creation so interrupted setup can be rerun.
+# The EKS cluster is managed separately; see eksctl-cluster.example.yaml.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,8 +46,7 @@ done
 # Parameters
 # ---------------------------------------------------------------------------
 
-# Exported so that every `aws` call below reads the region from the environment
-# rather than from a flag each one would have to carry.
+# Export the region once for all AWS CLI calls.
 export AWS_REGION="${AWS_REGION:?AWS_REGION must name the region the EKS cluster is in}"
 CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME must name an existing EKS cluster}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-$CLUSTER_NAME}"
@@ -63,58 +54,43 @@ MSK_NAME="${MSK_NAME:-lakehouse-ingest-bench}"
 NAMESPACE="${NAMESPACE:-ingest-bench}"
 MSK_BROKER_TYPE="${MSK_BROKER_TYPE:-kafka.m5.large}"
 MSK_BROKERS="${MSK_BROKERS:-2}"
-# Whether the namespace also gets a schema registry, which only a run offered
-# in the Confluent wire format needs. Off by default: it is another Deployment
-# to keep alive, and a site that brings its own registry names that one in
-# site.yaml instead.
+# Create an optional registry for Confluent runs. External registries are
+# configured in site.yaml instead.
 WITH_SCHEMA_REGISTRY="${WITH_SCHEMA_REGISTRY:-false}"
-# Where the registry Deployment is placed, for a cluster whose nodes are
-# tainted or labelled. The same two values site.kubernetes carries for the
-# harness Jobs, as the one-line JSON a manifest takes.
+# Registry placement as one-line JSON, matching site.kubernetes conventions.
 NODE_SELECTOR="${NODE_SELECTOR:-}"
 TOLERATIONS="${TOLERATIONS:-[]}"
-# An empty selector is `{}`, which cannot be written as a `${VAR:-...}` default
-# without escaping the brace that would close the expansion.
+# Escape the brace in the empty-object default so it does not close ${...}.
 if [[ -z $NODE_SELECTOR ]]; then
 	NODE_SELECTOR='{}'
 fi
-# A cluster that has not reached ACTIVE in this long is reported rather than
-# waited on forever; the script is idempotent, so re-running it resumes the
-# wait without recreating anything.
+# Bound the MSK wait; rerunning setup resumes it without recreating the cluster.
 MSK_ACTIVE_WAIT_S="${MSK_ACTIVE_WAIT_S:-3600}"
 
-# The tag every resource created here carries, so `teardown.sh` and a cost
-# report can both find them by one key.
+# Shared resource tag for ownership checks and cost reporting.
 TAG_KEY=lakehouse-ingest-bench
 
-# Per broker. An offer of a few hundred GB has to sit on the brokers for as long
-# as the engine is behind, so the default holds a smoke corpus and an hour run
-# needs raising — which is why this is a parameter rather than a constant.
+# Storage per broker. Larger offers need room for records the engine has
+# not yet consumed.
 MSK_VOLUME_GIB="${MSK_VOLUME_GIB:-100}"
-# MSK's IAM listener. IAM decides who may connect; the security group only
-# scopes the network.
+# MSK IAM listener; IAM authorizes clients and the security group scopes access.
 MSK_IAM_PORT=9098
 
-# Pinned rather than tracked: the operator's CRD version and the FlinkDeployment
-# fields the harness renders have to agree, and `latest` would move under a run.
-# 1.15's CRD still lists `flinkVersion: v1_20`, which is what the engine renders.
+# Pin a CRD version compatible with the rendered FlinkDeployment fields.
+# Operator 1.15 supports the engine's v1_20 label.
 FLINK_OPERATOR_VERSION="${FLINK_OPERATOR_VERSION:-1.15.0}"
 FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
 FLINK_OPERATOR_NAMESPACE=flink-operator
 
-# Pinned for the same reason as the Flink operator's: the CRD version and the
-# SparkApplication fields the harness renders have to agree, and `latest` would
-# move under a run. 2.5.2 is the newest release on the chart repository's index,
-# and `spark.jobNamespaces` is the values key it watches namespaces by.
+# Pin a CRD version compatible with the rendered SparkApplication fields.
+# spark.jobNamespaces controls which namespaces the operator watches.
 SPARK_OPERATOR_VERSION="${SPARK_OPERATOR_VERSION:-2.5.2}"
 SPARK_OPERATOR_RELEASE=spark-operator
 SPARK_OPERATOR_NAMESPACE=spark-operator
 SPARK_OPERATOR_REPO=https://kubeflow.github.io/spark-operator
 
 ROLE_NAME=lakehouse-ingest-bench-harness
-# One inline policy on the role rather than a managed one: it names this
-# account's bucket and this cluster's MSK ARN, so it is not reusable anyway and
-# an inline policy is deleted with the role.
+# Use an inline policy scoped to this bucket and MSK cluster.
 POLICY_NAME=lakehouse-ingest-bench-harness
 HARNESS_SERVICE_ACCOUNT=ingest-bench-harness
 FLINK_SERVICE_ACCOUNT=ingest-bench-flink
@@ -124,8 +100,7 @@ ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink la
 
 [[ $MSK_BROKERS =~ ^[1-9][0-9]*$ ]] || die "MSK_BROKERS must be a positive integer, got '$MSK_BROKERS'"
 [[ $MSK_VOLUME_GIB =~ ^[1-9][0-9]*$ ]] || die "MSK_VOLUME_GIB must be a positive integer, got '$MSK_VOLUME_GIB'"
-# Asked here as well as in `write_site`, because the write is the last thing
-# this script does and the wait before it is routinely half an hour long.
+# Reject an existing output path before the potentially long MSK wait.
 [[ -z $WRITE_SITE || ! -e $WRITE_SITE ]] ||
 	die "$WRITE_SITE already exists, and --write-site never overwrites a site config; name another path or move that file"
 
@@ -134,8 +109,7 @@ ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink la
 # ---------------------------------------------------------------------------
 
 require_host_tools aws kubectl helm jq envsubst
-# Only for --write-site, which parses the file back before it offers it as one
-# a driver can read — and `yq` is what every driver reads a site with.
+# Only --write-site needs yq to validate the generated configuration.
 [[ -z $WRITE_SITE ]] || require_host_tools yq
 
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"; then
@@ -143,9 +117,7 @@ if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>&1)"
 fi
 log "account $ACCOUNT, region $AWS_REGION"
 
-# S3 bucket names are global, so a default has to carry something unique to the
-# operator; the account id is, and it already appears in every ARN the role
-# below carries.
+# Include the account ID to reduce collisions in S3's global bucket namespace.
 BUCKET="${BUCKET:-lakehouse-ingest-bench-$ACCOUNT}"
 log "bucket s3://$BUCKET"
 
@@ -166,12 +138,8 @@ if ! NODES_JSON="$(kubectl --context "$KUBE_CONTEXT" get nodes -o json 2>&1)"; t
      Your principal needs an EKS access entry (or an aws-auth mapping) on the cluster."
 fi
 ARCHITECTURES="$(jq -r '[.items[].status.nodeInfo.architecture] | unique | join(" ")' <<<"$NODES_JSON")"
-# PyFlink publishes no aarch64 wheel, so the Flink image is amd64 whatever
-# platform is asked of it, and a cluster of arm64 nodes has nowhere to place a
-# TaskManager. Said rather than refused, because that image is the only one
-# pinned to an architecture: the harness and the Spark image are built for
-# whichever platform `push-images.sh` is given, so a Spark-only campaign on an
-# arm64 cluster is one this account can serve.
+# Warn if Flink's required amd64 nodes are absent. Spark-only campaigns can
+# use an arm64 cluster with matching harness and Spark images.
 grep -qw amd64 <<<"$ARCHITECTURES" ||
 	log "warning: no node in $CLUSTER_NAME reports architecture amd64 (found: ${ARCHITECTURES:-none}); the Flink image is amd64-only, so no Flink run will be placed here. A Spark-only campaign may proceed.
      Add an amd64 node group — deploy/aws/eksctl-cluster.example.yaml has one."
@@ -183,33 +151,24 @@ else
 	log "installing the eks-pod-identity-agent add-on"
 	aws eks create-addon --cluster-name "$CLUSTER_NAME" --addon-name eks-pod-identity-agent >/dev/null
 fi
-# Waited on either way: an add-on found in CREATING or DEGRADED hands out no
-# credentials, and a pod that starts before it does gets none.
+# Wait even for an existing add-on: pods need it ACTIVE to receive credentials.
 aws eks wait addon-active --cluster-name "$CLUSTER_NAME" --addon-name eks-pod-identity-agent
 
 if kubectl --context "$KUBE_CONTEXT" get crd flinkdeployments.flink.apache.org >/dev/null 2>&1; then
 	log "the flinkdeployments CRD is present"
 else
 	log "installing the Flink Kubernetes Operator $FLINK_OPERATOR_VERSION"
-	# archive.apache.org, not downloads.apache.org: the download mirror serves
-	# only the current releases, so the moment a pinned version stops being one
-	# its chart 404s. The archive keeps every release, current ones included.
+	# Use the archive so pinned charts remain available after newer releases.
 	helm repo add flink-operator-repo \
 		"https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/" --force-update
-	# webhook.create=false: the chart's validating webhook needs cert-manager,
-	# which is a second operator to install and keep alive for validation the
-	# harness does not depend on.
+	# Disable the validating webhook to avoid requiring cert-manager.
 	helm --kube-context "$KUBE_CONTEXT" install "$FLINK_OPERATOR_RELEASE" \
 		flink-operator-repo/flink-kubernetes-operator \
 		--namespace "$FLINK_OPERATOR_NAMESPACE" --create-namespace \
 		--set webhook.create=false --wait
 fi
-# Recorded in the log because a run's engine behaviour belongs to the operator's
-# version, and a cluster that had the CRD already may be running any of them.
-#
-# Read into a variable before it is parsed rather than piped straight into one:
-# under `pipefail` a failing `helm` inside a command substitution aborts the
-# script at the assignment, so any refusal written after it never runs.
+# Record the installed chart version, including preexisting installations.
+# Capture helm errors before parsing so pipefail cannot bypass diagnostics.
 if ! OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
 	--filter "^$FLINK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
 	die "helm could not list the releases on $KUBE_CONTEXT: $OPERATOR_RELEASES"
@@ -221,9 +180,7 @@ log "flink operator: $OPERATOR_CHART"
 # S3
 # ---------------------------------------------------------------------------
 
-# Whether the bucket already carries the tag this script puts on everything it
-# creates. A bucket with no tag set at all answers with an API error rather than
-# an empty tag list, and both mean the same thing here.
+# Missing tags may be an API error or an empty list; both mean unowned here.
 bucket_is_ours() {
 	local tags
 	tags="$(aws s3api get-bucket-tagging --bucket "$1" \
@@ -231,14 +188,8 @@ bucket_is_ours() {
 	[[ $tags == true ]]
 }
 
-# The bucket, created or adopted, and then configured the way a corpus wants it.
-#
-# A bucket that already exists and does not carry the tag is refused rather than
-# adopted: the two calls below are not additive — PutBucketTagging replaces the
-# whole tag set and PutBucketVersioning suspends versioning — so adopting one
-# would silently reconfigure a bucket the operator keeps something else in.
-# `BUCKET` defaults to a name derived from the account id, which is exactly the
-# name someone may already have used.
+# Only configure existing buckets carrying the benchmark tag. Tag replacement
+# and versioning changes could otherwise alter an unrelated bucket.
 create_bucket() {
 	if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
 		bucket_is_ours "$BUCKET" ||
@@ -248,8 +199,7 @@ create_bucket() {
 		log "s3://$BUCKET exists"
 	else
 		log "creating s3://$BUCKET"
-		# us-east-1 is the one region whose CreateBucket refuses a location
-		# constraint naming it.
+		# CreateBucket in us-east-1 rejects an explicit LocationConstraint.
 		if [[ $AWS_REGION == us-east-1 ]]; then
 			aws s3api create-bucket --bucket "$BUCKET" >/dev/null
 		else
@@ -261,10 +211,7 @@ create_bucket() {
 		--public-access-block-configuration \
 		BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 	aws s3api put-bucket-tagging --bucket "$BUCKET" --tagging "TagSet=[{Key=$TAG_KEY,Value=true}]"
-	# Only when it is actually on. A corpus is regenerated rather than restored,
-	# so versions buy nothing and every deleted object of a hundred-gigabyte
-	# corpus would keep being billed; a bucket that never had versioning needs
-	# no call at all, and PutBucketVersioning is the only way to turn one off.
+	# Suspend enabled versioning to avoid retaining billable deleted corpus data.
 	if [[ "$(aws s3api get-bucket-versioning --bucket "$BUCKET" --query 'Status' --output text)" == Enabled ]]; then
 		log "suspending versioning on s3://$BUCKET"
 		aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Suspended
@@ -292,11 +239,8 @@ done
 # MSK
 # ---------------------------------------------------------------------------
 
-# The brokers go in the cluster's own private subnets, so the pods reach them
-# over the VPC and nothing about the lane is public. One subnet per availability
-# zone, in zone order: MSK takes one subnet per zone and requires the broker
-# count to be a multiple of the zone count, which holds because this asks for
-# exactly as many zones as brokers.
+# Place brokers in private EKS subnets, one per availability zone. Select
+# as many zones as brokers to satisfy MSK's broker/zone count constraint.
 SUBNET_IDS="$(jq -r '.cluster.resourcesVpcConfig.subnetIds | join(" ")' <<<"$CLUSTER_JSON")"
 # shellcheck disable=SC2086  # a deliberate expansion: one --subnet-ids argument per id
 SUBNETS_JSON="$(aws ec2 describe-subnets --subnet-ids $SUBNET_IDS --output json)"
@@ -334,11 +278,8 @@ if [[ -z $MSK_SG_ID || $MSK_SG_ID == None ]]; then
 fi
 log "msk security group $MSK_SG_ID"
 
-# Every CIDR the VPC has, not only its primary: EKS clusters commonly carry a
-# secondary range for pods. The rule is written against the CIDR rather than
-# against the cluster's own security group because a CIDR reaches managed nodes,
-# self-managed nodes and autoscaler-provisioned nodes alike, and a rule naming
-# one security group reaches only the nodes that happen to carry it.
+# Allow all VPC CIDRs, including secondary pod ranges. CIDR rules cover
+# managed, self-managed, and autoscaled nodes regardless of security group.
 VPC_CIDRS="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" \
 	--query 'Vpcs[0].CidrBlockAssociationSet[?CidrBlockState.State==`associated`].CidrBlock' --output text)"
 [[ -n $VPC_CIDRS ]] || die "$VPC_ID reports no associated CIDR block; nothing to open $MSK_IAM_PORT to"
@@ -355,26 +296,17 @@ for cidr in $VPC_CIDRS; do
 	fi
 done
 
-# The brokers' volumes raised to MSK_VOLUME_GIB, and left alone at or above it.
-#
-# A broker volume can be grown and never shrunk, so those are the only two
-# answers. Growing it is what lets a campaign move from a smoke corpus to an
-# hour run without recreating the cluster: an hour's offer sits on the brokers
-# for as long as the engine is behind, and a volume that fills stops the offer
-# rather than the engine — which is the run's own rate, measured against a
-# broker that ran out of room.
+# Grow broker storage to MSK_VOLUME_GIB when needed; MSK cannot shrink it.
+# Enough storage prevents broker capacity from limiting the offered rate.
 grow_broker_volume() {
 	local reported state version current update_error
-	# One read for all three: the size says whether to grow, the state says
-	# whether now is the time, and the version is what an update has to carry.
+	# Read size, state, and update version from one response.
 	reported="$(aws kafka describe-cluster --cluster-arn "$MSK_ARN" \
 		--query 'ClusterInfo.[State,CurrentVersion,BrokerNodeGroupInfo.StorageInfo.EbsStorageInfo.VolumeSize]' \
 		--output text)" ||
 		die "could not read $MSK_NAME's broker storage; try: aws kafka describe-cluster --cluster-arn $MSK_ARN"
 	IFS=$'\t' read -r state version current <<<"$reported"
-	# `--output text` prints `None` for a field the API left out, which an
-	# arithmetic comparison would read as zero and then grow a cluster whose
-	# shape nobody knows.
+	# Reject missing numeric fields instead of interpreting AWS CLI's None as zero.
 	if [[ -z $current || $current == None ]]; then
 		die "$MSK_NAME reports no broker volume size, so this cannot tell whether it holds ${MSK_VOLUME_GIB} GiB"
 	fi
@@ -382,28 +314,19 @@ grow_broker_volume() {
 		log "msk broker volumes are ${current} GiB, at or above the ${MSK_VOLUME_GIB} GiB asked for"
 		return 0
 	fi
-	# A cluster still applying an earlier update keeps reporting the old size
-	# while it does, so the size alone would ask for the same growth a second
-	# time and MSK would refuse it. The state is what tells those two apart.
+	# An in-progress update may still report the old size; do not request it twice.
 	if [[ $state != ACTIVE ]]; then
 		log "msk broker volumes are ${current} GiB and $MSK_NAME is $state, so the growth to ${MSK_VOLUME_GIB} GiB is left to the update already running"
 		return 0
 	fi
 	log "growing the msk broker volumes from ${current} to ${MSK_VOLUME_GIB} GiB"
-	# The version MSK reports rather than a guess: an update carrying the wrong
-	# one is refused. The cluster leaves ACTIVE while it applies this, and
-	# everything below that needs the cluster waits on ACTIVE anyway — so this
-	# only has to be requested, and the wait at the end of the script covers it.
+	# Use the reported version for the update. The final ACTIVE wait covers it.
 	if update_error="$(aws kafka update-broker-storage --cluster-arn "$MSK_ARN" --current-version "$version" \
 		--target-broker-ebs-volume-info "KafkaBrokerNodeId=All,VolumeSizeGB=$MSK_VOLUME_GIB" 2>&1)"; then
 		return 0
 	fi
 	case "$update_error" in
-	# MSK holds a cooldown between storage updates, and refuses one on a
-	# cluster that left ACTIVE between the read above and this call. Both mean
-	# "not now" rather than "not ever", and neither changes what the volume
-	# already is — so a re-run of this script converges instead of failing on
-	# the growth a previous run asked for, which is what the header promises.
+	# Cooldowns and concurrent updates are retryable on a later setup invocation.
 	*ACTIVE* | *UPDATING* | *ooldown* | *"6 hour"* | *"6-hour"*)
 		log "$MSK_NAME will not take the growth to ${MSK_VOLUME_GIB} GiB yet: $update_error"
 		;;
@@ -413,8 +336,7 @@ grow_broker_volume() {
 	esac
 }
 
-# `list-clusters --cluster-name-filter` matches on a prefix, so the exact name
-# is asserted in the query as well; a longer-named cluster is not this one.
+# The API name filter is a prefix match; also require the exact cluster name.
 MSK_ARN="$(aws kafka list-clusters --cluster-name-filter "$MSK_NAME" \
 	--query "ClusterInfoList[?ClusterName=='$MSK_NAME'].ClusterArn | [0]" --output text)"
 if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
@@ -423,15 +345,9 @@ if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
 			--query "KafkaVersions[?Status=='ACTIVE'].Version" --output text 2>&1)"; then
 			die "aws kafka list-kafka-versions failed: $KAFKA_VERSIONS — set MSK_KAFKA_VERSION to choose one yourself"
 		fi
-		# The newest plain 3.x, where MSK spells a line's latest patch either as
-		# a number or as a trailing `x` (3.7.x); a `.tiered` variant is a
-		# different storage mode and is not what an unset knob should pick. `x`
-		# must sort after every numeric patch of the same minor, which a plain
-		# numeric field sort cannot express, so the patch is mapped to a
-		# sentinel column for ordering and the real version recovered from the
-		# tab afterward.
-		# `|| true` because no match is a refusal with a fix on the next line, and
-		# under `pipefail` grep's exit 1 would otherwise abort before it is read.
+		# Choose the newest plain ACTIVE 3.x release, excluding tiered variants.
+		# Sort a trailing x after numeric patches using a temporary sentinel.
+		# Allow no-match through pipefail so the next check can explain the failure.
 		MSK_KAFKA_VERSION="$(tr '\t' '\n' <<<"$KAFKA_VERSIONS" |
 			grep -E '^3\.[0-9]+\.([0-9]+|x)$' |
 			while IFS=. read -r major minor patch; do
@@ -455,8 +371,7 @@ if [[ -z $MSK_ARN || $MSK_ARN == None ]]; then
 			StorageInfo: {EbsStorageInfo: {VolumeSize: $volume}}
 		}')"
 	log "creating MSK cluster $MSK_NAME ($MSK_BROKERS x $MSK_BROKER_TYPE, ${MSK_VOLUME_GIB} GiB each)"
-	# IAM only: no SCRAM secret to store, rotate or leak into a rendered file,
-	# and no unauthenticated listener at all.
+	# Enable IAM authentication only; disable the unauthenticated listener.
 	MSK_ARN="$(aws kafka create-cluster \
 		--cluster-name "$MSK_NAME" \
 		--kafka-version "$MSK_KAFKA_VERSION" \
@@ -472,10 +387,7 @@ else
 fi
 log "msk cluster $MSK_ARN"
 
-# The topic and group ARNs share everything with the cluster ARN but the
-# resource type, and the cluster's uuid is part of them — deriving them from the
-# cluster ARN is what keeps the policy scoped to this cluster rather than to any
-# cluster that ever carried the name.
+# Derive topic and group ARNs from the cluster ARN to retain its UUID scope.
 MSK_TOPIC_ARN="${MSK_ARN/:cluster/:topic}/*"
 MSK_GROUP_ARN="${MSK_ARN/:cluster/:group}/*"
 
@@ -483,13 +395,8 @@ MSK_GROUP_ARN="${MSK_ARN/:cluster/:group}/*"
 # IAM
 # ---------------------------------------------------------------------------
 
-# Rendered while MSK provisions, which takes tens of minutes: the ARNs the
-# policy needs are known as soon as the cluster is requested, so the wait
-# happens once at the end instead of blocking the rest of the setup.
-#
-# The documents say `${REGION}`, not `${AWS_REGION}`: that name belongs to the
-# AWS CLI's own environment contract, and a policy template should not depend
-# on it meaning what this script means by it.
+# Render IAM while MSK provisions; its ARN is already available. Use the
+# template's REGION variable separately from the AWS CLI's AWS_REGION.
 REGION="$AWS_REGION"
 export ACCOUNT REGION BUCKET MSK_ARN MSK_TOPIC_ARN MSK_GROUP_ARN
 PLACEHOLDERS='${ACCOUNT} ${REGION} ${BUCKET} ${MSK_ARN} ${MSK_TOPIC_ARN} ${MSK_GROUP_ARN}'
@@ -505,8 +412,7 @@ else
 		--assume-role-policy-document "$TRUST_POLICY" \
 		--tags "Key=$TAG_KEY,Value=true" >/dev/null
 fi
-# put-role-policy replaces, so this is the same call on a first and a repeat run
-# and the role's permissions always match the documents in this checkout.
+# Replace the inline policy so reruns apply the checked-in permissions.
 aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "$POLICY_NAME" \
 	--policy-document "$HARNESS_POLICY"
 log "iam policy $POLICY_NAME applied to $ROLE_NAME"
@@ -535,26 +441,16 @@ log "applying the namespace, all three service accounts and the engine RBAC"
 envsubst '${NAMESPACE}' <"$AWS_DIR/k8s/namespace.yaml.tmpl" |
 	kubectl --context "$KUBE_CONTEXT" apply -f -
 
-# After the namespace and not in the preflight beside the Flink operator's: the
-# chart grants its controller a Role in each namespace named by
-# `spark.jobNamespaces`, which is what makes the harness namespace eligible at
-# all, and a Role cannot be created in a namespace that does not exist yet.
+# Create the namespace first: the Spark chart installs a Role in every
+# namespace listed in spark.jobNamespaces.
 if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
 	log "the sparkapplications CRD is present"
 else
 	log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
 	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
-	# The chart's own spark identity and RBAC are off: a run's driver runs as
-	# $SPARK_SERVICE_ACCOUNT, because a Pod Identity association is made per
-	# (namespace, service account) and that name is the one bound to the role
-	# above. The chart would bind its Role to an account of its own naming
-	# instead, so the namespace manifest grants ours the same rules.
-	#
-	# The webhook is stated rather than left to the chart's default, because it
-	# is what grafts `spec.volumes` and the two `volumeMounts` onto the pods —
-	# a SparkApplication carries them and the CRD alone does not apply them. An
-	# install without it starts a driver with no /opt/bench/run, which dies
-	# opening the run's job document.
+	# Use the benchmark service account bound to Pod Identity; the namespace
+	# manifest supplies its RBAC. Enable the webhook explicitly because it adds
+	# the ConfigMap volume mounts needed at /opt/bench/run.
 	helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
 		"$SPARK_OPERATOR_RELEASE/spark-operator" \
 		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
@@ -565,8 +461,7 @@ else
 		--set webhook.enable=true \
 		--wait
 fi
-# Recorded in the log because a run's engine behaviour belongs to the operator's
-# version, and a cluster that had the CRD already may be running any of them.
+# Record the installed chart version, including preexisting installations.
 if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
 	--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
 	die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
@@ -575,10 +470,8 @@ log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"
 
 if [[ $WITH_SCHEMA_REGISTRY == true ]]; then
 	log "applying the schema registry"
-	# `sed` and not the harness's own renderer: this script needs no Python
-	# toolchain, and the markers are three. A marker the template gains and
-	# this list does not would reach the API server verbatim and be refused
-	# there, which is what the render test in tests/test_scripts.py pins.
+	# Use sed to avoid a Python dependency. Keep substitutions aligned with the
+	# template markers; tests/test_scripts.py checks coverage.
 	sed -e "s|__NAMESPACE__|$NAMESPACE|g" \
 		-e "s|__NODE_SELECTOR__|$NODE_SELECTOR|g" \
 		-e "s|__TOLERATIONS__|$TOLERATIONS|g" \
@@ -594,26 +487,16 @@ fi
 # The wait, and what to put in site.yaml
 # ---------------------------------------------------------------------------
 
-# A complete site.yaml at `$1`, from the values this script resolved: the ones
-# the printout below names, plus the identities it created, the placement the
-# harness Jobs take and the pricing block every site carries. Every key
-# site.aws.example.yaml has, so a written file and a filled-in copy of the
-# example are the same document.
-#
-# Scalars are quoted because two of them are not the type they look like: a
-# bootstrap string is a comma-separated list of host:port, and the account id
-# `catalog.props.warehouse` takes is a number a site reads as a string.
-#
-# `pricing` is the one thing here that is not a property of the account, so it
-# is written at the zeros the example carries and validate-results.py refuses.
+# Write a complete site.yaml matching site.aws.example.yaml. Quote scalars,
+# including the numeric-looking Glue warehouse account ID. Leave pricing at
+# zero for the operator to fill in before publishing results.
 write_site() {
 	local path=$1 parsed read_back=""
 	[[ ! -e $path ]] ||
 		die "$path already exists, and --write-site never overwrites a site config; name another path or move that file"
 	{
 		cat <<-SITE
-			# Written by deploy/aws/setup.sh --write-site. What every key means, and
-			# which of them are optional, is in site.aws.example.yaml.
+			# Generated by setup.sh --write-site; see site.aws.example.yaml for field details.
 			corpus_root: "s3://$BUCKET/corpus"
 			runs_root: "s3://$BUCKET/runs"
 			warehouse: "s3://$BUCKET/warehouse"
@@ -648,22 +531,17 @@ write_site() {
 			  service_account_annotations: {}
 			  registry: "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
 			  aws_region: "$AWS_REGION"
-			  # The Secret in this namespace whose keys become environment variables
-			  # on every pod a run creates, for a property written \${env:NAME}.
+			  # Optional Secret supplying environment variables for \${env:NAME} references.
 			  # secret_name: bench-env
 			  node_selector: $NODE_SELECTOR
 			  tolerations: $TOLERATIONS
-			# The hourly price of the instance type this fleet runs on, split across
-			# its vCPU and GiB. docs/methodology.md, under Cost, is the rule; a
-			# result published at these zeros is refused.
+			# Set hourly vCPU and GiB prices using docs/methodology.md's Cost section.
+			# Published results cannot use these zero defaults.
 			pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}
 		SITE
 	} >"$path"
-	# Read back rather than trusted: this is the file every driver reads, and a
-	# value that needed quoting is a refusal here instead of a stage Job that
-	# could not find the broker. A file that failed it is removed, because the
-	# existence refusal above would otherwise turn a second attempt at the same
-	# path into a second refusal.
+	# Validate the generated YAML. Remove invalid output so the overwrite guard
+	# does not prevent a corrected retry.
 	if ! parsed="$(yq -e '.kafka.bootstrap_servers' "$path" 2>&1)"; then
 		read_back="yq could not read a site config out of it: $parsed"
 	elif [[ $parsed != "$BOOTSTRAP" ]]; then

@@ -1,28 +1,22 @@
-# An engine config for the external walk-through
+# Flink configuration for the external-engine walkthrough
 
-Three files an operator would hand their own Flink cluster to make it consume a
-staged run: the SQL, the settings it is submitted with, and the cluster's shape.
-`docs/adding-an-engine.md` walks through filling in the `@PLACEHOLDER@` tokens
-and starting the job.
+These files configure Flink to consume a staged run: the SQL job, submission
+settings and cluster size. Follow the [walkthrough](../../adding-an-engine.md)
+to replace the `@PLACEHOLDER@` tokens and start the job.
 
-They are here so that the walk-through can be followed end to end without first
-having to write a Flink job. They are not a template to build a managed engine
-from — `engines/flink/` is that, and it renders these same three files per run
-from a spec's knobs. This copy is that renderer's output for the local stack
-with the run's names left as placeholders, which is also how a unit test keeps
-it from drifting away from the corpus schema.
+The example is rendered for the local stack and checked against the managed
+Flink renderer in a unit test. To build a managed integration, use
+[`engines/flink/`](../../../engines/flink/) instead.
 
-If your engine is not Flink, take this directory as the *shape* of what you
-have to produce: a source declaring every corpus column, a catalog pointed at
-the one the harness names, and an append-only insert. The columns and their
-types come from `corpus.json`; everything else comes from `facts.json`.
+For another engine, provide the same three elements: a source with every corpus
+column, the catalog named by the harness and an append-only insert. Column types
+come from `corpus.json`; connection details come from `facts.json`.
 
-| Token | Fill from |
+| Token | Value from `facts.json` |
 |---|---|
-| `@RUN_ID@` | `run_id` — also a fine consumer-group id, and the job's name |
+| `@RUN_ID@` | `run_id`, also used as the consumer group and job name |
 | `@TOPIC@` | `topic` |
-| `@NAMESPACE@` / `@TABLE@` | the two halves of `table`, split on the dot |
+| `@NAMESPACE@` / `@TABLE@` | the two parts of `table`, split on the dot |
 
-The catalog block carries the local stack's MinIO credentials verbatim, which
-is why this is a config file and not a publishable record. `facts.json` is the
-publishable record, and it redacts them.
+The catalog block includes the local stack's public MinIO credentials. Published
+facts redact credentials; this configuration preserves them so the example runs.

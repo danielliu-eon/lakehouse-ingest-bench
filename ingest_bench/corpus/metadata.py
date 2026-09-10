@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Read a published corpus: what it declares, and the batches it is made of.
+"""Read published corpus metadata and batch manifests.
 
-Every tool downstream of the generator — the producer, the table creator, the
-scorer — takes a corpus URI and nothing else, so this is where a corpus stops
-being files and becomes the one object they all agree on. It reads only what
-the corpus published: a consumer that re-derived a figure from the preset
-could disagree with the corpus it is scoring.
+Consumers use the recorded corpus facts instead of re-deriving them from a
+preset that may have changed since generation.
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ def _as_string_map(value: object) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class CorpusMetadata:
-    """What a corpus publishes about itself, beside the URI it was read from."""
+    """Published corpus facts and their source URI."""
 
     uri: str
     name: str
@@ -66,13 +63,7 @@ class CorpusMetadata:
 
 
 def read(corpus_uri: str) -> CorpusMetadata:
-    """The corpus at ``corpus_uri``, or a refusal to read it as one.
-
-    A shard is refused rather than read: it holds every corpus-wide figure —
-    row count, rows per second, partition truth — for its own batches alone,
-    so a consumer that took it for a corpus would score a table against a
-    fraction of what was sent. Merge the shards first.
-    """
+    """Read a complete corpus; reject shards until they have been merged."""
     raw = cast(dict[str, object], json.loads(uri.read_text(uri.join(corpus_uri, "corpus.json"))))
     try:
         version = str(raw["generator_version"])
@@ -114,23 +105,16 @@ def read(corpus_uri: str) -> CorpusMetadata:
 
 
 def _absolute(corpus_uri: str, reference: str) -> str:
-    """A manifest reference resolved against the corpus that published it.
-
-    A merged corpus is metadata beside the per-shard data, so its manifest
-    already points at the shards that wrote the batches; resolving those again
-    would bury one corpus URI inside another.
-    """
+    """Resolve relative manifest paths, preserving existing absolute shard URIs."""
     if reference.startswith("/") or "://" in reference:
         return reference
     return uri.join(corpus_uri, reference)
 
 
 def read_manifest(corpus_uri: str) -> list[BatchRecord]:
-    """Every batch of the corpus, in send order, addressed absolutely.
+    """Read batches in send order with absolute paths.
 
-    The manifest is the frozen scoring input, so a gap or a duplicate in it is
-    refused here rather than turned into a missing-rows verdict against an
-    engine that was never sent them.
+    Reject gaps and duplicates before they can affect engine scoring.
     """
     meta = read(corpus_uri)
     records = [

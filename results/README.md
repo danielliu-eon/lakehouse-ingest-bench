@@ -1,60 +1,51 @@
 # Publishing a result
 
-A result is one `run.json` (`schema_version: 2`) under `results/<engine>/`,
-plus `RESULTS.md` regenerated from every file here. Both arrive together, from
-`scripts/finish.sh <run_id> --publish results/` — never by hand-editing either.
-`finish.sh` refuses to publish a run whose `run_valid` is false unless you pass
-`--publish-invalid`, which keeps the run but never as a headline.
+Run `scripts/finish.sh <run_id> --publish results/` to write a redacted
+`run.json` (`schema_version: 2`) under `results/<engine>/` and regenerate
+`RESULTS.md`. Commit both together; do not edit them by hand.
 
-The document's own schema is in
-[`../docs/results-format.md`](../docs/results-format.md).
+Publishing requires `run_valid: true` unless you pass `--publish-invalid`.
+Invalid runs remain labelled by validity state and must not be presented as
+headline results. See the [result schema](../docs/results-format.md).
 
-**This directory holds no result yet.** `RESULTS.md` renders its
-"(none published yet)" header until the first `--publish` lands one here, so an
-empty `results/` is a fresh clone's expected state rather than a file that
-failed to arrive.
+No results have been published yet. The empty table in `RESULTS.md` is expected.
 
-## Checked by `scripts/validate-results.py`
+## Automated checks
 
-CI runs this over the whole directory, so these fail a pull request:
+CI runs `scripts/validate-results.py` over this directory. It checks that:
 
-- **`schema_version` is 2**, and the file parses.
-- **No leaked site.** No unredacted `s3://` or `gs://` URI anywhere in the file,
-  and no 12-digit number inside any string — the shape an account id takes in a
-  bucket name, an ARN or a registry host.
-- **The corpus is a shipped preset**, and `run.corpus_hash` matches that
-  preset's own hash. So a corpus generated from an overridden preset, or from a
-  shape that lives only on one machine, is refused.
-- **`spec.producer.seconds` names no limit** — absent, or written `null` to say
-  the whole corpus was offered. A shortened offer is a probe, not a result.
-- **The fleet is disclosed**: at least one role, each with a `machine_type` that
-  is neither empty, nor the `unspecified` a run whose knobs named none reports,
-  nor a `YOUR_` placeholder a shipped external spec left for its operator to
-  replace, and a positive `vcpu` and `gib`. And `run.site_pricing` carries both
-  rates and both are above zero, so the cost column can be re-derived — a run
-  priced at zero renders as `n/a` and discloses nothing.
-- **The scorer's summary and the derived keep-up and `producer_bound` are
-  present**, not null.
-- **Every run measured a fresh table and topic.** No two documents here name
-  either, since reusing one lets a run measure the one before it.
-- **`RESULTS.md` is a fresh render** of the documents beside it. Re-render with
-  `results-table results/ --out results/RESULTS.md` in the same change.
+- Each result parses and uses `schema_version: 2`.
+- No unredacted `s3://` or `gs://` URIs remain, and no string contains a
+  12-digit account ID.
+- The corpus uses a shipped preset and `run.corpus_hash` matches its hash.
+  Locally overridden presets are not accepted.
+- `spec.producer.seconds` is absent or null, so the offer is not shortened.
+- The fleet includes at least one role. Each role has a nonempty
+  `machine_type` other than `unspecified` or a `YOUR_` placeholder, plus
+  positive `vcpu` and `gib` values.
+- Both rates in `run.site_pricing` are positive, allowing costs to be derived.
+- The scorer summary, derived keep-up measures and `producer_bound` are present.
+- No two results reuse a table or topic name.
+- `RESULTS.md` matches a fresh render of the result documents.
 
-## A reviewer's responsibility
+To regenerate the table separately, run:
 
-The checker does not see these. They are what a reader of `RESULTS.md` is
-entitled to assume, and a result that breaks one is misleading rather than
-invalid:
+```bash
+results-table results/ --out results/RESULTS.md
+```
 
-- **`run_valid: true`** — `finish.sh` gates this at publish time, but the checker
-  does not, so a `--publish-invalid` result must show its validity state
-  (`producer_bound`, `void`, `undersized`, `not drained`) and never appear as a
-  headline number. A `producer_bound` run in particular says nothing about the
-  engine: the offer, not the engine, set the rate.
-- Any engine tuning beyond the run spec's own knobs is a **separately named
-  variant** (`--variant <name>`), not a silent re-run of the same file.
-- An external result carries `run.engine_versions` as `{name, version, notes}` —
-  what its operator said, since the harness never ran it.
-- No company, product, person, cluster, node-pool or taint name anywhere in a
-  published file. The leak scans above catch account ids and buckets; a name is
-  a judgement.
+## Reviewer checks
+
+The validator cannot establish every publication requirement. Reviewers must
+also check that:
+
+- Only valid runs are used as headline comparisons. `finish.sh` checks
+  validity at publication, but the directory validator allows explicitly
+  published invalid runs. A `producer_bound` run cannot establish engine
+  capacity because the producer limited the offered rate.
+- Tuning beyond the run spec's knobs has a separate variant name
+  (`--variant <name>`).
+- External results include `run.engine_versions` with `name`, `version` and
+  `notes` supplied by the operator.
+- Published files contain no identifying company, product, person, cluster,
+  node-pool or taint names. Automated scans do not recognize every private name.

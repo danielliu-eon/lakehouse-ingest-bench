@@ -1,18 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Command lines for scoring a run, judging one while it goes, and its geometry.
+"""Commands for live scoring, early-stop decisions, and file geometry.
 
-`score` is the measurement and `gate` is the decision drawn from it, and they
-are separate commands because they run on different rhythms: one process scores
-a run from its first commit to its last, while a driver asks the gate every
-minute or so whether the run is still worth paying for. The gate therefore
-reads the scorer's artifacts rather than the table — the scorer has already
-paid for that read, and two readers of one table would disagree about when a
-commit became visible.
-
-`file-sizes` is third because it is the one figure that is cheaper after the
-run than during it: geometry is a read of the metadata document, so it costs
-nothing to leave until the fleet is gone, and doing it there keeps a manifest
-walk off the poll loop that is timing commits.
+The gate reads scorer artifacts to avoid a second table reader. Geometry can
+be measured after the run, keeping manifest traversal out of the live loop.
 """
 
 from __future__ import annotations
@@ -35,24 +25,17 @@ from ingest_bench.table.cli import add_catalog_arguments
 
 FSSPEC_FILE_IO = "pyiceberg.io.fsspec.FsspecFileIO"
 
-# A verdict is an exit code so a shell driver can branch on it without parsing
-# output. They are distinct and non-adjacent to keep an undersized fleet from
-# being read as a scorer that failed.
+# Distinct verdict exit codes let shell drivers branch without parsing output.
 EXIT_CODES = {PASS: 0, UNDERSIZED: 3, VOID: 5}
 
-# What `file-sizes` exits when the table it was pointed at holds no commit, so
-# there is no geometry to report. Distinct from argparse's own 2, which says
-# the command line was wrong rather than that the run committed nothing.
+# Distinguish an empty table from argparse's argument-error exit code.
 NO_GEOMETRY = 4
 
 DEFAULT_ADAPTATION_S = 120
 DEFAULT_FLOOR_WINDOW_S = 60
 
-# How old the newest keep-up sample may be and still be a reading. The width of
-# the gate's own newest floor window, because a reading older than that leaves
-# the rising-floor test with no samples to read — and it is twelve poll
-# intervals, or twice the silence a bounded retry can leave, so a healthy
-# reader is never called stale.
+# Match the newest backlog window. This allows twelve normal poll intervals
+# or twice the configured retry gap before declaring samples stale.
 DEFAULT_STALE_AFTER_S = DEFAULT_FLOOR_WINDOW_S
 
 
@@ -192,8 +175,7 @@ def score(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     table = str(args.table)
     try:
-        # A malformed --table is an argument error rather than a catalog one, so
-        # it is resolved here instead of surfacing hours into a run.
+        # Validate the identifier before contacting the catalog.
         table_identifier(table)
         props = load_catalog_props(
             [str(prop) for prop in args.catalog_prop], [str(name) for name in args.catalog_prop_file]
@@ -233,15 +215,11 @@ def gate(argv: Sequence[str] | None = None) -> int:
     args = build_gate_parser().parse_args(argv)
     out_dir = Path(str(args.out))
     summary_path = out_dir / score_loop.SUMMARY_FILE
-    # A run whose scorer has published nothing is void rather than a crash
-    # here: the gate is polled in a loop, and the absence of a measurement is
-    # one of the answers it exists to give.
+    # Report missing measurements as VOID so the polling driver can handle them.
     if not summary_path.exists():
         return _report(VOID, f"{summary_path} does not exist, so the run has no measurement to judge")
     summary = cast(dict[str, object], json.loads(summary_path.read_text(encoding="utf-8")))
-    # A run the loop itself voided is void here too, with the reason it gave.
-    # The verdict function judges lag and backlog, and both are figures about a
-    # table this run has been found not to have.
+    # Preserve schema-failure verdicts before judging lag and backlog.
     if summary["state"] == score_loop.VOID:
         return _report(VOID, str(summary["reason"]))
     producer = cast(dict[str, object], summary["producer"])
@@ -318,9 +296,7 @@ def file_sizes(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     metadata_location = None if args.metadata is None else str(args.metadata)
     table = None if args.table is None else str(args.table)
-    # Naming both would leave which document was read up to the order of two
-    # branches, and the two can disagree: the copy is the run's last state
-    # while the live table has since been compacted, or dropped and recreated.
+    # Require one metadata source: copied and live documents may differ.
     if (metadata_location is None) == (table is None):
         parser.error("give exactly one of --metadata (a copied document) and --table (through a catalog)")
     try:
@@ -331,10 +307,8 @@ def file_sizes(argv: Sequence[str] | None = None) -> int:
             table_identifier(table)
     except ValueError as error:
         parser.error(str(error))
-    # Default the file IO to fsspec: its botocore credential chain resolves the
-    # profile shapes pyarrow's bundled SDK does not (`credential_process`, SSO),
-    # and `file-sizes` is the one harness read of the bucket that runs on an
-    # operator's machine rather than in the cluster. An explicit property wins.
+    # Prefer fsspec for operator-side profile support, including credential_process
+    # and SSO. Honor an explicit IO implementation.
     props.setdefault("py-io-impl", FSSPEC_FILE_IO)
     if metadata_location is not None:
         document, io = geometry.open_metadata_document(metadata_location, props)

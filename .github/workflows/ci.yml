@@ -9,15 +9,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with: {enable-cache: true}
-      # The cluster drivers read the site with `yq` and a run's facts with `jq`,
-      # and their tests skip themselves without both.
+      # Install both tools so cluster-driver tests run instead of skipping.
       - run: sudo apt-get update && sudo apt-get install -y jq
-      # A pinned release binary rather than snap: snap is not available on
-      # every runner image, and the version a channel serves changes under the
-      # test suite. The digest is checked because a version tag is a name and
-      # not the bytes behind it: a release asset can be replaced, and this
-      # binary then parses every site config a run is staged from. It moves
-      # with the version above, and both are the same pair in smoke.yml.
+      # Pin yq and verify its checksum. Keep the version and digest in sync with
+      # smoke.yml; avoid snap's runner requirements and moving release channels.
       - run: |
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
@@ -28,7 +23,6 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
       - run: uv run mypy
-      # Also collects the doc-size, licence-header and leak-scan tests: all
-      # three are plain pytest cases, not a separate step.
+      # Includes documentation budgets, licence headers and private-data scans.
       - run: uv run pytest -q -m "not integration"
       - run: uv run python scripts/validate-results.py

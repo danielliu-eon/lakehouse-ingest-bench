@@ -1,13 +1,11 @@
 # The run spec and the site config
 
-Two YAML files. A **run spec** under `runs/` is the run: the workload, the table,
-the offer and the engine's own knobs, and it is copied verbatim into a published
-result. A **site config** (`./site.yaml`, `--site` elsewhere) is one operator's
-storage, broker, catalog, cluster and prices, and never leaves their machine.
+Two YAML files configure a run. A **run spec** under `runs/` defines the workload,
+table, producer and engine settings; published results include an unchanged copy.
+A **site config** (`./site.yaml`, or a path supplied with `--site`) defines the
+operator's storage, broker, catalog, cluster and prices. It is not published.
 
-Both loaders refuse a key they do not recognise. A misspelled knob would
-otherwise run one thing and publish a spec claiming another, and the two would
-never disagree loudly.
+Both loaders reject unknown keys so misspelled settings cannot be silently ignored.
 
 Terms below are defined in [`methodology.md`](methodology.md).
 
@@ -15,18 +13,18 @@ Terms below are defined in [`methodology.md`](methodology.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `name` | *required* | the run's base name. It becomes a topic, a table and a Kubernetes object, so it must match `^[a-z0-9][a-z0-9-]{2,34}$` — 35 characters is what survives a run id's stamp and a driver's longest prefix inside the 63-character label a Job stamps on its pods. An engine whose operator caps the object name shortens that further, and staging refuses one past it by name: Flink's takes 45 characters, so **28** of name |
+| `name` | *required* | base name for the topic, table and Kubernetes objects. Must match `^[a-z0-9][a-z0-9-]{2,34}$` (3–35 characters), leaving room for timestamps and prefixes within Kubernetes limits. Engine limits may be stricter: Flink allows at most **28** characters |
 | `engine` | *required* | `external`, or a managed engine — `flink` or `spark` |
 | `corpus` | *required* | a shipped preset name, or a path to a preset file. See [`corpus.md`](corpus.md) |
 | `<engine>:` | *required* for a managed engine | that engine's knobs; see `engines/<name>/README.md`. Refused for `engine: external` |
-| `external:` | *required* for `engine: external` | `{name, version, notes}`, all strings. What its operator says ran, since the harness never ran it |
-| `fleet:` | *required* for `engine: external` | a non-empty list of `{role, count, vcpu, gib, machine_type}`. The compute the run is costed against. A managed engine derives its own |
+| `external:` | *required* for `engine: external` | `{name, version, notes}`, all strings. Operator-supplied engine identity and tuning notes |
+| `fleet:` | *required* for `engine: external` | a non-empty list of `{role, count, vcpu, gib, machine_type}`. Resources used to calculate cost; managed engines derive this list from their knobs |
 
 ### `table`
 
 | Key | Default | Effect |
 |---|---|---|
-| `managed_by` | `harness` | `harness` creates the table, so the run's properties are the ones the writer sees. `engine` hands your engine the equivalent `CREATE TABLE` in `facts.ddl` and creates nothing — the scorer then reads a table that does not exist yet as empty and keeps polling, since such an engine creates it from its first record |
+| `managed_by` | `harness` | `harness` creates the table with the specified properties. `engine` supplies equivalent DDL in `facts.ddl` for your engine to execute; the scorer treats an absent table as empty while waiting |
 | `partition` | `identity(partition_key)` | `identity(col)`, `bucket(N, col)` or `unpartitioned` |
 | `properties` | `{}` | Iceberg table properties, set at creation. See [`pitfalls.md`](pitfalls.md) |
 
@@ -35,18 +33,18 @@ Terms below are defined in [`methodology.md`](methodology.md).
 | Key | Default | Effect |
 |---|---|---|
 | `partitions` | *required* | topic partitions. Replication is not a knob: staging asks for `min(3, brokers)` |
-| `key` | *required* | the corpus key column sent as the message key, or `none` for unkeyed records. The key decides how records distribute across partitions, so it belongs to the workload |
-| `value_encoding` | `avro` | `avro` is the corpus's Avro binary as it stands; `confluent` is the same bytes behind the five-byte Confluent header, which needs `site.kafka.schema_registry` |
+| `key` | *required* | corpus column used as the Kafka message key, or `none` for unkeyed records; controls distribution across topic partitions |
+| `value_encoding` | `avro` | `avro` sends raw binary records; `confluent` adds a five-byte header and requires `site.kafka.schema_registry` |
 
 ### `producer`
 
 | Key | Default | Effect |
 |---|---|---|
-| `speed` | `1.0` | replay speed. `2.0` offers the corpus's rate twice over |
-| `seconds` | whole corpus | replay only this many seconds of it. A shortened offer is a probe, and is not publishable |
-| `shards` | `1` | processes the offer is split across. See [`corpus.md`](corpus.md) for the shard count a rate needs |
-| `behind_max_ms` | `5000` | a batch acknowledged this far past its due time makes the run `producer_bound` |
-| `compression` | `zstd` | the wire codec: `zstd`, `lz4`, `snappy`, `gzip` or `none`. Two results compare only at one codec |
+| `speed` | `1.0` | replay speed multiplier; `2.0` doubles the offered rate |
+| `seconds` | whole corpus | limit the replay to this many corpus seconds; shortened offers cannot be published |
+| `shards` | `1` | producer process count; see [sizing guidance](corpus.md#sizing-the-offer) |
+| `behind_max_ms` | `5000` | maximum permitted batch acknowledgement delay after its due time; exceeding it makes the run `producer_bound` |
+| `compression` | `zstd` | the wire codec: `zstd`, `lz4`, `snappy`, `gzip` or `none`. Use the same codec for compared runs |
 
 ### `scoring`
 
@@ -54,66 +52,56 @@ Terms below are defined in [`methodology.md`](methodology.md).
 |---|---|---|
 | `freshness_bound_s` | `180` | the window p95 the run is judged against; twice it is the max bound |
 | `warmup_s` | `120` | excluded from the freshness window after the epoch |
-| `geometry_offsets_s` | `[600, 1200, 1800, 2700, 3600]` | when geometry is measured. A rung the run never reached reads `absent` |
-| `gate_adaptation_s` | the gate's own `120` | nothing is judged undersized before this |
+| `geometry_offsets_s` | `[600, 1200, 1800, 2700, 3600]` | geometry snapshot offsets from the epoch; unreached offsets are `absent` |
+| `gate_adaptation_s` | the gate's own `120` | seconds after the epoch before capacity checks begin |
 | `gate_window_s` | the gate's own `60` | the width of the three backlog-floor windows |
 
-The two gate keys are absent unless a run says otherwise, so the gate keeps its
-own defaults rather than having them restated in every spec.
+Omit the gate keys to use the gate's defaults.
 
 ## Site config
 
 | Key | Effect |
 |---|---|
-| `corpus_root`, `runs_root`, `warehouse` | *required*. Where corpora, run artifacts and table data live. All three are substituted out of a published result. The drivers reach storage through the `aws` CLI, so each must be an `s3://` URI and anything else is refused by name |
+| `corpus_root`, `runs_root`, `warehouse` | *required*. Storage roots for corpora, run artifacts and table data; redacted in results. Shell drivers use the AWS CLI and require `s3://` URIs |
 | `kafka.bootstrap_servers` | *required* |
 | `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim. Never read into a result |
-| `kafka.schema_registry` | `{url, basic_auth_user_info?}`. Absent is the answer for a site whose runs are all raw Avro; a `confluent` run against such a site is refused at staging |
-| `catalog.props` | *required*. pyiceberg catalog properties. An Iceberg **REST** catalog for a managed engine: either renderer refuses any other `type` at stage time. An external run reaches whatever catalog pyiceberg can open from these properties |
-| `kubernetes` | empty means no cluster and everything runs where it is started. A cluster sets `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
-| `pricing` | *required*. `{vcpu_hour_usd, gib_hour_usd}`, the two rates a run's cost is computed from |
+| `kafka.schema_registry` | `{url, basic_auth_user_info?}`; optional for raw Avro, required for Confluent framing |
+| `catalog.props` | *required*. PyIceberg catalog properties. Managed engines require a REST catalog; external runs may use any catalog PyIceberg can open |
+| `kubernetes` | empty for local runs. Cluster runs require `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
+| `pricing` | *required*. `{vcpu_hour_usd, gib_hour_usd}` rates used to calculate cost |
 
-`site.example.yaml` and `site.aws.example.yaml` are annotated copies to fill in.
-Every `YOUR_` placeholder must go: loading refuses one that survived a copy,
-rather than sending it to a broker as a hostname.
+Start from `site.example.yaml` or `site.aws.example.yaml`.
+Replace every `YOUR_` placeholder; the loader rejects any that remain.
 
-### What an engine is given, and what is translated
+### Engine configuration translation
 
-`site.catalog.props` and `site.kafka.security` reach a managed engine's rendered
-configuration almost verbatim. Four keys are translated, because the engine's
-own name for the thing differs — three from the catalog, and one from Kafka:
+`site.catalog.props` and `site.kafka.security` are copied into managed-engine
+configuration, with these translations:
 
 | From the site | What an engine gets |
 |---|---|
 | `type` (`rest`, or absent) | the engine's own REST catalog binding |
 | `s3.region` | `client.region` |
-| `warehouse` on `s3://` or `gs://` | the matching `io-impl`. A catalog's own `warehouse` is not always a location — a Glue REST endpoint takes a catalog id there — so the scheme is read off `site.warehouse` instead |
+| `warehouse` on `s3://` or `gs://` | the matching `io-impl`, selected from `site.warehouse`. The catalog warehouse may be an ID, as in Glue, rather than a storage URI |
 | `sasl.mechanism: OAUTHBEARER` plus `aws.region` | the Java client's `AWS_MSK_IAM` login module and its callback handler |
 
-`aws.region` is the harness's own pseudo-key, not a librdkafka property: Amazon
-MSK's `OAUTHBEARER` wants a token signed from the caller's own credentials per
-connection, which no property can express, so the region to sign in is stated
-beside the mechanism and stripped before the properties reach a client. Install
-the harness with its `aws` extra for it. A site that arranges its own tokens sets
-any `sasl.oauthbearer.*` property instead and is passed through untouched.
+`aws.region` configures MSK token signing and is removed before passing
+properties to librdkafka. Install the harness with the `aws` extra to use it.
+If the site supplies a `sasl.oauthbearer.*` property, the harness leaves that
+OAuth configuration unchanged.
 
-**`site.kafka.security` and `--kafka-prop` may not carry a `compression.*`
-property.** Those two are what reach a client over the producer's own
-configuration, so one of them would decide the wire codec while the run's
-published facts name `producer.compression`. Each is scanned where it is read —
-the site as it loads, the flag before the producer opens a connection — and a
-stated conflict is an error rather than a preference. The catalog properties are
-not scanned, because nothing there reaches a Kafka client.
+**Set compression only through `producer.compression`.** The site loader and
+producer reject `compression.*` keys in `site.kafka.security` and `--kafka-prop`
+to prevent the actual codec from differing from the published spec. Catalog
+properties do not reach Kafka clients and are not subject to this check.
 
 ### Secrets
 
-Write `${env:NAME}` for a credential in `site.kafka.security`, `site.catalog.props`,
-`site.kafka.schema_registry.basic_auth_user_info`, a `--catalog-prop` or a
-`--kafka-prop`. Nothing resolves at load: the variable is read inside the process
-that uses it, at the call that needs it, and an unset one is refused by name
-rather than substituted empty. The site config, the run's `facts.json`, an
-engine's rendered files and a published result all keep the placeholder, since it
-names the variable a reader has to set.
+Use `${env:NAME}` for credentials in Kafka security, catalog properties,
+schema-registry authentication, `--catalog-prop`, or `--kafka-prop`.
+References resolve only in the process that uses them; an unset variable is
+an error. Site configs, staged facts, rendered files and results retain the
+reference so operators can identify which variables to supply.
 
 On a cluster the variable comes from one Secret in the run's namespace, created
 once and named as `site.kubernetes.secret_name`:
@@ -123,28 +111,21 @@ kubectl --namespace ingest-bench create secret generic bench-env \
   --from-literal=IB_KAFKA_PASSWORD=... --from-literal=IB_REGISTRY_AUTH=...
 ```
 
-Every key of it becomes an environment variable on every pod a run creates —
-each harness Job, and both halves of the engine's fleet. One Secret rather than
-a key per property, because a `${env:NAME}` names a variable and a Secret's keys
-are already a set of variable names: nothing here holds a list of which of your
-properties are credentials.
+Every key in that Secret becomes an environment variable on every harness and
+engine pod. The keys must match the names used in `${env:NAME}` references.
 
-Which is why **a site declaring a cluster refuses a credential written out in
-full**, naming the key: those properties are applied as a ConfigMap and uploaded
-to the runs prefix, and no later redaction undoes a value that has been in
-either. A site with no cluster is the local stack, whose credentials are a
-container image's published defaults, and it keeps its literals — redacted out
-of `facts.json` and out of a result by property name.
+**Cluster sites reject literal credentials** because rendered properties are
+stored in ConfigMaps and uploaded to the runs prefix. Use environment references
+to keep secrets out of those artifacts. Local sites permit literals for the
+stack's public default credentials; credential-named properties are redacted
+from `facts.json` and results.
 
-One limit. A Flink run resolves its whole rendered script and settings inside
-its own submitter, so any option in either may name a variable; a Spark run
-resolves the Kafka source's options and nothing else, because a Spark setting is
-read by the framework and substitutes nothing. A reference among those is
-refused at render time rather than reaching the catalog as six literal
-characters, so a credential a Spark run needs belongs in `site.kafka.security`.
-MSK's IAM authentication needs no secret at all, on either engine.
+Flink resolves environment references throughout its rendered script and
+settings. Spark resolves them only in Kafka source options and rejects them in
+other settings at render time. Put referenced Spark credentials in
+`site.kafka.security`. Both engines support MSK IAM authentication without a
+Secret.
 
 Object storage and catalogs otherwise use the cloud SDK's default credential
-chain: pod identity or an instance role in a cluster, an ambient profile on a
-laptop. Static keys are for the local stack, where they are its published
-defaults.
+chain, such as pod identity, an instance role or an ambient profile. The local
+stack uses public default credentials.

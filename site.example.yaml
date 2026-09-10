@@ -1,30 +1,27 @@
-# Copy to site.yaml and fill in. Every YOUR_ placeholder must go; loading refuses otherwise.
+# Copy to site.yaml and replace every YOUR_ placeholder before loading.
 corpus_root: s3://YOUR_BUCKET/corpus
 runs_root: s3://YOUR_BUCKET/runs
 warehouse: s3://YOUR_BUCKET/warehouse
 kafka:
-  # No replication knob: staging counts the cluster's brokers and asks for
-  # min(3, brokers) replicas. See docs/running.md.
+  # Staging sets replication to min(3, broker count).
   bootstrap_servers: YOUR_BOOTSTRAP:9092
-  security: {}                      # optional librdkafka security.* / sasl.* keys, passed to every client
-                                    # verbatim. Use ${env:NAME} for a secret; see docs/running.md.
-  # schema_registry:                # only for a run whose spec says kafka.value_encoding: confluent
+  # Passed to every client. Use ${env:NAME} for secrets; see docs/running.md.
+  security: {}
+  # Required only for kafka.value_encoding: confluent.
+  # schema_registry:
   #   url: http://YOUR_REGISTRY:8080/apis/ccompat/v7
-  #   basic_auth_user_info: ${env:NAME}   # optional, where the registry authenticates
+  #   basic_auth_user_info: ${env:NAME}
 catalog:
-  props:                            # passed to pyiceberg and rendered into engine configs; ${env:NAME} works here too
+  # Passed to PyIceberg and engine configs. ${env:NAME} is supported here too.
+  props:
     uri: http://YOUR_CATALOG:8181
     warehouse: s3://YOUR_BUCKET/warehouse
-kubernetes: {}                      # empty means no cluster, and everything runs where it is started. A
-                                    # cluster sets context, namespace, harness_service_account,
-                                    # flink_service_account and registry, and may add
-                                    # spark_service_account (default ingest-bench-spark), aws_region,
-                                    # secret_name (the Secret every pod reads ${env:NAME} from),
-                                    # service_account_annotations, node_selector and tolerations.
-                                    # A cluster refuses a written-out credential above; see
-                                    # "Credentials" in docs/running.md.
-pricing:                            # for an instance of `vcpu` cores and `gib` GiB at P an hour,
-                                    # these are P/vcpu/2 and P/gib/2; docs/methodology.md, under
-                                    # Cost, is the rule
+# Empty for local runs. For cluster fields, see docs/run-spec.md and
+# site.aws.example.yaml. Cluster sites require credential references;
+# see Credentials in docs/running.md.
+kubernetes: {}
+# For an instance costing P/hour with vcpu cores and gib GiB, use P/vcpu/2
+# and P/gib/2. See Cost in docs/methodology.md. Set prices before publishing.
+pricing:
   vcpu_hour_usd: 0.0
   gib_hour_usd: 0.0

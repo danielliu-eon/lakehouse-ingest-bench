@@ -175,13 +175,8 @@ def test_gate() -> None:
 
 
 def test_a_reading_nothing_is_still_taking_is_void_and_never_a_pass() -> None:
-    """A scorer that died leaves a summary that reads as a run going well.
-
-    Its last mirrored `summary.json` carries `aborted: false` and a lag inside
-    the bound — the `except` block that would have set the flag never ran,
-    because an OOMKill, an eviction or a lost node does not run one. So the
-    liveness signal is the age of the newest keep-up sample: past the bound,
-    there is nothing measuring the run, whatever the last measurement said.
+    """OOM kills and node loss may leave a healthy-looking summary. Sample age must
+    detect a dead scorer even when it could not publish an error.
     """
     samples = [
         keepup.KeepupSample(E + i * 1000, 1000 * i, 1000 * i - min(i, 5) * 100, min(i, 5) * 100, None, None)
@@ -229,12 +224,8 @@ def test_a_reading_nothing_is_still_taking_is_void_and_never_a_pass() -> None:
 
 
 def test_an_empty_newest_window_is_void_however_the_bound_was_raised() -> None:
-    """The rising-floor test cannot fire over a window with no samples in it.
-
-    `_backlog_floors` returns None there precisely so that an empty window
-    cannot read as a cleared backlog — and a verdict that then reported PASS
-    would have cleared it anyway. Reachable only with a staleness bound raised
-    past the window's own width, which is why both checks exist.
+    """A raised staleness bound can permit an empty newest backlog window.
+    Missing samples must not count as zero backlog.
     """
     samples = [keepup.KeepupSample(E + i * 1000, 1000 * i, 900 * i, 100 * i, None, None) for i in range(1, 100)]
     verdict = gate.gate_verdict(

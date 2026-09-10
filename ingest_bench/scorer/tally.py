@@ -1,22 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-batch completeness, accumulated from the row ids a table holds.
+"""Track per-batch coverage and exactness from committed row IDs.
 
-Freshness and exactness are both answers to one question asked of every batch
-the corpus published: are all of its rows in the table, and only its rows? The
-tally answers it incrementally, so a whole run is scored by walking the
-snapshots once and adding each commit's ids as they are read, rather than by
-re-scanning the table at every point of interest.
+Accumulate counts and row-ID checksums modulo a prime as snapshots arrive.
+Together they detect loss, duplication, and many substitutions without
+rescanning the table.
 
-A batch is judged on two figures the corpus froze: its row count, and the sum
-of its row ids modulo a prime. The count alone cannot tell a lost row from a
-row that arrived twice, and the two together cannot be satisfied by any wrong
-set of ids that a real engine fault would produce.
-
-Two predicates come out of those figures and they answer different questions.
-Coverage asks whether a batch's rows have arrived, which is what freshness
-times. Completeness asks whether exactly its rows arrived, which is what
-exactness judges. Keeping them apart is what lets a late duplicate be a fault
-without also rewriting when the rows before it became visible.
+Coverage means the observed count has reached the expected count; it drives
+the freshness watermark. Completeness requires matching counts and checksums.
+These checks do not prove row-set identity, and late duplicates do not move
+the coverage watermark backward.
 """
 
 from __future__ import annotations
@@ -39,19 +31,15 @@ CORRUPTION = "corruption"
 PARQUET = "parquet"
 ORC = "orc"
 
-# `np.bincount` accumulates weights in float64, which represents integers
-# exactly only below 2**53. A residue is under P, near 1e9, so a single call
-# stays exact for roughly 9e6 rows; chunking well under that is what makes the
-# checksum comparison an equality test rather than an approximation.
+# Float64 weighted counts are exact only below 2**53. Chunk well below
+# roughly nine million residues per sum to preserve checksum equality.
 _CHUNK_ROWS = 4_000_000
 
 
 class BatchTally:
-    """How much of each batch the table holds, and where it disagrees.
+    """Track row counts and checksums for the manifest's contiguous batch IDs.
 
-    The tally is indexed by batch number, so it holds one manifest's batches
-    from 0 upward and nothing else. Ids carry their batch in their high bits,
-    which is what lets a commit's ids be attributed without any join.
+    Decode batch ownership from the high bits of each row ID.
     """
 
     def __init__(self, records: list[BatchRecord], p: int) -> None:
@@ -68,7 +56,7 @@ class BatchTally:
         self._prefix = -1
 
     def add_ids(self, ids: np.ndarray) -> None:
-        """Count one commit's row ids into the batches they came from."""
+        """Accumulate counts and checksums by encoded batch ID."""
         flat = np.asarray(ids).reshape(-1)
         if flat.size == 0:
             return
@@ -85,18 +73,17 @@ class BatchTally:
             residues = (flat[start : start + _CHUNK_ROWS] % self.p).astype(np.float64)
             self.counts += np.bincount(chunk, minlength=self.counts.size)
             self.sum_mod += np.bincount(chunk, weights=residues, minlength=self.counts.size).astype(np.int64)
-            # Reduced every chunk, not once at the end: a run large enough to
-            # need many chunks would otherwise accumulate past int64.
+            # Reduce each chunk to prevent int64 overflow across large runs.
             self.sum_mod %= self.p
         while self._prefix + 1 < self.counts.size and self.covered(self._prefix + 1):
             self._prefix += 1
 
     def covered(self, batch: int) -> bool:
-        """Whether the batch's rows have arrived, whatever else arrived with them."""
+        """Return whether the observed count is at least the expected count."""
         return bool(self.counts[batch] >= self.expected_rows[batch])
 
     def complete(self, batch: int) -> bool:
-        """Whether exactly the batch's rows arrived, and nothing else."""
+        """Return whether the row count and modular checksum match the manifest."""
         return bool(
             self.counts[batch] == self.expected_rows[batch] and self.sum_mod[batch] == self.expected_checksum[batch]
         )
@@ -106,15 +93,10 @@ class BatchTally:
         return mismatched
 
     def prefix(self) -> int:
-        """The largest ``k`` for which every batch ``0..k`` is covered, or ``-1``.
+        """Return the largest fully covered prefix ``0..k``, or ``-1``.
 
-        This is the watermark freshness is read off, so it is coverage and not
-        completeness: it marks when a batch's rows became visible to a reader,
-        and a duplicate landing later cannot unmake that instant. Counts only
-        grow, so the watermark only advances, which is what lets it be carried
-        forward from where the last commit left it rather than rescanned. A run
-        whose loss is masked by a duplicate is already failing exactness, and
-        its freshness figure is moot.
+        Coverage is monotonic. Late duplicates affect exactness without moving the
+        arrival watermark backward.
         """
         return self._prefix
 
@@ -122,13 +104,10 @@ class BatchTally:
         return int(self.counts.sum())
 
     def violations(self, *, include_missing: bool = False) -> list[dict[str, object]]:
-        """Every batch the table disagrees with the manifest about.
+        """Report batches whose counts or checksums disagree with the manifest.
 
-        A batch nothing has arrived for is withheld unless ``include_missing``:
-        mid-run it is a batch still in flight, and only the judgement taken
-        after the drain window can call it lost. A batch that has partly
-        arrived is not withheld — mid-run it reports as ``loss``, which is what
-        it is at that instant and what it stays if nothing more arrives.
+        Exclude wholly absent batches unless ``include_missing`` is set, since they
+        may still be in flight. Partially received batches report their current loss.
         """
         found: list[dict[str, object]] = []
         for index in np.flatnonzero(self._mismatched()):
@@ -157,12 +136,10 @@ class BatchTally:
 
 
 def _pyarrow_filesystem(location: str) -> tuple[pa_fs.FileSystem, str]:
-    """The pyarrow filesystem serving ``location``, beside the path to hand it.
+    """Return a filesystem and path for reading ID columns.
 
-    An object store is reached through the same fsspec filesystem the rest of
-    these tools use, so one endpoint and one set of credentials serve every
-    reader here. A local path takes pyarrow's own filesystem instead: the
-    fsspec bridge costs a Python call per read, and this reads whole columns.
+    Use fsspec for object-store endpoint and credential consistency, and native
+    PyArrow IO for local files to avoid bridge overhead.
     """
     fs, path = uri.filesystem_for(location)
     if uri.is_remote(location):
@@ -171,15 +148,10 @@ def _pyarrow_filesystem(location: str) -> tuple[pa_fs.FileSystem, str]:
 
 
 def read_id_column(path: str, file_format: str) -> np.ndarray:
-    """The row ids one data file holds.
+    """Read only the scoring ID column and reject null IDs.
 
-    Only the id column is read. It is everything exactness needs, and a corpus
-    row is mostly payload, so projecting it is the difference between scoring a
-    run and reading back every byte the engine wrote.
-
-    A null id is refused rather than counted: the row cannot be attributed to a
-    batch, and the table's schema declares the column required, so a null there
-    is a fault in the writer and not a row the corpus can be scored against.
+    Projection avoids loading the corpus payload; null IDs cannot be attributed
+    to a batch.
     """
     filesystem, inner = _pyarrow_filesystem(path)
     if file_format == PARQUET:

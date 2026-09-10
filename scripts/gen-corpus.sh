@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Build a corpus on the cluster: one Job of N shards, then a merge if there was
-# more than one shard.
-#
-# On the cluster and not on a laptop because a corpus is tens to hundreds of
-# gigabytes written into the same bucket the run reads it from, and the pods
-# already hold the identity that may write there.
+# Generate a corpus in cluster Jobs, then merge shard metadata when needed. Pods write
+# directly to the run's object store using their configured identity.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
@@ -13,17 +9,13 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=scripts/_k8s.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 
-# Generation is hours for the large presets and minutes for the smoke; the merge
-# reads every shard's metadata and writes one document, so it is minutes either
-# way. Both are waits, not budgets — see k8s_wait_job.
+# Generation and merge wait timeouts; these do not limit the Jobs themselves.
 GEN_WAIT_S="${GEN_WAIT_S:-14400}"
 MERGE_WAIT_S="${MERGE_WAIT_S:-1800}"
 
-# What one generator pod asks for. The generator holds a whole batch in memory
-# while it encodes one, so its peak follows the preset's batch bytes —
-# `offered_bytes_per_s x batch_interval_ms / 1000`, and roughly ten times that
-# resident — and not the shard count. The default fits the smoke preset; see
-# "Generating a corpus" in docs/running.md for what the larger ones need.
+# Each generator buffers a whole batch. Allow roughly ten times offered_bytes_per_s *
+# batch_interval_ms / 1000 in memory per process, regardless of shard count. The default
+# fits smoke; see docs/running.md for larger presets.
 GEN_MEMORY="${GEN_MEMORY:-2Gi}"
 
 usage() {
@@ -90,8 +82,7 @@ done
 [[ $SEED =~ ^[0-9]+$ ]] || die "--seed must be a non-negative integer, got '$SEED'"
 
 require_host_tools kubectl yq git
-# Only a sharded generation reads the bucket, and then to check that every
-# shard published its batches before the merge is launched over them.
+# Sharded generation checks uploaded metadata before starting the merge.
 ((SHARDS == 1)) || require_host_tools aws
 
 k8s_read_site
@@ -99,18 +90,14 @@ CORPUS_ROOT="$(site_root '.corpus_root')"
 TAG="$(k8s_image_tag "$IMAGE_TAG")"
 IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 
-# The harness command that wrote a corpus reports the URI it wrote, so nothing
-# here has to rediscover it by listing the bucket.
-#
-# The log is read into a variable and parsed from there rather than piped into
-# `awk`: under `pipefail` an `awk` that stops at the line it wanted would fail
-# the pipeline through `kubectl`, and the script would end with no message.
+# Read the generated URI from the harness log. Capture before awk to avoid an early pipe
+# close causing SIGPIPE under pipefail.
 wrote_uri() {
 	local logs reported
 	logs="$(k8s_job_logs "$1")" || die "could not read job/$1's log; try: kubectl logs job/$1"
 	reported="$(awk '/^wrote /{print $2; exit}' <<<"$logs")"
 	[[ -n $reported ]] || die "job/$1 printed no 'wrote' line; read its log with: kubectl logs job/$1"
-	# The generator's line ends the URI with a colon before its figures.
+	# The report separates the URI from its figures with a colon.
 	printf '%s' "${reported%:}"
 }
 
@@ -121,19 +108,13 @@ wrote_uri() {
 if ((SHARDS == 1)); then
 	GEN_COMMAND="gen-corpus --preset $PRESET --out $CORPUS_ROOT --seed $SEED"
 else
-	# Each shard writes under its own prefix. The generator names a corpus
-	# directory after its preset and hash, so shards sharing one `--out` would
-	# all write into that one directory and each publish metadata describing
-	# its own batches alone — which is what the merge below exists to combine.
-	# `$JOB_COMPLETION_INDEX` is escaped here and expanded by the shell that is
-	# the image's entrypoint, so one rendered command serves every shard.
+	# Give each shard a separate output prefix so its metadata cannot overwrite another
+	# shard's. Expand JOB_COMPLETION_INDEX in the pod's shell.
 	GEN_COMMAND="gen-corpus --preset $PRESET --out $CORPUS_ROOT/shards/\$JOB_COMPLETION_INDEX"
 	GEN_COMMAND="$GEN_COMMAND --shard-index \$JOB_COMPLETION_INDEX --shard-count $SHARDS --seed $SEED"
 fi
 
-# Named after the preset, because `k8s_delete job` below removes whatever holds
-# the name: two generations of different presets would otherwise be one Job, and
-# the second would delete the first hours into it.
+# Include the preset in the Job name so different presets can generate concurrently.
 GEN_JOB="corpus-gen-$(k8s_object_name "$(basename -- "$PRESET")")"
 MERGE_JOB="corpus-merge-$(k8s_object_name "$(basename -- "$PRESET")")"
 
@@ -154,10 +135,8 @@ k8s_render_apply deploy/k8s/corpus-gen-job.yaml.tmpl \
 k8s_wait_job "$GEN_JOB" "$GEN_WAIT_S"
 
 if ((SHARDS == 1)); then
-	# Assigned before it is printed: `wrote_uri` refuses by calling `die`, which
-	# inside a command substitution ends only that subshell — so a failure has
-	# to reach `set -e` as a failed assignment rather than as an empty argument
-	# to `printf`, which would print a blank line and exit 0.
+	# Assign first so a failed command substitution reaches set -e instead of becoming a
+	# successful printf of an empty string.
 	CORPUS_URI="$(wrote_uri "$GEN_JOB")"
 	log "corpus generated"
 	printf '%s\n' "$CORPUS_URI"
@@ -168,29 +147,14 @@ fi
 # Merge
 # ---------------------------------------------------------------------------
 
-# The directory this generation wrote, by name. A corpus directory is its
-# preset's name and the hash of that preset, so one generation writes the same
-# name under every `shards/<i>/` prefix — and a prefix holds one such directory
-# per sharded generation the bucket has ever seen, because the merge leaves
-# every batch where its shard wrote it: the shard directories are part of each
-# merged corpus and are never cleaned up. Which is why the name is read from
-# what this generation reported writing rather than from what the prefix holds,
-# where the second preset generated into a bucket would find two.
-#
-# `kubectl logs` over an indexed Job answers with one of its pods, and nothing
-# here depends on which: the shard index is in the prefix, and the last segment
-# — the only part read below — is the same for all of them.
-#
-# Assigned before it is read, so a `wrote_uri` that refused ends this script as
-# a failed assignment rather than as an empty name; see the single-shard path.
+# Read the corpus directory name from this generation's log; shard prefixes may also
+# contain older corpora. Any indexed Job pod reports the same final directory name. Keep
+# shard directories because merged metadata references their batches.
 SHARD_DIR="$(wrote_uri "$GEN_JOB")"
 SHARD_DIR="${SHARD_DIR##*/}"
 
-# Each shard's own metadata document, read before a merge pod is paid for. The
-# merge refuses a shard it cannot read too, but only once a pod has been
-# scheduled and an image pulled — and after a generation of hours that answer
-# is wanted at once. `aws s3 ls` exits non-zero over a path that matches
-# nothing, which is what makes this a check and not a listing.
+# Check each shard's metadata before launching a merge pod. aws s3 ls fails when the path
+# is absent.
 MERGE_COMMAND="merge-corpus"
 shard=0
 while ((shard < SHARDS)); do

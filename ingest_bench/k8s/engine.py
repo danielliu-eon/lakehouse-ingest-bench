@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Print how a managed engine's run is addressed on a cluster.
+"""Print managed-engine Kubernetes descriptors for shell drivers.
 
-The cluster drivers are shell, and what they need of an engine is a handful of
-names: the kind of resource a run is, where its state sits, which Service
-carries its HTTP API. This is how they ask, so no driver holds a name that
-belongs to one engine.
-
-One field prints its value alone, which is what a shell assigns to a variable.
-Several — or none, meaning all of them — print `field=value` a line at a time,
-so a driver reads the whole descriptor in one call rather than one call per
-name.
+One requested field prints its value. Multiple fields, or no selection,
+print one ``field=value`` line per field.
 """
 
 from __future__ import annotations
@@ -23,16 +16,9 @@ from ingest_bench.specs.kubernetes import FIELDS
 
 
 def render(engine: str, requested: Sequence[str]) -> str:
-    """The requested fields of ``engine``'s descriptor, as text for a shell.
-
-    A field this does not know is refused by name: a driver that read one and
-    got an empty answer would go on to address a cluster with a name nobody
-    printed.
-    """
+    """Render requested descriptor fields, rejecting unknown names."""
     texts = kubernetes_for(engine).texts()
-    # Both directions: a descriptor missing a field leaves a driver with an
-    # empty name, and one printing a field no driver reads is a name nobody
-    # acts on. Either way it is not this descriptor.
+    # Reject missing and unexpected descriptor fields.
     if set(texts) != set(FIELDS):
         raise ValueError(f"{engine}'s descriptor prints {sorted(texts)}, and its fields are {list(FIELDS)}")
     unknown = [field for field in requested if field not in texts]

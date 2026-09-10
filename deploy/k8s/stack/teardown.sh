@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Remove what deploy/k8s/stack/setup.sh created, in the order that lets each
-# deletion succeed: the Kafka cluster while its operator still runs (the
-# operator is what deletes the brokers' claims), then the catalog, then the
-# namespace with the catalog's claim and every run's objects, then the
-# identities. `--all` also removes the operator and the StorageClass.
-#
-# The node group, the CSI add-on and the bucket are never touched: the first
-# two are the cluster's, the bucket holds every corpus and every result.
+# Delete Kafka while Strimzi can still clean up its claims, then the catalog,
+# namespace, and identities. --all also removes Strimzi and the StorageClass.
+# Keep the node group, CSI add-on, and bucket, including corpus and result data.
 set -euo pipefail
 PREREQ_DOC="deploy/k8s/stack/README.md"
 STACK_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,8 +56,7 @@ esac
 NAMESPACE="${NAMESPACE:-ingest-bench}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-${CLUSTER_NAME:-}}"
 [[ -n $KUBE_CONTEXT ]] || die "KUBE_CONTEXT must name the kubeconfig context of the cluster (it defaults to CLUSTER_NAME)"
-# The helmfile reads these whether it installs or destroys; the values are
-# irrelevant to a destroy, but `requiredEnv` refuses their absence.
+# Supply values required to parse the helmfile even during destruction.
 KAFKA_BROKERS="${KAFKA_BROKERS:-3}"
 KAFKA_VOLUME_GI="${KAFKA_VOLUME_GI:-500}"
 KAFKA_CPU="${KAFKA_CPU:-4}"
@@ -118,8 +112,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if kubectl --context "$KUBE_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1; then
-	# The Kafka release while the operator runs: its claims are deleted by the
-	# operator reconciling the cluster's removal, not by Helm.
+	# Keep Strimzi running while it reconciles Kafka deletion and removes claims.
 	log "destroying the kafka release"
 	helmfile_here destroy --selector name=kafka
 	log "waiting for the brokers to go"

@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-# Shared shell for the run scripts: where the stack is, how to speak to it, and
-# the questions every driver asks whatever engine a run names.
-#
-# Nothing here knows an engine. How one is built, raised, made ready and read
-# on this stack is its own package's `engines/<name>/compose.sh`, which
-# `smoke.sh` sources for the run's engine alone.
-#
-# Sourced, never executed. Shell options belong to the caller — nothing here
-# sets or clears one, so a script that runs without `set -e` still does.
+# Shared run-script helpers. Engine-specific Compose operations live in
+# engines/<name>/compose.sh. Source this file; it leaves shell options to the caller.
 
-# Resolved from this file rather than from the caller's working directory. Every
-# path the stack mounts is relative to the compose file, so a script invoked
-# from elsewhere would otherwise mount a tree that is not this checkout.
+# Resolve paths from this file so commands work outside the repository root.
 _LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$_LIB_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/deploy/compose/local/docker-compose.yml"
 
-# Where a caller's prerequisites are written down, for the one message that has
-# to point at them. Set before sourcing this file: the cloud setup scripts under
-# deploy/ share these functions and have their own list of tools.
+# Callers with different prerequisites can set this before sourcing the file.
 PREREQ_DOC="${PREREQ_DOC:-docs/running.md}"
 
-# stderr, so a caller can still parse a command's stdout through a pipe while
-# the narration stays on screen.
+# Keep diagnostics on stderr so stdout remains parseable.
 log() {
 	printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
 }
@@ -32,14 +20,9 @@ die() {
 	exit 1
 }
 
-# Every profile is activated on every call. Compose interpolates the whole model
-# before it filters by profile, so naming them all costs nothing and removes the
-# class of failure where a service is invisible to the one command that needs
-# it. What actually starts is always named explicitly.
-#
-# The engines' profiles are read out of the compose files that declare them, so
-# a third engine adds a directory of its own rather than a name to this file.
-# `tools` is the harness's own service and is this file's to name.
+# Enable all profiles so every service is addressable; callers explicitly name what to
+# start. Discover engine profiles from their Compose files so adding an engine needs no
+# change here.
 compose() {
 	local profiles=() name
 	while IFS= read -r name; do
@@ -49,21 +32,14 @@ compose() {
 	docker compose -f "$COMPOSE_FILE" --profile tools ${profiles[@]+"${profiles[@]}"} "$@"
 }
 
-# One harness command, as the single string the image's shell entrypoint splits.
-# `-T` because some of these are parsed, and a TTY carriage-returns every line.
+# Run one command string through the image's shell entrypoint. Disable the TTY to keep
+# output parseable.
 harness() {
 	compose run --rm -T harness "$1"
 }
 
-# The verdict block, and a refusal unless the run is publishable. Shared by the
-# local smoke and the cloud drivers so that both read the same fields in the
-# same order — a second copy of this filter would drift, and the copy that lost
-# would be the one nobody reread.
-#
-# A geometry document is optional, and is one line after the block. No field in
-# it decides validity, which is why it is not in the filter above; it belongs
-# here rather than in a caller because it has to be shown before the refusal
-# below, and an invalid run's geometry is exactly as measured as a valid one's.
+# Print a consistent verdict for local and cluster runs, then fail if run_valid is false.
+# Show optional geometry before failing; geometry does not determine validity.
 print_verdict() {
 	local summary=$1 geometry=${2:-}
 	[[ -f $summary ]] || die "the scorer published no $summary"
@@ -74,8 +50,7 @@ print_verdict() {
   exactness: {exact: .exactness.exact, loss_rows: .exactness.loss_rows, duplicate_rows: .exactness.duplicate_rows},
   keepup
 }' "$summary"
-	# `select` rather than a conditional: a table that took no commit reports a
-	# null p50, and the line is then left out instead of printed over nothing.
+	# Omit geometry when there is no measured p50.
 	if [[ -n $geometry && -f $geometry ]]; then
 		jq -r '(.final.live // empty) | select(.size_quantiles.p50 != null)
   | "geometry: p50 \((.size_quantiles.p50 / 1048576 * 10 | round) / 10) MiB, "
@@ -85,13 +60,8 @@ print_verdict() {
 		die "run_valid is false; the block above says why, in full in $summary"
 }
 
-# confirm <what> — a y/N question, answered on stdin, for a step that destroys
-# measured data or the bucket holding it.
-#
-# stdin rather than the terminal device, so a caller can answer through a pipe.
-# A caller with no stdin at all is refused rather than defaulted: "nothing
-# answered" is not consent to delete. The caller has already printed what goes;
-# this asks about it.
+# Ask for confirmation before deleting measured data. Require an interactive stdin;
+# unattended callers must use their --yes option.
 confirm() {
 	[[ -t 0 ]] || die "nothing is attached to answer, and this does not assume one; pass --yes to run unattended"
 	printf '%s [y/N] ' "$1"
@@ -103,9 +73,7 @@ confirm() {
 	esac
 }
 
-# Refuse up front rather than half way through a run. A missing `yq` surfaces
-# otherwise as a scorer given an empty `--warmup-s`, minutes after the corpus
-# was generated.
+# Check prerequisites before starting work.
 require_host_tools() {
 	local missing="" tool
 	for tool in "$@"; do

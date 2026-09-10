@@ -1,21 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The scoring loop: walk a table's commits as they land, and judge the run.
+"""Score a live run by processing each table commit once.
 
-Every figure a run is reported by comes out of one pass over the table's
-commits, taken while the run is still going. The loop exists in that shape for
-two reasons. A run offers hundreds of gigabytes, so re-reading the table at
-each point of interest would cost more than the ingest under test; and the
-verdict has to be available before the run is torn down, because a sweep
-abandons an undersized fleet rather than paying for its full duration.
-
-So the live estimate and the final verdict are the same computation, and the
-verdict exists the moment the table drains. There is no post-drain pass: the
-tally, the observations and the keep-up samples the loop has already
-accumulated are exactly what the final figures are drawn from.
-
-Every artifact is written as it goes. A run that dies part way through still
-says how far it got, and `gate` reads these files while the loop is still
-writing them.
+Accumulate the tally, observations, and keep-up samples for both live and
+final metrics. Reuse them at drain instead of rescanning the table. Write
+artifacts incrementally for the gate and to preserve partial-run evidence.
 """
 
 from __future__ import annotations
@@ -69,11 +57,8 @@ KEEPUP_FILE = "keepup.json"
 
 GRID_MS = 1000
 
-# A catalog, an object store and a publish-log prefix are all remote, and any
-# of them can refuse one poll. Retrying a bounded number of times is what keeps
-# a five-second network fault from ending a three-hour run; raising after that
-# is what keeps a run that has lost its inputs from being scored as one that
-# simply stopped receiving commits.
+# Retry transient input failures with a bound. Persistent failures must
+# abort scoring instead of resembling an idle engine.
 MAX_CONSECUTIVE_READ_FAILURES = 5
 
 
@@ -95,27 +80,19 @@ class ScoreArgs:
     behind_max_ms: int = 5000
     expected_publish_shards: int = 1
     upload_prefix: str | None = None
-    # How many of a commit's data files are read at once. Each id column is one
-    # request whose cost is latency rather than bytes, so the count is set by
-    # how many of those a poll must overlap to stay inside its interval, not by
-    # the cores it has. What the reads hold follows this width rather than the
-    # commit's file count, because an array is released once it is tallied.
+    # Overlap ID-column reads to hide request latency. Limit concurrent arrays
+    # to this width and release each after tallying.
     read_workers: int = 32
-    # Who ran the DDL, in the run spec's own vocabulary. `engine` is the only
-    # value under which a table that is not there yet is a phase of the run
-    # rather than a fault: such an engine creates it from its first record, and
-    # the scorer starts before the producer does.
+    # An engine-owned table may not exist until the first record arrives.
     table_managed_by: str = HARNESS
 
 
 @dataclass
 class ScoreState:
-    """Everything the loop carries between polls.
+    """Accumulated tally, observations, and status shared between polls.
 
-    The state is accumulated rather than recomputed: the tally holds the rows
-    of every commit already read, and `seen` is what keeps a commit from being
-    read twice. Nothing here can be rebuilt from the table alone once snapshots
-    expire, which is why the artifacts are written as it goes.
+    Track seen snapshots and applied files to make retries safe. Persist artifacts
+    incrementally because expired snapshots may prevent later reconstruction.
     """
 
     args: ScoreArgs
@@ -125,18 +102,12 @@ class ScoreState:
     observations: list[freshness.Observation] = field(default_factory=list)
     samples: list[KeepupSample] = field(default_factory=list)
     seen: set[int] = field(default_factory=set)
-    # The data files of the commit currently being read. A poll that fails
-    # part-way through a commit is retried, and its rows must not be tallied
-    # twice; the set is cleared once the commit is fully applied.
+    # Track applied files so retrying a partial commit cannot count them twice.
     applied_files: set[str] = field(default_factory=set)
     records: list[publish_log.PublishRecord] = field(default_factory=list)
-    # The corpus columns the table does not hold, or None until the table has
-    # been loaded once. An engine-created table need not exist when the scorer
-    # starts, so the check cannot happen before the first successful load.
+    # Defer schema validation until the first successful table load.
     schema_mismatches: list[str] | None = None
-    # Whether the last poll found no table at all, so the absence is announced
-    # once rather than once per poll: it is one state of the run, not an event
-    # every few seconds.
+    # Track table absence to avoid repeating the same log message every poll.
     table_absent: bool = False
     offer_ended: bool = False
     read_failures: int = 0
@@ -153,40 +124,20 @@ class ScoreState:
         return publish_log.emit_times(self.records)
 
     def last_batch(self) -> int:
-        """The batch the prefix has to reach for the run to have drained.
-
-        While the offer is running that is the whole corpus. Once it has ended
-        it is the last batch actually published: a corpus replayed with
-        `--seconds` never offers the rest, and waiting for them would turn
-        every shortened replay into an idle stop.
-        """
+        """Return the final corpus batch, or final published batch after offer completion."""
         if self.offer_ended:
             return max((record.batch for record in self.records), default=-1)
         return self.corpus.batch_count - 1
 
     def producer_bound(self) -> bool:
-        """Whether the offer, rather than the engine, was the bottleneck.
-
-        A run whose producer could not keep to the schedule says nothing about
-        how fresh an engine kept the table, so this voids the run instead of
-        being reported as engine lag.
-        """
+        """Return whether producer lag or delivery failures invalidate the offer."""
         return publish_log.behind_ms(self.records) > self.args.behind_max_ms or any(
             record.errors for record in self.records
         )
 
     def run_valid(self) -> bool:
-        """Whether a result may be published from this run.
-
-        False for a run still going: nothing is valid until the table has
-        drained, because the figures a partial run offers are a lower bound on
-        its lag and an upper bound on its exactness.
-
-        And false for a run the loop abandoned, whatever the figures say. An
-        idle stop with every batch landed reads as exact and fresh — the shape
-        of it is a shard whose `done` trailer never uploaded — and a document
-        claiming both `aborted` and `run_valid` says two things at once, of
-        which readers only ever check the second.
+        """Require successful freshness and exactness results without aborts,
+        schema mismatches, or producer bottlenecks.
         """
         return (
             not self.aborted
@@ -206,25 +157,14 @@ def _append_line(path: Path, row: dict[str, object]) -> None:
 
 
 def _write_json(path: Path, document: dict[str, object]) -> None:
-    """Publish one artifact, replacing it whole.
-
-    Written through a temporary and renamed, because `gate` reads these while
-    the loop is still writing them: a reader that caught a half-written summary
-    would judge the run on a truncated document.
-    """
+    """Replace an artifact atomically so live readers cannot see partial JSON."""
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
 
 def _mirror(args: ScoreArgs, names: Iterable[str]) -> None:
-    """Copy the named artifacts to the upload prefix, if there is one.
-
-    Called after each file is written locally rather than instead of writing
-    it: the local copy is what the loop appends to and what a mounted volume
-    keeps, and the prefix is how another pod — the gate, or an operator — reads
-    a run it is not sharing a filesystem with.
-    """
+    """Upload named local artifacts when an upload prefix is configured."""
     if args.upload_prefix is None:
         return
     for name in names:
@@ -232,11 +172,7 @@ def _mirror(args: ScoreArgs, names: Iterable[str]) -> None:
 
 
 def _mirror_everything(args: ScoreArgs) -> None:
-    """Mirror every artifact the run produced, however the run ended.
-
-    A failed scorer publishes its artifacts too. The summary it leaves says the
-    reader is gone, and that is precisely what a driver has to be able to read.
-    """
+    """Upload all available artifacts, including after scorer failure."""
     _mirror(args, sorted(path.name for path in args.out_dir.iterdir() if path.is_file()))
 
 
@@ -304,17 +240,14 @@ def _keepup(state: ScoreState) -> dict[str, object]:
 
 
 def _live_lag_s(state: ScoreState) -> float | None:
-    """The lag as of the last sample, which is what the gate judges a run on.
+    """Measure live lag from the latest sample and covered batch emit time.
 
-    Measured the way `lag_series` measures it, so the live figure and the
-    published series cannot disagree: from the epoch while no batch is
-    complete, and from the newest complete batch's emit time after that.
+    Use the run epoch until the first batch is covered, matching ``lag_series``.
     """
     if not state.samples:
         return None
     prefix = state.tally.prefix()
-    # A prefix whose batch has no publish record yet is a log not uploaded, not
-    # a missing input, so the honest answer is that the lag is not measurable.
+    # An unuploaded publish record makes lag unknown until a later poll.
     reference = state.args.epoch_ms if prefix < 0 else state.emit_ms().get(prefix)
     return None if reference is None else (state.samples[-1].at_ms - reference) / 1000
 
@@ -334,21 +267,13 @@ def _producer_reason(state: ScoreState) -> str:
 
 
 def _exactness_reason(exactness: dict[str, object]) -> str:
-    """The exactness figures that are not zero, which are the faults it found.
-
-    Every violation kind raises one of the three, so a run that is not exact
-    always has something to name here.
-    """
+    """Summarize nonzero loss, duplication, and corruption counts."""
     faults = ("loss_rows", "duplicate_rows", "corrupt_batches")
     return "exactness: " + ", ".join(f"{name}={exactness[name]}" for name in faults if exactness[name])
 
 
 def _freshness_reason(result: freshness.FreshnessResult) -> str:
-    """Which clause of the freshness verdict failed, in the order it judges them.
-
-    Called only where the verdict is false, so the last clause is the one left
-    standing rather than a default.
-    """
+    """Describe the first failed freshness condition."""
     if not result.drained:
         return "freshness: the table never drained"
     if result.missing_emit_prefixes:
@@ -365,13 +290,9 @@ def _freshness_reason(result: freshness.FreshnessResult) -> str:
 
 
 def _invalid_reason(state: ScoreState, result: freshness.FreshnessResult, exactness: dict[str, object]) -> str:
-    """Why `run_valid` is false, as one clause of it rather than all of them.
+    """Choose the primary metric failure: producer, exactness, then freshness.
 
-    Ordered by what makes what moot: a bound producer turns every figure below
-    it into a statement about the offer rather than the engine, and rows that
-    arrived twice or not at all make the freshness of the rest beside the
-    point. The two clauses missing from it — an abandoned run and a voided
-    table — have already named themselves by the time this is reached.
+    Abort and schema failures are handled before this function.
     """
     if state.producer_bound():
         return _producer_reason(state)
@@ -381,12 +302,7 @@ def _invalid_reason(state: ScoreState, result: freshness.FreshnessResult, exactn
 
 
 def _write_summary(state: ScoreState) -> None:
-    """The one summary writer, used live and at the end.
-
-    Live and final summaries come from this function alone so they cannot
-    drift: a driver polling a run in flight reads the same fields, with the
-    same meanings, that the finished run publishes.
-    """
+    """Write the shared live and final summary format."""
     result = state.result
     document: dict[str, object] = {
         "run_valid": state.run_valid(),
@@ -425,9 +341,7 @@ def _load_inputs(args: ScoreArgs, clock: Clock, log: TextIO) -> ScoreState:
     corpus = metadata.read(args.corpus_uri)
     tally = BatchTally(metadata.read_manifest(args.corpus_uri), corpus.p)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    # The append-only artifacts are truncated here rather than appended to: a
-    # second scorer pointed at the same directory would otherwise publish one
-    # file describing two runs.
+    # Start fresh artifacts so another scorer cannot append unrelated history.
     for name in (SNAPSHOTS_FILE, KEEPUP_SAMPLES_FILE):
         (args.out_dir / name).write_text("", encoding="utf-8")
     print(
@@ -440,22 +354,11 @@ def _load_inputs(args: ScoreArgs, clock: Clock, log: TextIO) -> ScoreState:
 
 
 def _load_table(state: ScoreState, log: TextIO) -> Table | None:
-    """The table under test, or ``None`` where its engine has not created it yet.
+    """Load the table, tolerating absence only for engine-owned tables.
 
-    Only under `managed_by: engine`. Such an engine creates the table from its
-    first record, and the scorer is started first because its first reading is
-    the run's baseline — so the load fails on every poll until the offer has
-    begun, and a scorer that treated that as a fault would take no reading, the
-    launch would give up waiting for one, the producer would never start and the
-    engine would never see the record it creates the table from.
-
-    Under `harness` the table was created at staging, so its absence is a
-    fault: the bounded retry above keeps a brief catalog fault from ending a
-    run, and past that the load is left to raise.
-
-    A missing namespace is the same answer as a missing table: an engine that
-    creates its own table may create the namespace with it, and which of the
-    two a catalog reports is the catalog's choice.
+    Such engines may create the namespace and table after the first record.
+    Treat absence as an empty baseline so launch can start the producer. Missing
+    harness-owned tables remain errors.
     """
     try:
         table = load_table(state.args.catalog_props, state.args.table)
@@ -479,27 +382,17 @@ def _load_table(state: ScoreState, log: TextIO) -> Table | None:
 
 @dataclass(frozen=True)
 class PollRead:
-    """What one poll's read of the table found: a new commit, and the files it read."""
+    """Whether a poll saw new snapshots and how many data files it read."""
 
     seen_new: bool
     files: int
 
 
 def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> int:
-    """Tally one commit's new data files, reading their id columns at once.
+    """Read new ID columns concurrently and apply them to the tally serially.
 
-    A wide fleet writing a high-cardinality partition commits hundreds of small
-    files, and each id column is one request whose cost is latency rather than
-    bytes. Read one after another they take longer than the interval the table
-    is polled on, and a reader that has fallen that far behind the table is a
-    run the gate voids for staleness without ever measuring its engine.
-
-    The pool only reads. Every array is added to the tally from this thread, in
-    whatever order the reads return, which is sound because a batch is judged
-    on a count of its ids and their sum modulo a prime and both are
-    commutative. A file joins ``applied_files`` only once its ids are in the
-    tally, so a poll that failed part way through a commit is retried against
-    the files it had not applied rather than against none of them.
+    Counts and modular sums are order-independent. Track files only after their
+    IDs are tallied so failed polls retry only unapplied files.
     """
     pending = [file for file in files if file.path not in state.applied_files]
     if not pending:
@@ -509,51 +402,36 @@ def _apply_added_files(state: ScoreState, files: list[AddedFile]) -> int:
         reads = {pool.submit(read_id_column, file.path, file.file_format): file.path for file in pending}
         for read in as_completed(reads):
             state.tally.add_ids(read.result())
-            # Dropped from the map as it is consumed, which is safe because
-            # `as_completed` snapshotted its argument on entry. A future holds
-            # its result for as long as something holds the future, so keeping
-            # the whole map would keep every id column of the commit resident
-            # until the commit was applied.
+            # Remove consumed futures to release their arrays. `as_completed` retains
+            # its own snapshot of the pending futures.
             state.applied_files.add(reads.pop(read))
     finally:
-        # The queue is cancelled and the reads already running are waited for.
-        # A read that raised has failed the poll, so the rest of the queue is
-        # work nobody will use; the handful still executing are left to finish
-        # rather than race the pool the retry builds a moment later.
+        # Cancel queued work on failure and finish running reads before retrying.
         pool.shutdown(wait=True, cancel_futures=True)
     return len(pending)
 
 
 def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> PollRead:
-    """Read both sides of the run and apply every commit not yet seen.
+    """Read producer logs and unseen table commits.
 
-    Only appends feed the tally. A rewrite re-adds rows the tally already holds
-    — the same ids in new files — so counting it would read a compaction as the
-    engine duplicating rows. Every commit is recorded in `snapshots.jsonl`
-    whatever its operation, so what the table did stays visible.
+    Tally only append snapshots to avoid counting compaction rewrites as
+    duplicates. Record every operation in ``snapshots.jsonl``.
     """
-    # The done state is read before the records, and that order is what makes
-    # the record list trustworthy: a shard appends its trailer after its last
-    # record, so a trailer already present when the records are read guarantees
-    # those records are complete. Read the other way round, a shard finishing
-    # between the two reads would have a record list missing its last batch
-    # declared final, and the run would be scored over a partial offer.
+    # Read completion before records: a visible trailer guarantees the following
+    # record read includes the final batch. The opposite order could mark a
+    # partial record list complete.
     offer_ended = _offer_ended(state.args)
     state.records = publish_log.read_all(state.args.publish_logs_uri)
-    # Assigned only once the records it describes are in hand, so a failed read
-    # cannot leave a finished offer paired with the previous poll's records.
+    # Update completion only after the matching records have been read.
     state.offer_ended = offer_ended
     table = _load_table(state, log)
     if table is None:
-        # Zero rows and no snapshots, which is what the table holds. The sample
-        # `_poll_once` takes from this is the baseline the launch waits for.
+        # The empty-table sample provides the baseline launch waits for.
         return PollRead(seen_new=False, files=0)
     if state.schema_mismatches is None:
         state.schema_mismatches = check_table_schema(table.schema(), state.corpus)
     if state.schema_mismatches:
-        # Nothing is tallied from a table of the wrong shape. The rows it does
-        # hold would produce figures about a different table than the corpus
-        # describes, and publishing them is what the void exists to prevent.
+        # Do not publish measurements for a table that violates the corpus schema.
         return PollRead(seen_new=False, files=0)
     document = read_metadata(table)
     seen_new = False
@@ -565,10 +443,8 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> PollRead:
         files = added_files(document, info.snapshot_id, table.io)
         if info.operation == APPEND:
             read_files += _apply_added_files(state, files)
-            # Appended before the artifact line, so a failed write is retried
-            # against a duplicate observation rather than a duplicate line: the
-            # repeated observation is the same step of the same function and
-            # changes no figure drawn from it.
+            # Record the observation first: retrying a failed artifact write may repeat
+            # an idempotent observation, but must not duplicate an artifact line.
             state.observations.append(freshness.Observation(info.timestamp_ms, first_seen_ms, state.tally.prefix()))
         _append_line(
             state.args.out_dir / SNAPSHOTS_FILE,
@@ -591,18 +467,10 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> PollRead:
 
 
 def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
-    """One poll, returning whether it saw a commit it had not seen before.
+    """Poll inputs and return whether new snapshots were observed.
 
-    A poll that could not read its inputs samples nothing and rewrites no
-    summary: it has no new information, and a keep-up sample invented from the
-    last one would hide the gap from the gate, which reads an empty window as a
-    reader that stopped rather than as an empty backlog.
-
-    Every poll reports what its read cost and how many data files it read, and
-    a read phase past the interval gets a line of its own. A reader that cannot
-    finish inside its interval is falling behind the table, and its only other
-    symptom is a verdict voided for staleness — which says the reading is old
-    without saying that reading the commits is what took the time.
+    On read failure, leave samples and summary unchanged so the gate can detect
+    staleness. Log read duration and file count to diagnose slow polls.
     """
     started_ms = clock.now_ms()
     try:
@@ -630,8 +498,7 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
     state.samples.append(sample)
     _append_line(state.args.out_dir / KEEPUP_SAMPLES_FILE, cast(dict[str, object], asdict(sample)))
     _write_summary(state)
-    # Only these two, and every poll: they are what `gate` judges a run in
-    # flight on, and the rest of the artifacts exist only once it has ended.
+    # Refresh the live gate inputs on every successful poll.
     _mirror(state.args, (KEEPUP_SAMPLES_FILE, SUMMARY_FILE))
     if poll_ms > interval_ms:
         print(
@@ -650,13 +517,7 @@ def _poll_once(state: ScoreState, clock: Clock, log: TextIO) -> bool:
 
 
 def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
-    """Score the run from what the loop accumulated, and publish every artifact.
-
-    Both endings are scored the same way. A run that stopped while it was still
-    behind is not withheld from judgement: its freshness quantiles over what it
-    did commit, and the rows it never received, are the measurement — the run
-    is invalid, and the artifacts say why rather than being absent.
-    """
+    """Write final metrics from accumulated state, including for incomplete runs."""
     emit_ms = state.emit_ms()
     end_ms = clock.now_ms()
     result = freshness.freshness_result(
@@ -670,33 +531,25 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
         grid_ms=GRID_MS,
     )
     state.result = result
-    # Only the batches the publish logs say were sent are judged: a replay over
-    # a prefix of the corpus never offered the rest, and scoring them would
-    # report rows nobody sent as rows the engine lost.
+    # Exclude unoffered batches from shortened replays.
     exactness = exactness_result(state.tally, offered_batches={record.batch for record in state.records})
     state.exactness = exactness
     if ending == VOID:
-        # A void outranks a bound producer: the table is not the one the corpus
-        # describes, so no figure taken from either side describes anything.
+        # Schema failure takes precedence over a producer bottleneck.
         state.state = VOID
         state.reason = f"{SCHEMA_MISMATCH_REASON}: {'; '.join(state.schema_mismatches or [])}"
     else:
-        # A bound producer names the fault whichever way the run ended: the
-        # offer, not the engine, is what the figures describe.
+        # Report producer bottlenecks regardless of how the run ended.
         state.state = PRODUCER_BOUND if state.producer_bound() else ending
         if ending == IDLE_STOP:
             state.reason = IDLE_STOP_REASON
             # No verdict was reached, so the gate has nothing to judge the fleet on.
             state.aborted = True
-    # A run invalid for its figures rather than for how it ended says so in the
-    # summary: the failing clause is otherwise only visible inside whichever
-    # artifact holds it.
+    # Surface metric failures in the summary as well as detailed artifacts.
     if state.reason is None and not state.run_valid():
         state.reason = _invalid_reason(state, result, exactness)
     document: dict[str, object] = dict(asdict(result))
-    # Both time bases are published so another bound can be evaluated offline
-    # from one run's artifacts: the table's own commit timestamps, and the wall
-    # time at which the scorer first saw each commit.
+    # Publish both commit and observation clocks for offline re-evaluation.
     document["lag_series"] = {
         name: freshness.lag_series(state.observations, emit_ms, state.args.epoch_ms, end_ms, GRID_MS, name)
         for name in (freshness.TIMESTAMP_CLOCK, freshness.FIRST_SEEN_CLOCK)
@@ -710,14 +563,10 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
 
 
 def run(args: ScoreArgs, clock: Clock, log: TextIO) -> int:
-    """Score one run, returning 0 once it drained and 2 if it did not.
+    """Score until drain, idle stop, or schema failure.
 
-    The exit code says whether the loop reached a verdict, not what the verdict
-    was: a drained run that lost rows still returns 0, with `run_valid` false
-    in `summary.json`. Two endings return 2 because no verdict was reachable —
-    an idle stop, where the table stopped receiving commits with rows still
-    outstanding, and a void, where the table does not hold the columns the
-    corpus published. Neither leaves anything worth paying for the fleet for.
+    Return 0 for drain and 2 for idle or schema failure. A drained run can still
+    fail metric checks; read ``run_valid`` in the summary for that verdict.
     """
     state = _load_inputs(args, clock, log)
     try:
@@ -732,16 +581,12 @@ def run(args: ScoreArgs, clock: Clock, log: TextIO) -> int:
                 return _finalize(state, IDLE_STOP, clock, log)
             clock.sleep(args.poll_interval_s)
     except Exception as error:
-        # The last summary on disk has to say the reader is gone: a gate that
-        # read a stale running summary would report a dead run as passing.
+        # Persist reader failure so the gate cannot accept the previous running state.
         state.aborted = True
         state.reason = f"scorer_failed: {type(error).__name__}"
         _write_summary(state)
         print(f"SCORER_FAILED error={type(error).__name__}: {error}", file=log, flush=True)
         raise
     finally:
-        # Both endings, and a failure that is about to be re-raised: a run whose
-        # artifacts never left the pod is a run nobody can read. A failure here
-        # is left to propagate — an upload that did not happen is the one thing
-        # a caller of this must not be told went fine.
+        # Upload artifacts on every exit path. Propagate upload failures.
         _mirror_everything(args)

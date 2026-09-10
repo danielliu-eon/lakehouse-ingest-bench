@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Two properties of the tree a stranger clones, checked on every tracked file.
-
-The first is that each script and module says which licence it is offered
-under. A file copied out of the repository loses its `LICENSE` neighbour, so a
-per-file SPDX line is what keeps the terms attached to the code.
-
-The second is that nothing in the tree names a company, a product, a campaign,
-a real bucket or a real account id. It is run by strangers against their own
-accounts, so any of those is both a leak and a step nobody else can reproduce.
-Every one of those has a shape, and the shapes are cheap to check, which is
-what makes this a test rather than a review habit.
-"""
+"""Check tracked files for SPDX headers and unintended private identifiers."""
 
 from __future__ import annotations
 
@@ -23,36 +12,23 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The guard has to name the terms it bans, so it is the one file it cannot
-# scan. That is affordable only because the file holds patterns and nothing
-# else — no addresses, no ids, no prose about a private run.
+# Exclude this file because its rules and fixtures contain the identifiers they detect.
 SELF = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
 SPDX_LINE = "# SPDX-License-Identifier: Apache-2.0"
 LICENSED_SUFFIXES = (".py", ".sh")
 
-# The names that must never reach a published artifact: a company, its domain,
-# its products and its internal campaigns. `rise` is also an ordinary English
-# word, so prose has to reach for "increase" instead — a whole-word match keeps
-# `sunrise` and `peony` out of it, but not a sentence that genuinely wants the
-# verb.
+# Match private identifiers as whole words; ordinary uses of matching words are also rejected.
 INTERNAL_VOCABULARY = ("adevents", "eon", "maelstrom", "rise")
 
 # The account id AWS reserves for its own documentation, and so the one 12-digit
 # run in the tree that is a placeholder rather than somebody's account.
 PLACEHOLDER_ACCOUNT_ID = "123456789012"
 
-# The only email address the tree may carry: the commit-trailer address, should
-# one ever be quoted in a document. Trailers themselves live in commit
-# metadata, not in a tracked file.
+# Allow the commit-trailer address if quoted in a tracked document.
 PUBLIC_EMAIL = "noreply@anthropic.com"
 
-# Bucket names the tree is allowed to name. Three of them are generic words the
-# local compose stack mounts (`corpus`, `runs`, `warehouse`); the rest are
-# fixture and negative-fixture names the tests assert redaction against. A new
-# root has to be added here by hand, and that is the point of the list — it
-# turns "somebody pasted their own bucket into a test" into a failing test
-# rather than a published bucket name.
+# Explicitly allow local-stack and test-fixture bucket names. New names require review.
 FIXTURE_BUCKETS = frozenset(
     {
         "a-bucket",
@@ -71,19 +47,13 @@ FIXTURE_BUCKETS = frozenset(
     }
 )
 
-# The three shapes a runbook or a rendered manifest writes where a real bucket
-# belongs: a shell variable, an angle-bracketed slot, and a shouting
-# placeholder. None of them is a name, so none of them can leak one.
+# Allow shell variables and documentation placeholders in place of bucket names.
 PLACEHOLDER_ROOT = re.compile(r"\$\{?[A-Za-z_]\w*\}?|<[^>]+>|[A-Z][A-Z0-9_]*")
 
 
 @dataclass(frozen=True)
 class Rule:
-    """One shape a leak takes, and the texts of that shape that are allowed.
-
-    `group` picks which part of the match is compared against `allowed` — the
-    bucket rule matches a whole URI but only the root is a name.
-    """
+    """One shape a leak takes, and the texts of that shape that are allowed."""
 
     name: str
     pattern: re.Pattern[str]
@@ -154,12 +124,8 @@ class Leak:
 
 
 def leaks_in(text: str) -> list[Leak]:
-    """Every rule's unpermitted matches in one document, in rule order.
-
-    Separate from the tree walk so the matcher can be run against synthetic
-    documents. A green sweep over a clean tree is equally consistent with six
-    working rules and with six that have quietly stopped matching anything, so
-    the rules need a subject of their own.
+    """Return disallowed matches in rule order. Test the matcher independently of the
+    tracked-file scan so a clean tree cannot conceal a broken rule.
     """
     leaks: list[Leak] = []
     for rule in RULES:
@@ -171,13 +137,7 @@ def leaks_in(text: str) -> list[Leak]:
 
 
 def tracked_files() -> tuple[Path, ...]:
-    """Every file a clone gets.
-
-    `git ls-files` rather than a walk, because the things that would otherwise
-    dominate the scan are exactly the things a clone does not carry: the
-    operator's own `site.yaml`, the run directories under `runs/`, and the
-    virtualenv.
-    """
+    """List files included in a clone, excluding local config, run artifacts and virtualenvs."""
     listing = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,
@@ -189,14 +149,6 @@ def tracked_files() -> tuple[Path, ...]:
 
 
 def test_the_sweep_reads_the_whole_tracked_tree() -> None:
-    """A guard that reads nothing passes, so the reach of the walk is asserted too.
-
-    The named files are one per kind the tree holds — code, shell, documents,
-    recorded results, run specs, manifests, workflow, schema — so a listing
-    that lost a whole category fails here rather than passing quietly. One of
-    them is under `runs/`, which `.gitignore` excludes by directory and
-    re-includes by extension.
-    """
     names = {path.relative_to(REPO_ROOT).as_posix() for path in tracked_files()}
     assert len(names) >= 150, f"the tracked listing collapsed to {len(names)} files"
     for expected in (
@@ -220,12 +172,7 @@ def test_the_sweep_reads_the_whole_tracked_tree() -> None:
 
 
 def test_every_script_and_module_declares_its_licence() -> None:
-    """The SPDX line comes first, or second when the first line is a shebang.
-
-    A `#!` has to stay on line one to keep the file executable, and in Python a
-    comment above the module docstring leaves the docstring the first
-    statement — so both orders put the line as early as it can go.
-    """
+    """Keep a shebang first when present; the SPDX line follows it."""
     missing: list[str] = []
     for path in tracked_files():
         if path.suffix not in LICENSED_SUFFIXES:
@@ -238,13 +185,6 @@ def test_every_script_and_module_declares_its_licence() -> None:
 
 
 def test_nothing_in_the_tree_names_where_it_came_from() -> None:
-    """Every rule against every tracked file, reporting all leaks rather than the first.
-
-    A file that is not UTF-8 is skipped: none of the six shapes is a thing a
-    reader can find in a binary asset, and crashing the guard on the first
-    screenshot committed to `docs/` would take the rest of the tree's coverage
-    down with it.
-    """
     reported: list[str] = []
     for path in tracked_files():
         name = path.relative_to(REPO_ROOT).as_posix()
@@ -261,21 +201,14 @@ def test_nothing_in_the_tree_names_where_it_came_from() -> None:
 
 @dataclass(frozen=True)
 class Sample:
-    """A document the matcher should read a known set of leaks out of.
-
-    Each carries its own lookalike where one exists, because the failure that
-    matters is not a rule that misses a leak but a rule so loose that it is
-    turned off after its first false positive.
-    """
+    """A document the matcher should read a known set of leaks out of."""
 
     name: str
     text: str
     expected: tuple[tuple[str, str], ...]
 
 
-# These are literal strings of exactly what the guard bans, and they are inert
-# only because `SELF` keeps the tree sweep out of this file — that exclusion is
-# load-bearing for this test, not a convenience.
+# These negative fixtures depend on SELF excluding this file from the tree scan.
 LEAK_SAMPLES = (
     Sample(
         name="vocabulary as whole words",
@@ -382,6 +315,5 @@ def test_the_matcher_reads_a_leak_and_leaves_its_lookalike(sample: Sample) -> No
 
 
 def test_every_rule_is_exercised_by_a_sample() -> None:
-    """A rule with no sample is a rule nothing above would notice breaking."""
     covered = {rule_name for sample in LEAK_SAMPLES for rule_name, _ in sample.expected}
     assert covered == {rule.name for rule in RULES}

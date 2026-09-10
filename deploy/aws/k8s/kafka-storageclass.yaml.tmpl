@@ -1,7 +1,5 @@
-# The brokers' volumes. gp3 with provisioned throughput, because a broker
-# writes its own share of the offer and every replica it holds, and gp3's
-# baseline is below that at the offers this benchmark runs. Rendered by
-# deploy/aws/_stack_hooks.sh with envsubst.
+# Provision gp3 throughput for both offered records and replication traffic.
+# Rendered by deploy/aws/_stack_hooks.sh with envsubst.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -15,8 +13,6 @@ parameters:
   iops: "${KAFKA_VOLUME_IOPS}"
   encrypted: "true"
 reclaimPolicy: Delete
-# Bound when a broker is scheduled, so the volume is created in that broker's
-# zone; expandable, so a campaign can grow from a smoke to an hour run
-# without recreating the cluster.
+# Bind in the scheduled broker's zone and allow later volume expansion.
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true

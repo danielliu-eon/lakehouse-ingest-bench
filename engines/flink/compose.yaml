@@ -1,8 +1,6 @@
-# Included by the local stack, which owns the broker, the object store and the
-# catalog these services depend on. The image's platform is fixed by the
-# Dockerfile and is deliberately not restated per service: a runtime platform
-# selector is matched against the built image's manifest list, which a
-# single-platform build's attestation entry makes the daemon reject.
+# The local stack supplies Kafka, storage, and the catalog. Keep the platform
+# pin in the Dockerfile: a per-service selector can reject a single-platform
+# build whose manifest also contains an attestation.
 services:
   flink-jobmanager:
     profiles: [flink]
@@ -45,21 +43,14 @@ services:
         s3.access-key: admin
         s3.secret-key: password
     depends_on: [flink-jobmanager]
-  # The submitter, run once against a cluster the `flink` profile already
-  # started. It names no `depends_on`: a dependency on a service in another
-  # profile makes the project invalid unless that profile is also activated,
-  # and the ordering it would express is worthless here anyway — the two
-  # profiles are separate commands, and `depends_on` waits for a container to
-  # start rather than for a jobmanager to accept a job.
+  # Submit once after the flink profile is ready. Avoid cross-profile
+  # depends_on entries; compose.sh handles ordering and slot readiness.
   #
-  # `-d` so submission returns as soon as the cluster accepts the job. A
-  # streaming insert never completes, so an attached submission would hold
-  # this container open for the whole run. Pair `--wait` with an attached
-  # submission if a caller ever wants the opposite.
+  # Detached submission (-d) exits when the cluster accepts the job. Pair an
+  # attached submission with --wait to block instead.
   #
-  # `RUN_DIR` carries a default because interpolation precedes profile
-  # filtering — see the stack's own note. The default is a path that cannot
-  # hold a run, so only an actual submission without it fails.
+  # RUN_DIR has a default because Compose interpolates inactive profiles too.
+  # The nonexistent default causes only an actual submission to fail.
   flink-job:
     profiles: [flink-job]
     image: lakehouse-ingest-bench/flink:local

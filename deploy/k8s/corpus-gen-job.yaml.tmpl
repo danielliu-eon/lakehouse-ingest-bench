@@ -1,6 +1,5 @@
-# The corpus generator, one pod per shard. Indexed completion is what gives each
-# pod its shard number: `$JOB_COMPLETION_INDEX` reaches the command line through
-# the image's shell entrypoint, so one rendered command serves every shard.
+# One generator pod per shard. The shell entrypoint expands
+# $JOB_COMPLETION_INDEX to select each pod's shard.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -10,10 +9,7 @@ metadata:
     lakehouse-ingest-bench: "true"
 spec:
   backoffLimit: 0
-  # An hour, because nothing deletes this Job: `gen-corpus.sh` removes the
-  # previous one of this name on its way in, so a finished generation would
-  # otherwise sit in the namespace until the next generation runs. The hour is
-  # what leaves the log a refusal points at readable in the meantime.
+  # Retain completed Jobs for one hour so failure logs remain available.
   ttlSecondsAfterFinished: 3600
   completionMode: Indexed
   completions: __COUNT__
@@ -33,8 +29,7 @@ spec:
           args: ["__COMMAND__"]
           env: __ENV__
           envFrom: __ENV_FROM__
-          # Sized by the preset's batch bytes and not by the pod count; the
-          # driver's GEN_MEMORY is what raises it.
+          # Size memory for batch bytes; override through GEN_MEMORY.
           resources:
             requests:
               cpu: "1"

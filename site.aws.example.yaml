@@ -1,23 +1,19 @@
-# The AWS shape of site.example.yaml: one S3 bucket, Amazon MSK with IAM auth,
-# the Glue Iceberg REST catalog and an EKS cluster. Copy to site.yaml and fill
-# in. Every YOUR_ placeholder must go; loading refuses otherwise.
-#
-# deploy/aws/setup.sh prints every value below when it finishes.
+# AWS site using S3, MSK IAM authentication, Glue REST and EKS. Copy to site.yaml and
+# replace every YOUR_ placeholder. deploy/aws/setup.sh prints the infrastructure values
+# when it finishes.
 corpus_root: s3://YOUR_BUCKET/corpus
 runs_root: s3://YOUR_BUCKET/runs
 warehouse: s3://YOUR_BUCKET/warehouse
 kafka:
-  # The IAM bootstrap string, from
-  # `aws kafka get-bootstrap-brokers --query BootstrapBrokerStringSaslIam`.
+  # Use BootstrapBrokerStringSaslIam from aws kafka get-bootstrap-brokers.
   bootstrap_servers: YOUR_MSK_IAM_BOOTSTRAP:9098
   security:
     security.protocol: SASL_SSL
     sasl.mechanism: OAUTHBEARER          # librdkafka side; Flink renders AWS_MSK_IAM
     aws.region: YOUR_REGION              # harness pseudo-key: signs the MSK token; stripped before librdkafka
-  # Only for a run whose spec says kafka.value_encoding: confluent. This is
-  # the in-cluster registry deploy/aws/setup.sh applies with
-  # WITH_SCHEMA_REGISTRY=true; a hosted registry goes here instead, with
-  # basic_auth_user_info: ${env:NAME} where it authenticates.
+  # Required for kafka.value_encoding: confluent. Use the registry deployed
+  # with WITH_SCHEMA_REGISTRY=true or a hosted registry. Add
+  # basic_auth_user_info: ${env:NAME} if authentication is required.
   # schema_registry:
   #   url: http://schema-registry.ingest-bench.svc:8080/apis/ccompat/v7
 catalog:
@@ -37,13 +33,11 @@ kubernetes:
   service_account_annotations: {}      # only for IRSA users; Pod Identity needs none
   registry: YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com
   aws_region: YOUR_REGION              # rendered as AWS_REGION on every pod
-  # The Secret in `namespace` whose keys become environment variables on every
-  # pod a run creates. Only needed where a property is written ${env:NAME};
-  # see "Credentials" in docs/running.md for the one command that creates it.
+  # Optional Secret supplying ${env:NAME} values to pods.
+  # See Credentials in docs/running.md for creation instructions.
   # secret_name: bench-env
   node_selector: {}
   tolerations: []
-# Zeros are a placeholder, and validate-results.py refuses a result published at
-# them: for an instance of `vcpu` cores and `gib` GiB at P an hour, these two are
-# P/vcpu/2 and P/gib/2. docs/methodology.md, under Cost, is the rule.
+# Set nonzero prices before publishing results. For an instance costing P/hour with vcpu
+# cores and gib GiB, use P/vcpu/2 and P/gib/2. See docs/methodology.md, Cost.
 pricing: {vcpu_hour_usd: 0.0, gib_hour_usd: 0.0}

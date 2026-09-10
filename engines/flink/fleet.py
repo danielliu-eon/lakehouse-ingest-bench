@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The compute a managed Flink run is given, as the cost column reads it.
+"""Report Flink's requested compute by role for cost calculations.
 
-The knobs size the fleet in the units Flink asks for — a jobmanager, some
-number of taskmanagers, CPU and memory each — and a result is costed in vCPU
-hours and GiB hours. This is the one translation between the two, kept beside
-the knobs it reads so that adding a knob that changes the fleet's shape cannot
-leave the cost describing the previous shape.
-
-The container requests are what is reported, not the nodes they landed on: a
-run is charged for the compute it asked for, which is the same number whether
-the cluster packed it onto two machines or twenty.
+Translate the fleet knobs into vCPU-hours and GiB-hours. Costs use container
+requests, regardless of how Kubernetes distributes the pods across nodes.
 """
 
 from __future__ import annotations
@@ -24,7 +17,7 @@ _MB_PER_GIB = 1024
 
 
 def fleet(spec: RunSpec) -> list[FleetRole]:
-    """The run's roles: one jobmanager, and the taskmanagers the knobs asked for."""
+    """Return one JobManager role and the requested TaskManager fleet."""
     knobs = read(spec.engine_block)
     machine_type = knobs.machine_type or MACHINE_TYPE_UNSPECIFIED
     return [

@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The headline table every published result is read through.
+"""Render a comparison table from published run documents.
 
-`collect` writes one document per run; this turns the whole `results/`
-directory into the one page a reader compares them on. It reads nothing a
-document does not already carry — no recomputation, no second source of truth
-for a figure `collect` already derived — so the table can never disagree with
-the documents it was built from, and regenerating it is always safe.
-
-The render is a pure function of the documents given to it: same inputs, same
-bytes, every time. That is what lets `validate-results.py` treat a stale
-`RESULTS.md` as a publication failure rather than a judgement call.
+Read metrics from the documents without recomputing them. Rendering is
+deterministic so validation can detect a stale ``RESULTS.md``.
 """
 
 from __future__ import annotations
@@ -35,9 +28,7 @@ _NA = "n/a"
 
 
 def _validity_cell(summary: dict[str, object]) -> str:
-    """`valid`, or the reason a result is not: the same four words the
-    publication rules use, so a reader never has to cross-reference `state`.
-    """
+    """Return the validity label used in the results table."""
     if cast(bool, summary["run_valid"]):
         return "valid"
     state = summary["state"]
@@ -46,8 +37,7 @@ def _validity_cell(summary: dict[str, object]) -> str:
     if state == VOID:
         return "void"
     if state == IDLE_STOP:
-        # An engine that went idle before the offer drained did not keep up
-        # with what it was given — the fleet, not the offer, was short.
+        # An undrained idle stop indicates insufficient ingest capacity.
         return "undersized"
     return "not drained"
 
@@ -84,9 +74,7 @@ def _keepup_cell(keepup: dict[str, object] | None) -> str:
 
 
 def _cost_cell(run: dict[str, object], cost: dict[str, object]) -> str:
-    """`n/a` when the site never disclosed real prices, rather than a $0.00 that
-    reads as a free fleet.
-    """
+    """Show ``n/a`` when prices are undisclosed, rather than implying a free fleet."""
     pricing = cast(dict[str, object], run["site_pricing"])
     if pricing["vcpu_hour_usd"] == 0 and pricing["gib_hour_usd"] == 0:
         return _NA
@@ -135,13 +123,9 @@ def _row(document: dict[str, object]) -> tuple[tuple[str, str, str, str], str]:
 
 
 def render_results_table(documents: list[tuple[Path, dict[str, object]]]) -> str:
-    """The Markdown page `results/RESULTS.md` is generated as.
+    """Render ``results/RESULTS.md`` from run documents.
 
-    Every field is read straight out of a `run.json`; a document too broken to
-    read (a required field absent) fails loudly with the path that broke,
-    since a table that quietly drops a bad row would look like a clean run of
-    `results-table` when it is really a document that never should have
-    reached `results/` unvalidated.
+    Report malformed rows with their source paths instead of omitting them.
     """
     rows: list[tuple[tuple[str, str, str, str], str]] = []
     for path, document in documents:

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The compute a Spark run asked for, per role, for the cost column.
+"""Report Spark's requested compute by role for cost calculations.
 
-Requested and not observed: these are the numbers the spec chose, which is
-what a published result is costed against. What the cluster actually granted
-is `verify.py`'s question.
+Costs use the spec's requests. verify.py checks the running fleet separately.
 """
 
 from __future__ import annotations
@@ -15,15 +13,9 @@ _MB_PER_GIB = 1024
 
 
 def fleet(spec: RunSpec) -> tuple[FleetRole, ...]:
-    """The run's driver and executors as roles.
-
-    The driver is a role of its own because it is charged for whether or not it
-    does any of the writing: on a cluster it is a pod, and under
-    `--master local[N]` it is the only process there is.
-    """
+    """Return driver and executor roles, including the driver's compute cost."""
     knobs = read(spec.engine_block)
-    # The same word every engine reports, because a published result has to
-    # disclose the machine and `collect.validate` refuses this one by name.
+    # Use the shared missing-machine sentinel recognized by collect.validate.
     machine_type = knobs.machine_type or MACHINE_TYPE_UNSPECIFIED
     return (
         FleetRole("driver", 1, knobs.driver_cores, knobs.driver_mem_mb / _MB_PER_GIB, machine_type),

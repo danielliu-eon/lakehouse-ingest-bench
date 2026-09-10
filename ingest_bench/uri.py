@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Object-store and local-path access through fsspec, so every tool takes a URI.
-
-A corpus is written once and read by the producer, the scorer and whatever
-inspects it afterwards, and those do not always run on the machine that wrote
-it. Addressing a corpus by URI rather than by path is what lets the same
-command line name a laptop directory and a bucket prefix, so a local run and a
-cluster run differ in one argument rather than in a code path.
-"""
+"""Access local paths and object stores through a shared fsspec interface."""
 
 from __future__ import annotations
 
@@ -26,29 +19,17 @@ def is_remote(uri: str) -> bool:
 
 
 def filesystem_for(uri: str) -> tuple[fsspec.AbstractFileSystem, str]:
-    """The filesystem serving ``uri``, beside the path to hand it.
+    """Return the filesystem and backend path for a supported URI.
 
-    S3-compatible stores other than AWS are reached by pointing
-    ``AWS_ENDPOINT_URL`` at them, which is the same variable the AWS SDKs read,
-    so a compose-hosted store needs no argument of its own.
-
-    A scheme this module does not serve is refused rather than read as a
-    relative path. Falling through would write a bucket's worth of corpus into
-    a local directory named after the scheme, and nothing about that surfaces
-    until a cluster cannot find the corpus it was pointed at.
+    Use ``AWS_ENDPOINT_URL`` for S3-compatible stores. Reject unknown schemes
+    instead of treating them as local paths.
     """
     if uri.startswith("s3://"):
-        # No listings cache, because the scorer lists prefixes that are still
-        # being written into: a producer shard's publish log appears in a prefix
-        # an earlier poll already listed, and a cached listing would hide it —
-        # leaving the offer looking as though it never ended.
+        # Disable cached listings so the scorer sees new shard logs and completion.
         kwargs: dict[str, object] = {"use_listings_cache": False}
         endpoint = os.environ.get("AWS_ENDPOINT_URL")
-        # botocore resolves the region from AWS_DEFAULT_REGION only, while the
-        # rest of the AWS tooling (CLI, Java SDK, this harness's own pod
-        # templates) speaks AWS_REGION. Left unset, s3fs signs for us-east-1
-        # against the global endpoint, and a bucket that lives elsewhere
-        # rejects the redirected request as unsigned.
+        # Forward AWS_REGION for botocore, which otherwise reads AWS_DEFAULT_REGION.
+        # This keeps signing regions consistent with the other clients.
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
         if endpoint or region:
             client_kwargs: dict[str, str] = {}
@@ -72,8 +53,7 @@ def join(uri: str, *parts: str) -> str:
 
 def write_bytes(uri: str, data: bytes) -> None:
     fs, path = filesystem_for(uri)
-    # An object store has no directories to create, and asking one to make them
-    # costs a round trip that can also fail on a prefix a writer may not list.
+    # Create directories only for local filesystems; object stores need no mkdir.
     if not is_remote(uri):
         fs.makedirs(os.path.dirname(path), exist_ok=True)
     with fs.open(path, "wb") as handle:
@@ -81,15 +61,10 @@ def write_bytes(uri: str, data: bytes) -> None:
 
 
 def read_bytes(uri: str) -> bytes:
-    """The whole object at ``uri``, as it stands at this moment.
+    """Read the current object in one request.
 
-    One request rather than a buffered file, because objects here are rewritten
-    while they are being read: a producer republishes its publish log every few
-    seconds, and the scorer reads that log on every poll. A caching file object
-    pins the ETag it opened with and fails a later range request with
-    ``FileExpired`` once the object behind it has been replaced — so a read that
-    happened to span a republish would end the run rather than return the newer
-    bytes.
+    Avoid buffered range reads: concurrently replaced publish logs can invalidate
+    their pinned ETags and cause ``FileExpired`` errors.
     """
     fs, path = filesystem_for(uri)
     return bytes(fs.cat_file(path))

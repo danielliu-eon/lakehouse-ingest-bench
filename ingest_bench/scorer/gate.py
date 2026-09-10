@@ -1,28 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The live verdict that stops a run that cannot pass.
+"""Decide whether a live run should continue.
 
-A run lasts hours, and most of the runs in a sizing sweep are undersized by
-construction. Waiting for the full duration to learn that costs the sweep more
-than it costs to judge early, so the gate reads the two signals that separate a
-fleet which is merely warming up from one which will never catch up: the lag
-right now, and whether the backlog it carries has a rising floor.
-
-The floor is what makes the second signal trustworthy. Backlog is sawtoothed —
-it fills between commits and empties at each one — so its instantaneous value
-says almost nothing. The minimum over a window is the debt the fleet failed to
-clear, and a minimum that rises window over window is a fleet falling behind
-however busy each individual commit looked.
-
-UNDERSIZED and VOID are kept apart on purpose: the first is an answer about the
-fleet, the second is the absence of an answer, and a sweep that conflates them
-reports missing measurements as capacity limits.
-
-Which is why the first thing judged is whether anything is still measuring. A
-scorer that was killed rather than raising leaves a summary saying the run was
-going well: the flag that says otherwise is set by an `except` block, and an
-OOMKill, an eviction or a lost node runs none. So liveness is read off the age
-of the newest keep-up sample instead, and a reading nothing is still taking is
-the absence of an answer however healthy the last one looked.
+Check scorer liveness before judging lag or a rising backlog floor. A stale
+sample indicates missing measurements even if the last summary looked healthy.
+Window minima distinguish persistent backlog growth from normal commit cycles.
+Keep UNDERSIZED (a capacity result) separate from VOID (no valid measurement).
 """
 
 from __future__ import annotations
@@ -39,11 +21,10 @@ _FLOOR_WINDOWS = 3
 
 
 def _backlog_floors(samples: list[KeepupSample], *, now_ms: int, window_s: int, windows: int) -> list[int | None]:
-    """The unclearable backlog in each of the last ``windows`` windows, newest first.
+    """Return minimum backlog in each recent window, newest first.
 
-    A window with no samples yields None rather than zero: an empty window is a
-    reader that stopped, and treating it as an empty backlog would clear the
-    rising-floor signal exactly when the evidence went missing.
+    An empty window yields ``None`` because missing samples do not prove an
+    empty backlog.
     """
     step_ms = window_s * 1000
     floors: list[int | None] = []
@@ -66,16 +47,10 @@ def gate_verdict(
     epoch_ms: int,
     stale_after_s: int,
 ) -> tuple[str, str]:
-    """Judge a run in flight, with the figure that decided it.
+    """Return the live verdict and its reason.
 
-    Nothing is judged undersized before the adaptation period is up. A fleet
-    scaling out to meet its first rows is lagging for a reason that will pass,
-    and a gate that fired there would report every cold start as a capacity
-    limit.
-
-    ``stale_after_s`` is how old the newest keep-up sample may be and still be
-    a reading. Past it the verdict is void whatever the summary says, since the
-    summary is only ever as recent as the process that wrote it.
+    Require recent scorer samples. Apply the lag limit after adaptation, and
+    check for a rising positive backlog floor across three populated windows.
     """
     if freshness_partial["aborted"]:
         return VOID, "the freshness reader aborted, so the run has no measurement to judge"
@@ -100,9 +75,7 @@ def gate_verdict(
 
     recent, middle, oldest = _backlog_floors(keepup_samples, now_ms=now_ms, window_s=window_s, windows=_FLOOR_WINDOWS)
     if recent is None:
-        # Unreachable while the staleness bound is at or under the window's own
-        # width, and the point of the check is that raising the bound cannot
-        # turn an unfirable floor test into a pass.
+        # Keep this guard if the staleness limit is increased beyond the window.
         return VOID, f"no keep-up sample in the last {window_s}s, so the backlog floor cannot be read"
     if middle is not None and oldest is not None and recent > middle > oldest > 0:
         return UNDERSIZED, f"backlog floor rose {oldest} -> {middle} -> {recent} rows over three {window_s}s windows"

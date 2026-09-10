@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Create the Iceberg table a corpus is fed into, and drop it again.
+"""Create Iceberg tables from published corpus schemas.
 
-The table is the contract between the corpus and the engine under test: its
-column set and types come from what the corpus published, and its partition
-spec and table properties are read back out of the catalog by every engine, so
-this is the one place a run's scheme and encoding are set. Deriving the schema
-from a preset instead would let a preset edited after generation give the
-writer one schema and the engines another.
+Use recorded corpus columns and types, then apply the run's partitioning and
+table properties. This avoids depending on presets edited after generation.
 """
 
 from __future__ import annotations
@@ -43,9 +39,7 @@ PARTITION_RE = (
     r"|(unpartitioned))$"
 )
 
-# Iceberg numbers partition fields from 1000, and a table created with a single
-# partition field starts there. Pinning it keeps the spec of one run's table
-# comparable with another's.
+# Use Iceberg's initial partition-field ID for consistent table specs.
 PARTITION_FIELD_ID = 1000
 
 # The Iceberg type each type name a corpus publishes lands as.
@@ -61,7 +55,7 @@ _TYPES: dict[str, IcebergType] = {
 
 @dataclass(frozen=True)
 class Partition:
-    """A partition scheme as a run asked for it, before a schema binds it."""
+    """Requested partition transform before binding to a schema."""
 
     transform: str
     column: str | None
@@ -92,11 +86,9 @@ class Partition:
 
 
 def parse_partition(text: str) -> Partition:
-    """The scheme a ``--partition`` argument names.
+    """Parse a supported benchmark partition transform.
 
-    Only the transforms the benchmark scores are accepted. A time transform
-    would partition on a column the generator draws, so the partition truth
-    the corpus published would stop describing where its rows land.
+    Restrict transforms to those covered by corpus partition truth.
     """
     match = re.match(PARTITION_RE, text.strip())
     if match is None:
@@ -110,12 +102,7 @@ def parse_partition(text: str) -> Partition:
 
 
 def iceberg_schema(meta: CorpusMetadata) -> Schema:
-    """The table's columns, in the corpus schema's order and with its field ids.
-
-    Every field is required. A row the corpus wrote carries a value in every
-    column, so an optional column would let an engine that dropped one still
-    commit, and the scorer would read the loss as a null rather than a fault.
-    """
+    """Build required fields in corpus order with stable field IDs."""
     fields: list[NestedField] = []
     for index, name in enumerate(meta.field_names()):
         published = meta.iceberg_types[name]
@@ -126,7 +113,7 @@ def iceberg_schema(meta: CorpusMetadata) -> Schema:
 
 
 def partition_spec(meta: CorpusMetadata, partition: Partition) -> PartitionSpec:
-    """The scheme bound to the field ids ``iceberg_schema`` assigns."""
+    """Bind the requested transform to the Iceberg schema field IDs."""
     if partition.transform == UNPARTITIONED:
         return PartitionSpec()
     names = meta.field_names()
@@ -151,20 +138,10 @@ def partition_spec(meta: CorpusMetadata, partition: Partition) -> PartitionSpec:
 def _namespace_properties(
     props: dict[str, str], namespace: str, namespace_location: str | None, location: str | None
 ) -> dict[str, str]:
-    """What the namespace is created with, which is a location or nothing.
+    """Choose namespace properties from an explicit location or storage warehouse.
 
-    Some catalogs reject a namespace that names no location, so one is derived
-    when the catalog's ``warehouse`` is a storage URI. Only such a warehouse
-    can carry a namespace under it: a catalog that resolves ``warehouse`` as a
-    catalog identifier instead (AWS Glue's Iceberg REST endpoint reads an
-    account id there) would yield a location in no bucket — which is why a
-    caller that knows the storage warehouse passes the location itself.
-
-    Failing both, the directory this table was placed in is the answer: a
-    caller names a table location for exactly the catalog whose warehouse
-    cannot place one, and that directory is then the only root anything here
-    knows of. A warehouse that can place one still wins — it is the root every
-    later table in the namespace goes under, and one table's location is not.
+    Only URI warehouses can place namespaces; Glue REST may use an account ID.
+    If neither is available, use the parent of an explicit table location.
     """
     if namespace_location is not None:
         return {"location": namespace_location}
@@ -185,19 +162,10 @@ def create_table(
     location: str | None = None,
     namespace_location: str | None = None,
 ) -> Table:
-    """The created table, with its namespace created first if it was missing.
+    """Create the namespace if needed, then create the table with its properties.
 
-    ``properties`` take effect only here. An engine writing into a table it did
-    not create applies no table properties of its own, so a codec or a
-    row-group size set anywhere else silently does nothing.
-
-    ``location`` is this table's root and ``namespace_location`` the root every
-    table in the namespace goes under. They are separate because the second
-    outlives this call: the namespace is created once and holds every later
-    run's table, so giving it one run's table location would place the runs
-    after it under a directory named for the first. A caller that names only
-    the first gets the namespace placed in the directory it points at — see
-    `_namespace_properties`.
+    ``location`` is the table root; ``namespace_location`` is the shared namespace
+    root. Keep them separate so later tables do not inherit one run's directory.
     """
     catalog = open_catalog(props)
     namespace, name = table_identifier(table)
@@ -215,12 +183,7 @@ def create_table(
 
 
 def drop_table(props: dict[str, str], table: str) -> None:
-    """Drop the table, or accept that it is already gone.
-
-    A teardown also runs after a run that failed before creating anything, and
-    again when a retry re-enters it, so absence is the intended end state
-    rather than an error.
-    """
+    """Delete the table if present, allowing teardown retries."""
     catalog = open_catalog(props)
     try:
         catalog.drop_table(table_identifier(table))

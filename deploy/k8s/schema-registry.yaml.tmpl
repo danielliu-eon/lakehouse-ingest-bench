@@ -1,16 +1,9 @@
-# A Confluent-API schema registry in the harness's namespace, for runs whose
-# spec says `kafka.value_encoding: confluent`. Applied by deploy/aws/setup.sh
-# when WITH_SCHEMA_REGISTRY=true, and deleted with the namespace by
-# teardown.sh.
+# Optional in-memory Confluent-compatible registry. setup.sh applies it with
+# WITH_SCHEMA_REGISTRY=true; teardown removes it with the namespace.
 #
-# One replica with in-memory storage, which is Apicurio's default. A run
-# registers one schema at staging and every reader resolves it by id for the
-# rest of the run, so the registry holds a handful of documents and losing
-# them ends only the runs that were using it. A site that needs a registry to
-# outlive a pod brings its own and names it in site.yaml instead.
-#
-# Rendered by substituting its markers, like every template under deploy/k8s/.
-# See the templating note in deploy/aws/README.md.
+# A restart loses registered schemas and can interrupt active runs. Configure
+# an external registry in site.yaml if schemas must survive pod replacement.
+# See deploy/aws/README.md for template conventions.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -37,10 +30,7 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-          # The registry answers on its port before it will serve a
-          # registration, and a `stage` that arrives in between fails on a
-          # connection it cannot make. The probes are what hold the Service's
-          # endpoint back until that stops being possible.
+          # Wait for registration readiness, not merely an open port.
           readinessProbe:
             httpGet: {path: /health/ready, port: http}
             periodSeconds: 5

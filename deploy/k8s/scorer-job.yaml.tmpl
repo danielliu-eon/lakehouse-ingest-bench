@@ -1,11 +1,6 @@
-# The scorer, one pod for the whole run. It reads the table's commits and the
-# producers' publish logs from the moment the offer starts until the table
-# drains, and publishes every artifact as it goes — so a run that dies part way
-# through still says how far it got.
-#
-# One pod, and never more: two readers of one table would disagree about when a
-# commit became visible, and the run's freshness figures come from exactly one
-# of those judgements.
+# One scorer observes commits and publish logs through the drain phase,
+# uploading artifacts incrementally. Keep a single observer so each commit
+# has one visibility timestamp for freshness measurements.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -31,11 +26,8 @@ spec:
           args: ["__COMMAND__"]
           env: __ENV__
           envFrom: __ENV_FROM__
-          # Two cores because a poll reads a whole commit's id columns at once,
-          # and each of those reads decodes a Parquet footer and a column chunk
-          # through a bridge that holds the interpreter for every request it
-          # makes. Memory is not what the width costs: only a file's id column
-          # is read, and each one is released as soon as it has been tallied.
+          # Request two cores for commit ID scans and Parquet decoding. Read only
+          # ID columns and release each file after tallying it.
           resources:
             requests:
               cpu: "2"

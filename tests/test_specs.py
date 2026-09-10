@@ -43,11 +43,8 @@ def test_spec_refusals(tmp_path: Path) -> None:
 
 
 def test_a_name_too_long_to_reach_a_job_is_refused_where_it_is_written(tmp_path: Path) -> None:
-    """The Job controller's 63-character `job-name` label is the binding limit.
-
-    A run id is the name plus a 17-character stamp and the longest prefix a
-    driver puts in front of one is `drop-topic-`, so a longer name fails after
-    the topic, the table and the engine already exist.
+    """The name must leave room for the 17-character timestamp and drop-topic- prefix
+    within a 63-character job-name label.
     """
     base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
     path = tmp_path / "s.yaml"
@@ -65,7 +62,6 @@ def test_a_name_too_long_to_reach_a_job_is_refused_where_it_is_written(tmp_path:
 
 
 def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know(tmp_path: Path) -> None:
-    """The wire format is the corpus's own unless a run asks for the other one."""
     assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").kafka.value_encoding == "avro"
     confluent = model.load_run_spec(ROOT / "runs" / "smoke-external-confluent.yaml")
     assert confluent.kafka.value_encoding == "confluent"
@@ -80,7 +76,6 @@ def test_the_value_encoding_defaults_to_avro_and_refuses_a_name_it_does_not_know
 
 
 def test_the_producer_compression_defaults_to_zstd_and_refuses_a_codec_it_does_not_know(tmp_path: Path) -> None:
-    """The wire codec is the run's own, and only ever one a client can be handed."""
     assert model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml").producer.compression == "zstd"
 
     base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
@@ -101,28 +96,16 @@ def test_the_producer_compression_defaults_to_zstd_and_refuses_a_codec_it_does_n
 
 
 def test_a_site_may_not_choose_the_wire_codec_with_a_client_property(tmp_path: Path) -> None:
-    """A `compression.*` client property is refused, and named, at site load.
-
-    Site properties are applied over the producer's own configuration, so such a
-    key would decide the wire while `facts.json` and `run.json` publish the
-    codec the spec asked for. The codec belongs to the run; a site that states
-    one is a conflict rather than a preference.
-    """
     with pytest.raises(ValueError, match=r"compression\.type.*producer\.compression"):
         model.load_site(_site_file(tmp_path, "file:///corpus", security={"compression.type": "gzip"}))
     with pytest.raises(ValueError, match=r"compression\.level.*producer\.compression"):
         model.load_site(_site_file(tmp_path, "file:///corpus", security={"compression.level": "9"}))
-    # The properties beside it are what the site is for, and still reach a client.
     loaded = model.load_site(_site_file(tmp_path, "file:///corpus", security={"security.protocol": "SASL_SSL"}))
     assert loaded.kafka_security == {"security.protocol": "SASL_SSL"}
 
 
 def test_the_site_reads_a_schema_registry_and_keeps_its_reference(tmp_path: Path) -> None:
-    """The registry is optional, and its credential stays the reference the file wrote.
-
-    Resolving at load would put the value in the loaded config, which is what
-    every rendered file and every published artifact is written from.
-    """
+    """Resolving secrets at load time would expose them in rendered artifacts."""
     path = tmp_path / "site.yaml"
 
     def write(kafka: str) -> None:
@@ -160,11 +143,6 @@ def test_the_site_reads_a_schema_registry_and_keeps_its_reference(tmp_path: Path
 
 
 def test_the_gate_keys_are_optional_and_typed(tmp_path: Path) -> None:
-    """A spec that says nothing about the gate leaves the gate its own defaults.
-
-    Absent rather than a copy of the scorer's numbers: two files carrying one
-    default drift, and the loser is the file nobody reread.
-    """
     base = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
     shipped = model.load_run_spec(ROOT / "runs" / "smoke-external.yaml").scoring
     assert shipped.gate_adaptation_s is None and shipped.gate_window_s is None
@@ -245,11 +223,6 @@ def test_the_kubernetes_block_loads_a_cluster(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("path", sorted((ROOT / "runs").glob("*.yaml")), ids=lambda path: path.name)
 def test_every_shipped_run_spec_loads(path: Path) -> None:
-    """A spec that does not load is one an operator finds out about at stage time.
-
-    Each of these is copied and edited rather than written from nothing, so the
-    shipped ones are the shape every run of that engine starts from.
-    """
     spec = model.load_run_spec(path)
     assert spec.name == path.stem
     assert spec.engine in {*engines.MANAGED, "external"}
@@ -259,14 +232,7 @@ def test_every_shipped_run_spec_loads(path: Path) -> None:
 
 @pytest.mark.parametrize("path", sorted((ROOT / "runs").glob("*.yaml")), ids=lambda path: path.name)
 def test_every_shipped_run_spec_holds_knobs_its_engine_takes(path: Path, corpus: tuple[str, str]) -> None:
-    """A knob a shipped spec's engine refuses is a spec nobody can stage.
-
-    The loader carries the engine block through unread — the knobs belong to
-    the engine that declares them — so loading a spec says nothing about
-    whether the run it asks for is one the engine can be given. Neither
-    validator reads the corpus, so the smoke one stands in for whichever the
-    spec names.
-    """
+    """The spec loader passes engine blocks through; each engine must validate them."""
     spec = model.load_run_spec(path)
     if spec.engine not in engines.MANAGED:
         return
@@ -275,12 +241,6 @@ def test_every_shipped_run_spec_holds_knobs_its_engine_takes(path: Path, corpus:
 
 
 def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
-    """The cloud sequence in docs/running.md generates a scale corpus and stages a spec.
-
-    With only smoke specs shipped, the first thing a stranger following it had
-    to do was author one and size a fleet with no example to copy. One spec per
-    managed engine over the same preset, so the two are comparable.
-    """
     preset_name = "events-100mbs-skew"
     assert (ROOT / "workloads" / "presets" / f"{preset_name}.yaml").exists()
     scale = {
@@ -291,10 +251,7 @@ def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
     assert set(scale) == set(engines.MANAGED), f"{preset_name} has no shipped spec for every managed engine"
     for engine, spec in scale.items():
         assert spec.kafka.partitions == 32, engine
-        # The same offer for both, so the two runs differ only in the engine.
-        # Five is what docs/corpus.md's own sizing rule gives for this corpus's
-        # rate, and a spec that under-shards it measures the producer rather
-        # than the engine — which voids the run.
+        # Keep both engines on the same offer.
         assert spec.producer.shards == 5, engine
         assert spec.producer.compression == "lz4", engine
         assert spec.scoring.freshness_bound_s == 180.0 and spec.scoring.warmup_s == 120, engine
@@ -306,13 +263,6 @@ def test_a_full_scale_spec_ships_for_each_managed_engine() -> None:
     ids=["avro", "confluent"],
 )
 def test_a_cluster_external_spec_ships_for_each_wire_format(name: str, encoding: str) -> None:
-    """The tier-1 contract is the primary one, and a cluster is where it is measured.
-
-    The local pair sizes its fleet on a laptop, which is not compute any
-    cluster run is costed against — so these two ship placeholder rows to
-    replace, and the loader has to carry the placeholder rather than refuse it
-    the way a site's is refused.
-    """
     spec = model.load_run_spec(ROOT / "runs" / f"{name}.yaml")
     assert spec.is_external() and spec.external is not None
     assert spec.kafka.value_encoding == encoding
@@ -323,12 +273,7 @@ def test_a_cluster_external_spec_ships_for_each_wire_format(name: str, encoding:
 
 
 def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(tmp_path: Path) -> None:
-    """Defaulted, unlike the two beside it, so an older site config still loads.
-
-    A site written before Spark could be staged on a cluster names two accounts
-    and not three, and `deploy/aws/setup.sh` creates this one under exactly
-    this name.
-    """
+    """The default keeps site configs written before Spark support compatible."""
     loaded = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
     assert loaded is not None and loaded.spark_service_account == "ingest-bench-spark"
     renamed = model.load_site(_cluster_site(tmp_path, {**CLUSTER, "spark_service_account": "sparky"})).kubernetes
@@ -336,14 +281,12 @@ def test_the_spark_account_is_the_one_setup_creates_unless_the_site_renames_it(t
 
 
 def test_the_placement_keys_are_optional(tmp_path: Path) -> None:
-    """A cluster that places workloads nowhere in particular says nothing about it."""
     loaded = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
     assert loaded is not None
     assert loaded.service_account_annotations == {} and loaded.node_selector == {} and loaded.tolerations == []
 
 
 def test_the_aws_region_is_optional_but_never_empty(tmp_path: Path) -> None:
-    """A cluster on another cloud leaves the key out; an empty one names no region at all."""
     elsewhere = {key: value for key, value in CLUSTER.items() if key != "aws_region"}
     loaded = model.load_site(_cluster_site(tmp_path, elsewhere)).kubernetes
     assert loaded is not None and loaded.aws_region is None
@@ -365,12 +308,6 @@ def test_the_kubernetes_block_refuses_what_it_does_not_recognise(tmp_path: Path)
 
 
 def test_the_cluster_names_the_secret_its_pods_read(tmp_path: Path) -> None:
-    """One optional name, which is how a `${env:NAME}` in the file is answered.
-
-    Absent where nothing references a variable; never empty, because an
-    `envFrom` naming no Secret is refused by the API server at apply time
-    instead of here, where the file that asked for it is still in hand.
-    """
     absent = model.load_site(_cluster_site(tmp_path, dict(CLUSTER))).kubernetes
     assert absent is not None and absent.secret_name is None
     named = model.load_site(_cluster_site(tmp_path, {**CLUSTER, "secret_name": "ingest-bench-env"})).kubernetes
@@ -380,13 +317,6 @@ def test_the_cluster_names_the_secret_its_pods_read(tmp_path: Path) -> None:
 
 
 def test_a_cluster_site_refuses_a_credential_it_would_render_into_the_cluster(tmp_path: Path) -> None:
-    """A run on a cluster renders these properties into a ConfigMap and the bucket.
-
-    So a literal is refused where a reference is the only safe form, and the
-    refusal names the key and the form. A site with no cluster is the local
-    stack: its credentials are an image's published defaults and never leave
-    the machine, so the same value loads there.
-    """
     path = tmp_path / "site.yaml"
 
     def written(kafka: str = "", catalog: str = "", cluster: dict[str, object] | None = None) -> Path:
@@ -415,12 +345,6 @@ def test_a_cluster_site_refuses_a_credential_it_would_render_into_the_cluster(tm
 
 
 def test_a_cluster_site_refuses_a_registry_credential_written_out(tmp_path: Path) -> None:
-    """The registry's `user:password` is the same rule, under a key of its own.
-
-    It reaches a Flink source as a format option and a Spark job as nothing at
-    all, so where it is written out in full it lands in the ConfigMap that
-    carries the rendered script.
-    """
     path = tmp_path / "site.yaml"
 
     def written(user_info: str, cluster: dict[str, object]) -> Path:
@@ -577,12 +501,6 @@ def _confluent_spec(tmp_path: Path) -> Path:
 def test_stage_registers_the_corpus_schema_for_a_confluent_run(
     tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One registration per run, of the document `schema_avsc_uri` names.
-
-    The id it returns is the run's: the producer puts it in every header and a
-    reader resolves the writer schema by it, so `facts.json` has to carry it
-    for any engine that never sees the corpus.
-    """
     corpus_root, corpus_dir = corpus
     registry = FakeRegistration()
     monkeypatch.setattr(stage, "register_schema", registry.register)
@@ -606,7 +524,6 @@ def test_stage_registers_the_corpus_schema_for_a_confluent_run(
 def test_stage_registers_nothing_for_a_raw_avro_run(
     tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default encoding needs no registry, and says so in the facts."""
     corpus_root, _ = corpus
     registry = FakeRegistration()
     monkeypatch.setattr(stage, "register_schema", registry.register)
@@ -624,12 +541,6 @@ def test_stage_registers_nothing_for_a_raw_avro_run(
 
 
 def test_the_facts_state_the_codec_a_consumer_has_to_decode(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """Every run says which codec its values are compressed with, default or not.
-
-    An engine the harness never runs is configured from the facts alone, and a
-    consumer that cannot decode the codec reads no records at all — so the
-    codec is a fact about the run rather than a detail of the producer.
-    """
     corpus_root, _ = corpus
     site = _site_file(tmp_path, corpus_root)
 
@@ -647,7 +558,6 @@ def test_the_facts_state_the_codec_a_consumer_has_to_decode(tmp_path: Path, corp
 
 
 def test_stage_refuses_a_confluent_run_on_a_site_with_no_registry(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """Refused before the topic exists: the run has nowhere to register."""
     corpus_root, _ = corpus
     admin = FakeAdmin()
     with pytest.raises(ValueError, match="kafka.schema_registry"):
@@ -664,7 +574,6 @@ def test_stage_refuses_a_confluent_run_on_a_site_with_no_registry(tmp_path: Path
 def test_stage_drops_the_topic_when_the_registration_fails(
     tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A registry that refuses leaves no topic behind, like every other failure."""
     corpus_root, _ = corpus
     monkeypatch.setattr(stage, "register_schema", FakeRegistration(refuse=True).register)
     admin = FakeAdmin()
@@ -682,7 +591,6 @@ def test_stage_drops_the_topic_when_the_registration_fails(
 def test_the_registrys_credential_is_a_reference_until_the_call(
     tmp_path: Path, corpus: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Resolved at the registration and nowhere else, like every other secret."""
     corpus_root, _ = corpus
     monkeypatch.setenv("IB_TEST_REGISTRY_AUTH", "key:s3cret")
     registry = FakeRegistration()
@@ -774,12 +682,6 @@ def test_stage_writes_the_run_directory(tmp_path: Path, corpus: tuple[str, str])
 def test_stage_gives_the_table_and_its_namespace_a_location_under_the_warehouse(
     tmp_path: Path, corpus: tuple[str, str]
 ) -> None:
-    """The location comes from `site.warehouse`, never from the catalog's own property.
-
-    A Glue Iceberg REST catalog reads an account id in `warehouse`, so a table
-    created without a location lands nowhere a bucket can hold — and the
-    failure surfaces from inside the first writer rather than from the create.
-    """
     corpus_root, _ = corpus
     warehouse = f"file://{tmp_path}/explicit"
     site_path = _site_file(tmp_path, corpus_root, warehouse=warehouse)
@@ -793,19 +695,12 @@ def test_stage_gives_the_table_and_its_namespace_a_location_under_the_warehouse(
 
 
 def test_stage_refuses_a_cluster_run_with_no_image_tag(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """The tag is refused before the topic exists, not at the render that needs it.
-
-    Staging a managed run on a cluster ends in two documents naming an image,
-    and there is no image to name without the tag that was pushed.
-    """
     corpus_root, _ = corpus
     admin = FakeAdmin()
     with pytest.raises(ValueError, match="image-tag"):
         stage.stage(
             ROOT / "runs" / "smoke-flink.yaml",
-            # A reference and not the fixture's literal: a site declaring a
-            # cluster renders its properties into a ConfigMap, and a written-out
-            # credential is refused there before anything else is read.
+            # Cluster sites require environment references for credentials.
             _site_file(tmp_path, corpus_root, cluster=dict(CLUSTER), token="${env:IB_TEST_CATALOG_TOKEN}"),
             tmp_path / "runs",
             admin,
@@ -834,11 +729,7 @@ def _rest_cluster_site(tmp_path: Path, corpus_root: str) -> Path:
 
 
 def _engine_owned_flink_spec(tmp_path: Path) -> Path:
-    """The shipped Flink spec with the table left to the engine.
-
-    Staging it reaches the renderers without a catalog to create a table in,
-    which is what this file can exercise without a REST catalog running.
-    """
+    """The shipped Flink spec with the table left to the engine."""
     spec = yaml.safe_load((ROOT / "runs" / "smoke-flink.yaml").read_text())
     spec["table"] = {**spec["table"], "managed_by": "engine"}
     path = tmp_path / "flink-cluster.yaml"
@@ -849,12 +740,6 @@ def _engine_owned_flink_spec(tmp_path: Path) -> Path:
 def test_stage_on_a_cluster_renders_its_documents_and_uploads_the_run_directory(
     tmp_path: Path, corpus: tuple[str, str]
 ) -> None:
-    """Both Kubernetes documents are written, and every file is published.
-
-    The upload is what lets staging run as a Job: the pod that wrote the run
-    directory is gone by the time an operator wants it, so the directory has
-    to outlive the pod somewhere the operator can read.
-    """
     corpus_root, _ = corpus
     uploads = f"file://{tmp_path}/uploads"
     staged = stage.stage(
@@ -884,12 +769,7 @@ def test_stage_on_a_cluster_renders_its_documents_and_uploads_the_run_directory(
 
 
 def _named_engine_owned_spec(tmp_path: Path, engine: str, name: str) -> Path:
-    """The shipped spec for ``engine``, renamed, with the table left to the engine.
-
-    The name is the whole of what these cases vary. Leaving the table to the
-    engine is what lets staging reach the renderers with no catalog to create
-    one in, as `_engine_owned_flink_spec` does for the case above.
-    """
+    """The shipped spec for ``engine``, renamed, with the table left to the engine."""
     spec = yaml.safe_load((ROOT / "runs" / f"smoke-{engine}.yaml").read_text())
     spec["name"] = name
     spec["table"] = {**spec["table"], "managed_by": "engine"}
@@ -899,14 +779,7 @@ def _named_engine_owned_spec(tmp_path: Path, engine: str, name: str) -> Path:
 
 
 def test_stage_refuses_a_name_its_engines_operator_would_reject(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """The Flink operator refuses a FlinkDeployment named over 45 characters.
-
-    A run's object name is the spec's name plus a 17-character stamp, so the
-    check is against the derived name and not against the spec's own. It is
-    raised before the topic is created because the operator's own rejection
-    lands after the topic and the table exist, and leaves a driver waiting out
-    its whole timeout on a document that will never run.
-    """
+    """Flink caps deployment names at 45 characters, including the run timestamp."""
     corpus_root, _ = corpus
     over = "flink-run-with-a-29-char-name"
     assert len(over) == 29
@@ -924,7 +797,6 @@ def test_stage_refuses_a_name_its_engines_operator_would_reject(tmp_path: Path, 
 
 
 def test_stage_takes_the_longest_name_its_engines_operator_accepts(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """One character shorter derives the longest object name the limit allows."""
     corpus_root, _ = corpus
     within = "flink-run-with-a-28char-name"
     assert len(within) == 28
@@ -942,12 +814,6 @@ def test_stage_takes_the_longest_name_its_engines_operator_accepts(tmp_path: Pat
 def test_stage_takes_any_legal_name_for_an_engine_that_declares_no_limit(
     tmp_path: Path, corpus: tuple[str, str]
 ) -> None:
-    """No declared limit is no check, not a limit of zero.
-
-    The spark-operator publishes no name length of its own, and `spec.name`'s
-    own pattern already keeps every object name derived from it inside the 63
-    characters a Kubernetes label value takes.
-    """
     corpus_root, _ = corpus
     longest = "spark-run-with-the-longest-name-yet"
     assert len(longest) == 35, "the longest name spec.name's own pattern accepts"
@@ -1019,8 +885,7 @@ def test_a_secret_is_named_in_the_facts_and_resolved_at_the_cluster(
     staged = stage.stage(
         ROOT / "runs" / "smoke-external.yaml", site_path, tmp_path / "runs", admin, stamp="20260908T170000Z"
     )
-    # The site config keeps the reference, and so does every file staging wrote:
-    # a reference is publishable, and it says which variable a reader must set.
+    # Persist references; resolve values only at credential use sites.
     assert model.load_site(site_path).kafka_security["sasl.password"] == "${env:IB_TEST_KAFKA_PASSWORD}"
     facts = json.loads((staged.run_dir / "facts.json").read_text())
     assert facts["catalog_props"]["token"] == "${env:IB_TEST_CATALOG_TOKEN}"
@@ -1031,13 +896,8 @@ def test_a_secret_is_named_in_the_facts_and_resolved_at_the_cluster(
 
 
 def test_a_site_spelling_the_mechanism_in_the_plural_is_refused(tmp_path: Path, corpus: tuple[str, str]) -> None:
-    """The site is where the spelling is written, so it is where it is refused.
-
-    librdkafka takes `sasl.mechanisms` as readily as `sasl.mechanism`, and
-    every reader in this repository — the token callback and the Java-client
-    properties the engines render — reads the singular. A site carrying the
-    plural would connect and be given none of the MSK IAM translation, so it
-    is refused at load rather than at the first connection that needed it.
+    """librdkafka accepts both spellings, but the harness reads only sasl.mechanism
+    when translating MSK IAM configuration.
     """
     corpus_root, _ = corpus
     site_path = _site_file(

@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Stage a run on the cluster, and for a managed engine start it.
-#
-# Staging runs as a Job because it creates the topic, and a managed broker is
-# reachable from inside its own network rather than from an operator's machine.
-# The Job publishes its run directory to the runs prefix; everything after that
-# — fetching the directory, applying the engine's two documents, waiting for it
-# to run — is `kubectl` and `aws` work, and stays here.
-#
-# It prints the run id, and nothing else, on stdout.
+# Stage a run in a cluster Job, then start and verify its managed engine. The Job can
+# reach the broker's private network and uploads the run artifacts for this driver to
+# fetch.
+# Only `run_id: <id>` is printed on stdout; diagnostics go to stderr.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
@@ -16,12 +11,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=scripts/_k8s.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 
-# Staging resolves a corpus, reads its metadata, creates a topic and creates a
-# table. Minutes at most, but on a cold node behind an image pull.
+# Allow for corpus metadata reads, topic/table creation and a cold image pull.
 STAGE_WAIT_S="${STAGE_WAIT_S:-600}"
-# How long the engine may take to reach its running state. Long: the operator
-# has to schedule the whole fleet, each pod of which pulls an image of a few
-# hundred megabytes onto a node that may not exist yet.
+# Allow time to provision nodes, pull images and schedule the engine fleet.
 ENGINE_RUNNING_WAIT_S="${ENGINE_RUNNING_WAIT_S:-600}"
 ENGINE_POLL_S="${ENGINE_POLL_S:-10}"
 
@@ -81,9 +73,7 @@ k8s_read_site
 TAG="$(k8s_image_tag "$IMAGE_TAG")"
 IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 
-# The spec's own name, which is already a DNS label because a run id is built
-# from it. Naming the Job after the spec rather than after the run keeps it
-# addressable before the run has an id.
+# Use the spec name to address the staging Job before a run ID exists.
 SPEC_NAME="$(yq '.name' "$SPEC")"
 [[ -n $SPEC_NAME && $SPEC_NAME != null ]] || die "$SPEC sets no name, so this run has nothing to be called"
 ENGINE="$(yq '.engine' "$SPEC")"
@@ -96,11 +86,8 @@ SITE_CONFIGMAP="$STAGE_JOB-site"
 # Stage
 # ---------------------------------------------------------------------------
 
-# The two ConfigMaps belong to this Job alone, and one of them is the
-# operator's own site config — so every exit takes them with it rather than
-# only the one that reaches the deletion below. A failure inside the trap is
-# tolerated: it must not become this script's exit status, which is the
-# refusal that caused the exit.
+# Remove both temporary ConfigMaps on every exit, including the one holding site settings.
+# Cleanup failures must not replace the original exit status.
 delete_stage_configmaps() {
 	k8s_delete configmap "$SPEC_CONFIGMAP" || true
 	k8s_delete configmap "$SITE_CONFIGMAP" || true
@@ -129,17 +116,14 @@ k8s_render_apply deploy/k8s/stage-job.yaml.tmpl \
 	"SITE_CONFIGMAP=$SITE_CONFIGMAP"
 k8s_wait_job "$STAGE_JOB" "$STAGE_WAIT_S"
 
-# The run id comes off the Job's own log rather than from a second derivation
-# of it here: the stamp in it is the moment staging ran, and only staging knows
-# that. Read into a variable first, because under `pipefail` an `awk` that stops
-# at the line it wanted would fail the pipeline through `kubectl`.
+# Read the run ID from staging's log. Capture the log before parsing: awk may close a
+# pipeline early and cause kubectl to fail with SIGPIPE under pipefail.
 LOGS="$(k8s_job_logs "$STAGE_JOB")" || die "could not read job/$STAGE_JOB's log; try: kubectl logs job/$STAGE_JOB"
 RUN_ID="$(awk -F': ' '/^run_id: /{print $2; exit}' <<<"$LOGS")"
 [[ -n $RUN_ID ]] || die "job/$STAGE_JOB printed no run_id line; read its log with: kubectl logs job/$STAGE_JOB"
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
-# What the engine's two documents named their objects, which the polling and
-# the tailing below address.
+# Use the same object name as the engine manifests.
 RUN_OBJECT="$(k8s_object_name "$RUN_ID")"
 mkdir -p "$RUN_DIR"
 log "fetching the run directory into $RUN_DIR"
@@ -156,29 +140,23 @@ trap - EXIT
 # ---------------------------------------------------------------------------
 
 if [[ $ENGINE == external ]]; then
-	# On stderr, because this script's stdout is the run id. The same document
-	# is in the run directory, which the line below names.
+	# Keep facts on stderr so stdout contains only the run ID line.
 	log "start your engine against these facts, in $RUN_DIR/facts.json:"
 	cat "$RUN_DIR/facts.json" >&2
 	log "then: scripts/launch.sh $RUN_ID"
 else
-	# Every name below — the kind of object a run is, where its state sits, the
-	# Service that carries its API — comes from the engine's own module, so a
-	# third engine adds no line to this script.
+	# Read object names and status paths from the engine descriptor.
 	k8s_read_engine "$ENGINE" "$RUN_OBJECT"
 
-	# The ConfigMap first: the engine's pods mount it, and one scheduled before
-	# it exists waits on a volume rather than starting.
+	# Apply the ConfigMap before pods that mount it.
 	log "starting the engine"
 	k8s_apply_file "$RUN_DIR/$ENGINE_CONFIGMAP_FILE"
 	k8s_apply_file "$RUN_DIR/$ENGINE_DOCUMENT_FILE"
 
-	# The object is named after the run, so this also confirms that what
-	# reaches the running state is what was just applied.
+
 	log "waiting up to ${ENGINE_RUNNING_WAIT_S}s for $ENGINE_KIND/$RUN_OBJECT to reach $ENGINE_RUNNING_STATE"
 	waited=0
-	# The last error text reported, so a reconcile the operator is retrying is
-	# logged when it appears and not once per poll.
+	# Log each new reconciliation error once.
 	reported_error=""
 	while :; do
 		state="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_STATE_JSONPATH")"
@@ -186,30 +164,19 @@ else
 			log "$ENGINE_KIND/$RUN_OBJECT is $state"
 			break
 		fi
-		# Read on every poll, because it is the explanation for both of the
-		# refusals below rather than a state of its own.
+
 		error="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_ERROR_JSONPATH")"
-		# Comma-delimited on both sides of the match, so a state whose name is
-		# another's prefix cannot pass for it.
+		# Match whole comma-delimited states, not prefixes.
 		if [[ -n $state && ",$ENGINE_FAILED_STATES," == *",$state,"* ]]; then
 			k8s_engine_tail "$ENGINE_LOG_TARGET"
 			die "$ENGINE_KIND/$RUN_OBJECT went to $state before it ran${error:+: $error}; the lines above are the engine's own log"
 		fi
-		# A document the operator rejected reports no state at all, because the
-		# state belongs to a job it never created — so the loop would otherwise
-		# spend the whole wait on one. The error field alone does not say that
-		# has happened: an operator retrying a reconcile it may yet complete
-		# writes one too. What separates them is the lifecycle it reports
-		# beside the error, so the two together are the refusal and the error
-		# on its own is a step on the way. No log is tailed with it: a rejected
-		# document has no pods to have written one.
+		# An error can be transient during reconciliation. Fail only when the lifecycle also
+		# reports a terminal failure, including rejection before a job was created.
 		if [[ -n $error ]]; then
 			lifecycle="$(k8s_engine_field "$ENGINE_KIND" "$RUN_OBJECT" "$ENGINE_LIFECYCLE_JSONPATH")"
 			if [[ -n $lifecycle && ",$ENGINE_FAILED_STATES," == *",$lifecycle,"* ]]; then
-				# A document rejected outright has no pods to have written a
-				# log; one the operator gave up on after starting them does,
-				# and that log is the whole of why it gave up. So the tail is
-				# on the pods existing rather than on the kind of failure.
+				# Tail logs only if pods exist; rejected submissions may have none.
 				[[ -z "$(k8s_pods_present "$ENGINE_PROVENANCE_SELECTOR")" ]] ||
 					k8s_engine_tail "$ENGINE_LOG_TARGET"
 				die "the operator gave up on $ENGINE_KIND/$RUN_OBJECT ($lifecycle): $error"
@@ -227,39 +194,27 @@ else
 		waited=$((waited + ENGINE_POLL_S))
 	done
 
-	# A running state says the operator started something, not that what it
-	# started is the run this spec asked for: an engine drops a configuration
-	# key it does not know, a connector ignores a hint it does not implement,
-	# and each half of a fleet is sized by whatever configuration reached it —
-	# none of which fails a submission. So the settings a result would be
-	# attributed to are read back off the engine before the run is ever offered
-	# a corpus.
-	#
-	# A high local port for the tunnel, so it cannot collide with an engine an
-	# operator is already running on this machine.
+	# Read back engine settings before producing: RUNNING alone does not prove the submitted
+	# configuration took effect. Use a high local port to reduce conflicts with local
+	# services.
 	VERIFY_PORT=18081
-	# What a check exits with having found drift, as against having been unable
-	# to read the endpoint — which is worth another look, since a tunnel and an
-	# engine can both be a moment behind the state that reported it running.
+	# Configuration drift is fatal; unavailable endpoints and pending fleet placement have
+	# separate retry policies.
 	VERIFY_DRIFT_STATUS=3
 	VERIFY_PENDING_STATUS=4
 	VERIFY_TRIES=3
-	# Absolute, for the reason `abs_path` gives.
+	# Resolve the path before harness_local can change directory.
 	VERIFY_SPEC="$(cd -- "$RUN_DIR" && pwd)/spec.yaml" || die "could not resolve $RUN_DIR to check the engine against"
 	[[ -f $VERIFY_SPEC ]] ||
 		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"
-	# A reading and not an artifact, so it goes to a temporary file the trap
-	# below removes along with the tunnel. Made only for an engine whose check
-	# reads the fleet's shape: one that names no selector never has a file to
-	# be handed.
+	# Use a temporary pod snapshot only for verifiers that inspect fleet placement.
 	VERIFY_PODS=""
 	if [[ -n $ENGINE_PODS_SELECTOR ]]; then
 		VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
 			die "could not make a temporary file to read the run's pods into"
 	fi
 
-	# Trapped before the tunnel is opened, so no path out of the readings below
-	# — `die` included — leaves one behind.
+	# Install cleanup before opening the tunnel so failures leave no process behind.
 	trap 'k8s_port_forward_stop; [[ -z $VERIFY_PODS ]] || rm -f "$VERIFY_PODS"' EXIT
 	k8s_port_forward "svc/$RUN_OBJECT$ENGINE_REST_SERVICE_SUFFIX" "$VERIFY_PORT:$ENGINE_REST_PORT"
 
@@ -268,15 +223,12 @@ else
 	placement_waited=0
 	while :; do
 		verify_args=(--spec "$VERIFY_SPEC" --run-id "$RUN_ID" --rest "http://localhost:$VERIFY_PORT")
-		# Re-read on every try, because an executor still being scheduled is
-		# one of the things a retry is waiting for. An engine that names no
-		# selector is one whose check reads nothing off the pods.
+		# Refresh pod state on each retry to observe pending executors.
 		if [[ -n $ENGINE_PODS_SELECTOR ]]; then
 			k8s_write_pods "$VERIFY_PODS" "$ENGINE_PODS_SELECTOR"
 			verify_args+=(--pods "$VERIFY_PODS")
 		fi
-		# On stderr: this script's stdout is the run id, and the drift lines are
-		# for the operator reading the refusal below.
+		# Keep verifier output on stderr, separate from the run ID.
 		verify_status=0
 		harness_local "verify-$ENGINE" "${verify_args[@]}" >&2 || verify_status=$?
 		if ((verify_status == 0)); then
@@ -285,9 +237,8 @@ else
 		if ((verify_status == VERIFY_DRIFT_STATUS)); then
 			die "$ENGINE_KIND/$RUN_OBJECT is not running what $SPEC asked for; the lines above name every setting it dropped. It is left running, so the engine can be read before it is torn down"
 		fi
-		# A fleet still being placed gets the engine's own running wait, not
-		# the endpoint's tries: the object was RUNNING before its last pod
-		# had an image to start from.
+		# Pending pods get the full placement timeout; endpoint read failures get a limited
+		# retry count.
 		if ((verify_status == VERIFY_PENDING_STATUS)); then
 			placement_waited=$((placement_waited + ENGINE_POLL_S))
 			if ((placement_waited > ENGINE_RUNNING_WAIT_S)); then
@@ -304,9 +255,7 @@ else
 	done
 	k8s_port_forward_stop
 
-	# Recorded here because this is the last moment the fleet is certain to
-	# exist: a teardown reads the same thing, but only as a fallback, and by
-	# then the pods it would read are the ones it has just deleted.
+	# Capture image provenance while the fleet still exists; teardown provides a fallback.
 	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "$ENGINE_PROVENANCE_SELECTOR"
 fi
 

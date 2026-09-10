@@ -1,17 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Render a Kubernetes manifest from a template of ``__NAME__`` markers.
+"""Substitute ``__NAME__`` markers in Kubernetes templates.
 
-The templates under ``deploy/k8s/`` are applied by the run drivers, which know
-the site's registry, identities and placement and nothing about YAML. So the
-substitution is deliberately dumb — no conditionals, no loops, no schema — and
-every decision a manifest carries is made by the driver that renders it: a Job
-that wants no ``AWS_REGION`` is given an empty env list rather than a template
-that knows when a region exists.
-
-Refusing an unmatched marker and an unused variable is the whole of the
-validation, and it is what makes a typo cost one error message instead of a
-Job that runs under the wrong identity. Nothing here talks to a cluster;
-applying and waiting belong to ``scripts/_k8s.sh``.
+Drivers choose values and apply the result. This renderer performs one-pass
+substitution and rejects missing or unused variables.
 """
 
 from __future__ import annotations
@@ -28,11 +19,9 @@ MARKER_RE = re.compile(r"__[A-Z_]+__")
 
 
 def render_template(path: Path, variables: Mapping[str, str]) -> str:
-    """The template at ``path`` with every marker replaced by its value.
+    """Replace each template marker once.
 
-    The markers are read off the template rather than off the result, so a
-    value that itself contains the marker syntax stays the literal text the
-    caller passed: substitution is one pass, and a command line is data.
+    Marker-like text inside replacement values remains literal.
     """
     text = path.read_text(encoding="utf-8")
     markers = {match[2:-2] for match in MARKER_RE.findall(text)}

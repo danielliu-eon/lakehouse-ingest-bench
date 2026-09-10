@@ -1,12 +1,7 @@
-# One harness command as a Job: `stage`, `drop-topic`, `merge-corpus` — anything
-# that runs once and has to run inside the cluster, because the broker and the
-# catalog are reachable from the VPC and not from an operator's machine.
-#
-# Rendered by ingest_bench/k8s/render.py, which is also what refuses a marker
-# nobody gave a value for. See the templating note in deploy/aws/README.md.
-#
-# The whole command line is one argument, because the image's entrypoint is
-# `/bin/sh -c`: that shell splits the string and expands any variable in it.
+# Run one harness command inside the cluster's network.
+# Rendered by ingest_bench/k8s/render.py, which rejects unfilled markers.
+# The image's /bin/sh -c entrypoint parses the single command argument.
+# See deploy/aws/README.md for template conventions.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -15,15 +10,10 @@ metadata:
   labels:
     lakehouse-ingest-bench: "true"
 spec:
-  # No retry, here and in every Job beside this one. By the time one of these
-  # commands can fail it has already created a topic, published rows or written
-  # an artifact, so a second attempt is not a repeat of the first — it is a
-  # second run of a command whose first run left state behind.
+  # Do not retry automatically: failed commands may already have created
+  # topics, published records, or written artifacts.
   backoffLimit: 0
-  # An hour, because a driver that ends at this Job deletes nothing: a merge
-  # finishes `gen-corpus.sh`, so a finished one would otherwise sit in the
-  # namespace until the next generation runs. The hour is what leaves the log
-  # a refusal points at readable in the meantime.
+  # Retain completed Jobs for one hour so failure logs remain available.
   ttlSecondsAfterFinished: 3600
   completions: 1
   template:

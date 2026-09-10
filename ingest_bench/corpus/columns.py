@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Declared value shape of a corpus schema, and the validation that gates it.
+"""Declare and validate generated column distributions.
 
-A schema is a JSON file listing one declaration per generated column; the
-reserved columns are implicit and lead every schema. Everything a column can
-say about its values is declared here and checked before a single row is
-written, so a corpus cannot publish an axis it then flattens.
+Schema files list generated columns; reserved columns are implicit and come
+first. Validate declarations before generation.
 """
 
 from __future__ import annotations
@@ -14,13 +12,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypedDict, cast
 
-# The counter-based value generator mixes a row identity through this prime, so
-# it is part of the corpus contract: changing it changes every drawn value.
+# Checksum modulus; changing it changes published scoring truth.
 P = 1_000_000_007
 
-# Row identities are handed out a block per batch, so a row's identity is
-# `batch * ID_BLOCK + position` and stays disjoint across batches without any
-# shared counter.
+# Reserve a disjoint ID range per batch: batch * ID_BLOCK + position.
 ID_BLOCK = 2**32
 
 
@@ -29,9 +24,7 @@ class SchemaField(TypedDict):
     type: object
 
 
-# Exactness is scored off `id` and partition truth off `partition_key`, so they
-# lead every schema with fixed names and types: a schema free to rename or
-# retype them would change what the scored ground truth means.
+# Keep the scoring ID and partition-truth fields fixed in every schema.
 RESERVED_SCHEMA_FIELDS: list[SchemaField] = [
     {"name": "id", "type": "long"},
     {"name": "partition_key", "type": "string"},
@@ -50,13 +43,10 @@ KIND_BOOLEAN = "boolean"
 KIND_TIMESTAMP = "timestamp"
 KIND_BLOB = "blob"
 
-# The two reserved fields, as the names the generator computes rather than
-# draws.
+# Reserved fields are computed from row position.
 RESERVED_FIELDS = frozenset({"id", "partition_key"})
 
-# A role is what the benchmark asks of a column irrespective of its name, which
-# is what lets a declared schema rename its columns without invalidating the
-# fixed benchmark queries or the arrival-time and payload machinery.
+# Roles let queries and generation logic identify columns independently of names.
 ROLE_GENERIC = "generic"
 ROLE_EVENT_TIME = "event_time"
 ROLE_ENTITY = "entity"
@@ -65,10 +55,7 @@ ROLE_PAYLOAD = "payload"
 
 ROLES = frozenset({ROLE_GENERIC, ROLE_EVENT_TIME, ROLE_ENTITY, ROLE_SUM_MEASURE, ROLE_PAYLOAD})
 
-# Each of these is asked for by exactly one consumer, so exactly one column may
-# answer: event time drives the arrival timeline, the entity column is the
-# point-lookup key, the sum measure is what the aggregate queries sum, and the
-# payload column is the one the row-size calibration trims.
+# Require one event clock, lookup key, aggregate measure, and calibrated payload.
 SINGLETON_ROLES: dict[str, frozenset[str]] = {
     ROLE_EVENT_TIME: frozenset({KIND_TIMESTAMP}),
     ROLE_ENTITY: frozenset({KIND_CATEGORICAL}),
@@ -76,25 +63,18 @@ SINGLETON_ROLES: dict[str, frozenset[str]] = {
     ROLE_PAYLOAD: frozenset({KIND_BLOB}),
 }
 
-# A cardinality of zero means "a fresh value per row" — the state that denies
-# Parquet a dictionary and makes a column's bytes survive compression.
+# Zero selects the kind-specific unbounded distribution.
 UNBOUNDED_CARDINALITY = 0
 
-# An unbounded token is a truncated digest, so its value space is 16**width. A
-# row identity fits in 64 bits (`batch * ID_BLOCK + position`), so 16 hex
-# characters is the narrowest token that stays effectively injective over a
-# corpus; a shorter one would promise a fresh value per row and hand Parquet a
-# dictionary instead.
+# A 16-character hex token provides a 64-bit value space. Enforce this
+# minimum to limit collisions in unbounded token columns.
 MIN_UNBOUNDED_TOKEN_WIDTH = 16
 
-# A skewed rank is drawn through a materialized CDF, so its memory is linear in
-# the cardinality and is spent before the first row is written. Uniform ranks
-# are drawn by modulus and cost nothing, which is why this bounds a declared
-# skew rather than a cardinality.
+# Bound memory for materialized Zipf CDFs. Uniform ranks use modulus
+# and do not need this allocation.
 COLUMN_ZIPF_MAX_CARDINALITY = 1_000_000
 
-# The value kind is what a column declares; the Avro type is a consequence of
-# it, so a schema cannot disagree with the generator that fills it.
+# Derive the Avro type from the value kind.
 AVRO_TYPE_BY_KIND: dict[str, object] = {
     KIND_CATEGORICAL: "string",
     KIND_INTEGER: "long",
@@ -109,22 +89,16 @@ VALUE_KINDS = frozenset(AVRO_TYPE_BY_KIND)
 
 @dataclass(frozen=True)
 class ColumnDistribution:
-    """Declared value shape of one schema field.
+    """Distribution and semantic role of one generated field.
 
-    ``cardinality`` is the distinct value count and ``UNBOUNDED_CARDINALITY``
-    means one fresh value per row. ``alpha`` is a Zipf exponent over the value
-    ranks, so 0.0 is uniform. Every value is a pure function of
-    ``(seed, batch, position)``, which is what keeps regeneration bit-identical
-    and makes a shard's rows equal to the unsharded corpus's rows.
+    ``cardinality`` counts ranks; zero selects the unbounded form. ``alpha`` is
+    the Zipf exponent, with zero selecting uniform ranks. Generation is
+    deterministic for each row position.
 
-    Cardinality counts ranks, and a rank is not always a distinct corpus value.
-    A numeric column bounds its ranks to ``[minimum, maximum]``, so an unbounded
-    numeric column is dense in that range rather than injective over the corpus,
-    and a timestamp's ranks are jitter buckets inside one object's arrival slot,
-    so its corpus-wide value set is that count times the object count. Only
-    columns whose rank determines a value corpus-wide are gated on realized
-    cardinality; the incompressibility axis rides on blob and token columns,
-    whose unbounded form is injective in the row identity.
+    Ranks need not equal distinct corpus values: numeric values are bounded by
+    their range, and timestamps map ranks to millisecond buckets within each
+    batch window. Realized-cardinality checks apply only where the mapping can
+    be compared meaningfully.
     """
 
     name: str
@@ -191,15 +165,11 @@ def blob_column(name: str, cardinality: int = UNBOUNDED_CARDINALITY) -> ColumnDi
 
 
 def validate_value_space(column: ColumnDistribution) -> None:
-    """Reject a declaration whose value space cannot realize what it declares.
+    """Reject distributions that the column kind cannot realize.
 
-    ``cardinality`` counts ranks, and a rank becomes a distinct value only where
-    the kind has somewhere to put it. A numeric range narrower than the rank
-    count, a boolean asked for more than two values, a skew over ranks that are
-    never drawn, and a knob a kind never reads all declare an axis the corpus
-    then flattens — and ``corpus.json`` would still publish the declaration.
-    The realized-cardinality gate cannot substitute for this: it skips small
-    expectations by design, which is exactly where a collapsed column lands.
+    Check ranges, cardinality, skew, and unsupported options before sampling;
+    realized-cardinality gates skip small expectations and cannot replace this
+    validation.
     """
     bounded = column.cardinality != UNBOUNDED_CARDINALITY
     if column.alpha > 0.0:
@@ -239,10 +209,8 @@ def validate_value_space(column: ColumnDistribution) -> None:
             raise ValueError(f"column {column.name} is numeric, so it has no vocabulary or width to declare")
         if column.maximum < column.minimum:
             raise ValueError(f"column {column.name} has an inverted numeric range")
-        # Ranks are spread across [minimum, maximum] and then rounded — to a
-        # whole number, or to two decimal places — so the range has to hold at
-        # least as many values as there are ranks to spread over it. A single
-        # rank is the constant column, whose value is the minimum.
+        # The rounded numeric range must accommodate the declared ranks.
+        # A single-rank column is constant at the minimum.
         if column.kind == KIND_INTEGER:
             span = int(column.maximum) - int(column.minimum) + 1
         else:
@@ -270,8 +238,7 @@ def validate_value_space(column: ColumnDistribution) -> None:
     elif column.kind == KIND_BLOB:
         if column.vocabulary or column.minimum or column.maximum:
             raise ValueError(f"column {column.name} is a blob, so it has no vocabulary or numeric range to declare")
-        # The calibrated remainder is a single budget spent on the payload
-        # column, so any other blob declares the width it contributes to the row.
+        # Only the payload role uses calibrated width; other blobs declare their own.
         if column.role == ROLE_PAYLOAD:
             if column.width:
                 raise ValueError(
@@ -314,8 +281,7 @@ def validate_columns(columns: tuple[ColumnDistribution, ...]) -> None:
             raise ValueError(f"column {column.name} has a negative cardinality")
         if column.alpha < 0:
             raise ValueError(f"column {column.name} has a negative alpha")
-        # A timestamp is the arrival clock, and arrival order belongs to the object
-        # stream rather than to a column, so only the event-time column can be one.
+        # Timestamp generation depends on the batch arrival window.
         if column.kind == KIND_TIMESTAMP and column.role != ROLE_EVENT_TIME:
             raise ValueError(f"column {column.name} is a timestamp, which only the {ROLE_EVENT_TIME} column may be")
         validate_value_space(column)
@@ -397,12 +363,9 @@ def apply_column_override(column: ColumnDistribution, raw: dict[str, object]) ->
 
 
 def column_from_dict(raw: dict[str, object]) -> ColumnDistribution:
-    """One declared column: ``name`` and ``kind``, plus any distribution key.
+    """Read required ``name`` and ``kind`` fields and optional distribution settings.
 
-    The kind is what fixes the Avro type, so a declaration cannot describe a
-    column the generator would fill with a different type. Every other key is
-    optional and falls back to the dataclass default, which is what lets a
-    schema file say only what it means to bend.
+    Reject unknown keys and use dataclass defaults for omitted settings.
     """
     name = str(raw["name"])
     unknown = sorted(set(raw) - COLUMN_DECLARATION_KEYS)
@@ -438,9 +401,7 @@ def apply_column_overrides(
 
 
 def iceberg_type_name(avro_type: object) -> str:
-    """The Iceberg type each corpus Avro type lands as, published in corpus.json
-    for engines that create their own table.
-    """
+    """Return the Iceberg type name published for an Avro field."""
     if avro_type == "int" or avro_type == "long":
         return "long"
     if avro_type == "double":
@@ -451,8 +412,7 @@ def iceberg_type_name(avro_type: object) -> str:
         return "string"
     if avro_type == "bytes":
         return "binary"
-    # Iceberg's `timestamp` is microsecond-precision and has no narrower form,
-    # so a millisecond event time lands in it widened rather than truncated.
+    # Iceberg timestamps use microsecond precision; widen millisecond values.
     if isinstance(avro_type, dict) and avro_type.get("logicalType") == "timestamp-millis":
         return "timestamp"
     raise ValueError(f"unsupported corpus Avro type: {avro_type!r}")

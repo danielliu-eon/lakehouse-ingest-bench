@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The one catalog client and the one property loader every tool here shares.
+"""Shared catalog client creation and property loading.
 
-A run addresses its table through whatever catalog the site runs, and the
-properties that reach it decide which one that is. Building the client in a
-single place is what keeps a property file authoritative: a tool that
-constructed a REST client directly would honour the file's credentials while
-silently ignoring the catalog implementation it named.
+Select the catalog implementation from its properties so every command honors
+the same configuration.
 """
 
 from __future__ import annotations
@@ -19,12 +16,7 @@ from ingest_bench.specs.env import resolve_env_placeholders
 
 
 def _parse_key_value(raw: str, source: str) -> tuple[str, str]:
-    """One ``KEY=VALUE`` setting, or a refusal naming where it came from.
-
-    Strict about the separator and the key: a malformed line in a credential
-    file otherwise reaches the catalog as a property nobody wrote, and the
-    failure then surfaces as an authentication error against the wrong claim.
-    """
+    """Parse a ``KEY=VALUE`` setting, reporting malformed input with its source."""
     if "=" not in raw:
         raise ValueError(f"{source} must contain KEY=VALUE, got {raw!r}")
     key, value = raw.split("=", 1)
@@ -39,17 +31,11 @@ def parse_key_values(pairs: Sequence[str], source: str) -> dict[str, str]:
 
 
 def load_catalog_props(values: Sequence[str], files: Sequence[str] = ()) -> dict[str, str]:
-    """Catalog properties from files and command line, files first.
+    """Load catalog properties from files, then apply command-line overrides.
 
-    Command line last so an operator can override one property of a checked-in
-    file without editing it. Comment and blank lines are skipped so a property
-    file can carry its own provenance. A file is preferred over a flag for a
-    credential: on argv a token lands in every process listing.
-
-    A ``${env:NAME}`` value is replaced from the environment before the
-    properties are returned, so a checked-in property file can name a
-    credential without holding one. Every caller here opens a catalog with what
-    it gets back and writes none of it down.
+    Skip blank lines and comments. Resolve ``${env:NAME}`` references before
+    returning. Use files or environment references for credentials to avoid
+    exposing them in process arguments.
     """
     props: dict[str, str] = {}
     for filename in files:
@@ -71,25 +57,15 @@ def load_catalog_props(values: Sequence[str], files: Sequence[str] = ()) -> dict
 
 
 def open_catalog(props: dict[str, str]) -> Catalog:
-    """The catalog the properties name.
-
-    ``load_catalog`` rather than a concrete class: it resolves the
-    implementation from the properties, so a property file naming a non-REST
-    catalog is honoured instead of being read as REST while every other
-    property is applied.
-    """
+    """Open the catalog implementation selected by ``props``."""
     return load_catalog("bench", **props)
 
 
 def table_identifier(name: str) -> tuple[str, str]:
-    """``(namespace, table)`` for a catalog, from a two- or three-part name.
+    """Return ``(namespace, table)`` from a two- or three-part table name.
 
-    A query engine addresses a table as ``catalog.schema.table`` while a
-    catalog client is already scoped to one catalog, so a leading catalog
-    segment is dropped and the namespace is always the single segment before
-    the table name. Splitting off only the last segment instead would yield
-    the namespace ``catalog.schema``, which resolves to a different table than
-    the same ``--table`` string gives a tool that dropped it.
+    Drop the optional catalog segment because the client is already scoped to
+    that catalog. Namespaces are always a single segment.
     """
     parts = name.split(".")
     if len(parts) not in (2, 3) or not all(parts):

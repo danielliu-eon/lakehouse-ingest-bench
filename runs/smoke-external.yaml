@@ -15,6 +15,5 @@ external:
   version: "0.0"
   notes: "replace with the engine you are scoring"
 fleet:
-  # The compute the walk-through's stand-in engine actually gets, so a result
-  # from this spec is costed against what ran. Replace it with your own.
+  # Replace the example engine's fleet with the resources your engine uses.
   - {role: worker, count: 2, vcpu: 2, gib: 2, machine_type: laptop}

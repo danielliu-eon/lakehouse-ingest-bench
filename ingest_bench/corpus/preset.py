@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A preset is the workload definition: a schema plus the shape of the stream.
+"""Define workloads through a schema and a stream schedule.
 
-Everything downstream renders from the corpus this produces, so the preset is
-hashed in full and the hash names the corpus directory: two shapes can never
-share a directory, and `corpus.json` is the only authority for what was built.
+Hash the preset to identify its corpus directory. The generated
+``corpus.json`` records what was built.
 """
 
 from __future__ import annotations
@@ -102,17 +101,10 @@ def _apply_override(raw: dict[str, object], assignment: str) -> None:
 
 
 def _refuse_event_time_finer_than_the_batch(preset: Preset) -> None:
-    """Refuse an event-time cardinality the batch's own window cannot realize.
+    """Reject event-time cardinality beyond the batch's millisecond window.
 
-    An event time's ranks are jitter buckets inside the window its batch owns,
-    and a bucket is floored to a millisecond — so a window of N milliseconds
-    holds at most N distinct event times whatever a column declares. A higher
-    cardinality is an axis the corpus flattens while `corpus.json` goes on
-    publishing the declaration, which is the one thing every consumer reads
-    the workload from.
-
-    The unbounded declaration asks for as many values as the window holds and
-    is always realizable.
+    A window of N milliseconds supports at most N distinct timestamps. The
+    unbounded form uses the available window and needs no cardinality check.
     """
     for column in preset.columns:
         if column.role != c.ROLE_EVENT_TIME or column.cardinality == c.UNBOUNDED_CARDINALITY:
@@ -155,11 +147,8 @@ def load_preset(source: str, *, workloads_dir: Path, overrides: Sequence[str] = 
     bad = [k for k in key_columns if k not in by_name]
     if bad:
         raise ValueError(f"kafka_key_columns name unknown column(s): {', '.join(bad)}")
-    # A Kafka key is UTF-8 text, so a categorical column is the only kind that can
-    # supply one. `partition_key` is the sole exception: it is a reserved string
-    # column, computed rather than drawn, so it declares no value kind of its own.
-    # `id` is reserved too but is a long, which is why the reserved kind cannot
-    # stand in for the check.
+    # Kafka keys require categorical strings or the reserved `partition_key`.
+    # The reserved numeric `id` cannot be used.
     non_string = [k for k in key_columns if k != "partition_key" and by_name[k].kind != c.KIND_CATEGORICAL]
     if non_string:
         raise ValueError(f"kafka_key_columns must be string columns: {', '.join(non_string)}")
@@ -185,11 +174,9 @@ def load_preset(source: str, *, workloads_dir: Path, overrides: Sequence[str] = 
     ):
         raise ValueError("partition_count, duration_s, batch_interval_ms and offered_bytes_per_s must be positive")
     preset.batch_count  # noqa: B018 - validates divisibility at load time
-    # A column's own value space is checked where the column is declared; this
-    # one is bounded by a preset key instead, so it is checked here.
+    # This check needs the preset's batch window, not just the column declaration.
     _refuse_event_time_finer_than_the_batch(preset)
-    # The Iceberg partition column is written from a sidecar keyed by the Kafka
-    # key, so the key columns always have to include it for that sidecar to exist.
+    # The partition column must have a key sidecar.
     if "partition_key" not in preset.kafka_key_columns:
         preset = replace(preset, kafka_key_columns=(*preset.kafka_key_columns, "partition_key"))
     return preset
@@ -202,7 +189,7 @@ def effective_dict(preset: Preset) -> dict[str, object]:
 
 
 def canonical_json(data: dict[str, object]) -> str:
-    """The one rendering a preset is compared and hashed by, so key order cannot change either."""
+    """Serialize a preset consistently for comparison and hashing."""
     return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
@@ -211,16 +198,10 @@ def corpus_hash(preset: Preset) -> str:
 
 
 def preset_from_effective(effective: dict[str, object], schema_name: str) -> Preset:
-    """The preset a corpus was generated from, rebuilt from its published effective form.
+    """Rebuild a preset from the effective form recorded in ``corpus.json``.
 
-    Merging shard corpora has to gate the whole the way a single pass would,
-    and the gates read the preset rather than the corpus, so the preset has to
-    come back out of `corpus.json` — a schema file on the merging machine
-    would be a second source of truth for a corpus that already exists.
-
-    The rebuilt preset is required to reproduce the effective form it was read
-    from: anything the round trip dropped would gate the merged corpus against
-    a workload nobody generated, and the corpus hash would no longer name it.
+    Require an exact round trip so merge gates use the generated workload,
+    independently of schema files on the merging machine.
     """
     if str(effective["schema_name"]) != schema_name:
         raise ValueError(f"the effective preset names schema {effective['schema_name']!r}, not {schema_name!r}")
@@ -237,8 +218,7 @@ def preset_from_effective(effective: dict[str, object], schema_name: str) -> Pre
         corpus_epoch=str(effective["corpus_epoch"]),
         kafka_key_columns=tuple(str(name) for name in cast(list[object], effective["kafka_key_columns"])),
         column_overrides=cast(dict[str, dict[str, object]], effective["column_overrides"]),
-        # The reserved columns lead every schema and carry no declaration, so
-        # `build_columns` is what puts them back rather than the published form.
+        # Restore implicit reserved columns before rebuilding generated columns.
         columns=c.build_columns(
             tuple(c.column_from_dict(entry) for entry in declared if str(entry["kind"]) != c.KIND_RESERVED)
         ),

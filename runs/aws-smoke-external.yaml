@@ -1,14 +1,8 @@
-# The external smoke on a cluster: the harness creates the topic and the table,
-# prints the facts and waits, and an engine it never touches consumes them.
-# `smoke-external.yaml` is the same run on the local stack, and
-# docs/adding-an-engine.md is the contract both hold you to.
-#
-# Two blocks here are yours before a result from this means anything. `fleet` is
-# the compute your engine was given, and it is what the run is costed on — the
-# harness cannot see it, so the rows below are a shape to replace and
-# `YOUR_MACHINE_TYPE` is not a machine. `external` is what the result records
-# the engine as: its name, its version, and whatever tuning the notes have to
-# disclose.
+# External cluster smoke: the harness prepares the topic and table; you start the engine
+# from the staged facts. See docs/adding-an-engine.md for the contract and smoke-
+# external.yaml for the local equivalent.
+# Replace fleet with actual compute resources and machine types used for costing. Fill in
+# external with the engine name, version and tuning notes.
 name: aws-smoke-external
 engine: external
 corpus: smoke
@@ -20,8 +14,7 @@ kafka:
   key: user_id
 producer:
   shards: 1
-  # The offer crosses the cluster's network here rather than a loopback, so it
-  # is compressed; `lz4` is the codec the shipped hour-long specs offer with.
+  # Use the same network compression as the hour-long specs.
   compression: lz4
 scoring:
   freshness_bound_s: 60

@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Entry point for the results/ publication checks.
-
-The rules themselves live in `ingest_bench.collect.validate`, where they are
-import-tested and type-checked with the rest of the package; this file is
-what a contributor and CI actually run.
-"""
+"""Run publication checks implemented in ingest_bench.collect.validate."""
 
 from __future__ import annotations
 

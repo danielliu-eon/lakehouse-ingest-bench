@@ -1,21 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Create and drop the topic a run publishes into, and count the cluster's brokers.
+"""Create, inspect, and delete run-specific Kafka topics.
 
-A run owns its topic: it is created before the producer starts and dropped
-after the score is written, so one run's retained bytes cannot be read as
-another's. Creation is refused rather than made idempotent — a topic that
-already exists holds records from an earlier run, and appending to it would
-put rows in the table that no manifest accounts for.
+Reject existing topics at creation to prevent records from earlier runs from
+contaminating the manifest comparison. Deletion tolerates absent topics so
+teardown can be retried. The ``drop-topic`` command can run inside a broker's
+network when the operator cannot reach it directly.
 
-Dropping is also a command of its own, because a managed broker is often
-reachable only from inside its own network: the harness image runs `drop-topic`
-there while a teardown script runs on an operator's machine.
-
-Every call takes the librdkafka client properties a run's site declares, with
-any indirection already resolved. Authentication is not implemented here: the
-properties reach the client through `kafka_auth`, which passes all but its own
-keys through verbatim, so a cluster this harness has never heard of is
-reachable by configuration alone.
+Callers resolve credential references before passing client properties;
+``kafka_auth`` handles authentication-specific configuration.
 """
 
 from __future__ import annotations
@@ -34,24 +26,16 @@ from ingest_bench.specs.env import resolve_env_placeholders
 
 REQUEST_TIMEOUT_S = 30.0
 
-# Two days is longer than any run plus the time an operator needs to look at
-# what a failed one left behind, and an unbounded byte cap keeps a topic from
-# dropping the head of a stream the scorer still expects to be readable.
+# Retain data for two days for scoring and inspection, without a byte cap.
 DEFAULT_TOPIC_CONFIG: dict[str, str] = {"retention.ms": "172800000", "retention.bytes": "-1"}
 
-# Topic creation and deletion return once the controller has acted, and the
-# broker a later metadata request lands on may not have caught up yet. Every
-# call here therefore waits for the cluster to agree before returning, so a
-# caller that creates a topic and then produces into it cannot race it.
+# Wait for metadata visibility after controller acknowledgements so later
+# client requests do not race topic creation or deletion.
 _VISIBILITY_TIMEOUT_S = 30.0
 _VISIBILITY_POLL_S = 0.25
 
-# librdkafka serves an OAUTHBEARER token callback only from a client's `poll`,
-# and an admin client's own requests never poll: `list_topics` on a client that
-# has no token yet waits out its whole timeout and reports a SASL
-# authentication error. Polling here is what makes the token exist before the
-# first request. A client library that already served the callback while it
-# constructed the client leaves this loop with nothing to do.
+# Poll to initialize OAUTHBEARER callbacks before blocking admin requests.
+# Skip further polling once a token has been supplied.
 _TOKEN_POLL_S = 0.1
 _TOKEN_POLL_ATTEMPTS = 20
 
@@ -64,13 +48,10 @@ def _client(bootstrap: str, client: dict[str, str]) -> AdminClient:
         served = True
 
     config = kafka_auth.librdkafka_config({"bootstrap.servers": bootstrap, **client}, on_token=token_served)
-    # The admin client's declared configuration holds only scalars, while
-    # librdkafka's token callback is a callable. The cast is over a mapping this
-    # module built, so nothing unchecked reaches the client.
+    # The client stub permits only scalar properties, but oauth_cb is callable.
     admin = AdminClient(cast("dict[str, str | int | float | bool]", config))
     if "oauth_cb" in config:
-        # A token that never arrives is left to the request that follows: the
-        # broker's own authentication error names more than a refusal here could.
+        # Let the subsequent request report the authentication failure.
         for _ in range(_TOKEN_POLL_ATTEMPTS):
             if served:
                 break
@@ -102,13 +83,7 @@ def topic_exists(bootstrap: str, name: str, client: dict[str, str]) -> bool:
 
 
 def broker_count(bootstrap: str, client: dict[str, str]) -> int:
-    """How many brokers the cluster's metadata names.
-
-    This is what a run's replication factor is chosen from, so it is read from
-    the cluster rather than guessed at from a hostname: a name says nothing
-    about how many brokers answer to it, and a factor above the count is
-    refused by the broker at topic creation.
-    """
+    """Read the broker count from cluster metadata to size topic replication."""
     brokers = _client(bootstrap, client).list_topics(timeout=REQUEST_TIMEOUT_S).brokers
     if not brokers:
         raise ValueError(f"the cluster at {bootstrap} names no brokers in its metadata")
@@ -135,11 +110,9 @@ def create_topic(
 
 
 def delete_topic(bootstrap: str, name: str, client: dict[str, str]) -> bool:
-    """Drop ``name``, returning whether there was a topic to drop.
+    """Delete ``name`` and return whether it existed.
 
-    An absent topic is already dropped rather than an error: teardown runs
-    against runs that failed before staging created one, and a refusal there
-    would leave the rest of a teardown undone.
+    An absent topic is a successful teardown state.
     """
     admin = _client(bootstrap, client)
     try:

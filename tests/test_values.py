@@ -48,9 +48,7 @@ def test_records_decode_with_fastavro_under_the_published_schema() -> None:
         assert row["partition_key"] == v.partition_label(int(block.partition_keys[i]))
         drawn = cast(int, block.values["event_time"][i])
         assert EPOCH_MS + 3 * INTERVAL_MS <= drawn < EPOCH_MS + 4 * INTERVAL_MS
-        # fastavro renders `timestamp-millis` as an aware datetime, and the
-        # instant it renders is the drawn epoch millisecond with nothing finer
-        # under it — which is what the engines have to commit unchanged.
+        # fastavro decodes timestamp-millis as an aware datetime with millisecond precision.
         event_time = cast(datetime, row["event_time"])
         assert round(event_time.timestamp() * 1000) == drawn
         assert event_time.microsecond % 1000 == 0

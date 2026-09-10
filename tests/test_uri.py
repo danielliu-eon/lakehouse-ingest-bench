@@ -42,13 +42,8 @@ def test_join_and_listdir(tmp_path: Path) -> None:
 def test_read_bytes_reads_the_whole_object_rather_than_a_buffered_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Objects here are rewritten while they are read, so a read is one request.
-
-    A caching file object pins the ETag it opened with and fails a later range
-    request once the object behind it has been replaced. The producer
-    republishes its publish log every few seconds and the scorer reads that log
-    on every poll, so that failure would end a run. This fake refuses exactly
-    the call that would take that path.
+    """Publish logs are replaced during reads. Buffered range reads can pin an ETag
+    and fail after replacement; fetch the object in one request.
     """
 
     class Republished:

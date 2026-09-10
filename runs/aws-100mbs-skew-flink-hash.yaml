@@ -1,25 +1,10 @@
-# One hour of offer at 100 MB/s over the skewed corpus, on a cluster.
-#
-# The fleet below is where the probe ladder starts, not a result: it is sized
-# from the corpus and the topic, and the run it produces is what says whether it
-# is enough. Raise `taskmanagers` and re-run until the gate stops reporting
-# UNDERSIZED, and publish the fleet that passed — a shipped spec's fleet is the
-# one that produced a committed result, so this file's is a starting point until
-# a result stands behind it.
-#
-# Topic partitions equal the fleet's slots, so every slot owns a lane. Five
-# producer shards, by the rule "Sizing the offer" in docs/corpus.md states —
-# ceil(offered / measured * 1.5): one shard is a single encoding process plus
-# librdkafka's sender and reaches about 130k rows/s on an m6i.xlarge-class node
-# with `lz4`, which at this corpus's ~256-byte rows is about 33 MB/s, and
-# ceil(100 / 33 * 1.5) is five. The factor is what leaves the offer able to
-# catch up after a shard is rescheduled, so spending it is the point. `lz4`
-# because an hour at 100 MB/s is what crosses the link, and it is the cheapest
-# codec that still halves it. Measure on the machine that will offer rather
-# than trusting the figure; that section says why.
-#
-# Fourteen four-vCPU nodes, this fleet plus the harness's own pods: see
-# "Sizing the cluster" in deploy/aws/README.md.
+# One hour at 100 MB/s with skewed keys. This fleet is a capacity-testing starting point,
+# not validated sizing. Increase taskmanagers while the gate reports UNDERSIZED; publish
+# the configuration that passes.
+# The 32 topic partitions match 32 slots. Measure producer throughput on the target nodes
+# before accepting the five-shard setting; use ceil(offered / measured * 1.5) from
+# docs/corpus.md, Sizing the offer. LZ4 reduces network traffic.
+# See deploy/aws/README.md, Sizing the cluster, for engine and harness resources.
 name: aws-100mbs-skew-flink-hash
 engine: flink
 corpus: events-100mbs-skew

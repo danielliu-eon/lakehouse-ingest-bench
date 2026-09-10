@@ -1,10 +1,9 @@
 # Running a benchmark
 
-The smoke runs everything on one machine through Docker Compose, which is enough
-to check a change end to end and not to measure one — see the closing note of
-[`../README.md`](../README.md) for why. A measured run needs a cluster, which is
-"On a cloud" below. Terms are defined in [`methodology.md`](methodology.md); the
-keys of the two YAML files are in [`run-spec.md`](run-spec.md).
+Use the Docker Compose smoke to check changes end to end on one machine.
+Publishable measurements require a cluster; see [On a cloud](#on-a-cloud).
+See [`methodology.md`](methodology.md) for measurement definitions and
+[`run-spec.md`](run-spec.md) for configuration keys.
 
 ## Prerequisites
 
@@ -50,14 +49,11 @@ It exits 0 only when the scorer published `run_valid: true`, printing the verdic
 block first; on a failure it dumps the tail of the scorer's and the engine's logs
 before teardown.
 
-The two engines are not started the same way. Flink's fleet registers its slots,
-the job is submitted, and then `verify-flink` holds the running job to the spec —
-so a smoke that reaches the offer is one whose engine is running what the spec
-asked for. Spark's driver *is* the fleet under `--master local[N]`, and
-`verify-spark` reads pods, so the local Spark run waits for an application named
-after the run and one active streaming query instead. `executor_mem_mb` is never
-spent there — the driver's heap holds the whole fleet — which is the one thing to
-know before reading a local Spark figure.
+For Flink, the smoke waits for slots, submits the job and runs `verify-flink`
+before starting the producer. Local Spark uses `--master local[N]`, so the
+driver runs the whole workload. The smoke waits for the named application and
+one active streaming query; it cannot use the pod-based `verify-spark` check.
+`executor_mem_mb` does not allocate executor memory in this mode.
 
 `kafka.value_encoding: confluent` on a spec offers every value behind the
 five-byte Confluent header and registers the corpus's schema at staging. The
@@ -66,24 +62,20 @@ local stack runs a registry, so
 needs nothing extra; the framing itself is in
 [`adding-an-engine.md`](adding-an-engine.md) §Confluent values.
 
-On repeat runs: teardown wipes the object store, so each run regenerates the
-corpus, and with `--keep` a second run at a *different* `--set` leaves two
-corpora of the same name that staging refuses to choose between. Run directories
-live on the host under `runs/` and survive teardown either way.
+Teardown clears object storage, so subsequent smokes regenerate the corpus.
+With `--keep`, changing `--set` can leave multiple corpora with the same preset
+name; staging rejects that ambiguity. Host run directories under `runs/` survive
+teardown.
 
-Two things make `--set duration_s=30`'s verdict block read oddly. The shipped
-specs exclude the first 60 seconds after the epoch from the freshness window, and
-a 30-second corpus is shorter than that, so the window collapses to the run's
-last instant and reports one sample four times over — read `freshness.full` for
-its whole lag curve. And `keepup.absorbed_at_offer_end` comes out near zero,
-because with a ten-second checkpoint interval there is barely one commit inside a
-thirty-second offer. It still checks that the table drains and that exactness is
-clean; only the freshness bound and the keep-up fraction need a longer corpus.
+A 30-second corpus is useful for checking drain and exactness, but gives little
+evidence about steady-state performance. The smoke specs exclude 60 seconds of
+warmup; if the run ends before then, all window quantiles use the final sample.
+Read `freshness.full` for the full lag curve. Startup and commit cadence can also
+leave a low `keepup.absorbed_at_offer_end` in a short run.
 
-Those 60 seconds are the spec's own `scoring.warmup_s`, and the hour-long specs
-set it to 120. An engine whose first commit lands after the warmup has ended
-carries its cold start into the window, so raise it for one that starts slowly —
-as far as leaving enough run behind it to measure allows.
+`scoring.warmup_s` is 60 in smoke specs and 120 in hour-long specs. Choose a
+warmup that covers expected startup while leaving enough time to measure steady
+state; the full series still reports the excluded lag.
 
 ## CI
 
@@ -93,13 +85,10 @@ pytest suite and `scripts/validate-results.py`. It does not run the smoke —
 
 ## On a cloud
 
-A measured run needs a cluster: the engine, the offer and the reader each get
-their own pods, and the broker and the object store are managed services. The
-AWS shape is Amazon MSK with IAM authentication, one S3 bucket, the Glue Iceberg
-REST catalog and EKS. [`../deploy/aws/README.md`](../deploy/aws/README.md) is
-what an account needs, what `setup.sh` builds, what it costs, how to remove it,
-and the once-per-account sequence that ends with a corpus in the bucket. This
-section is the order the drivers run in, once per run.
+Measured runs place the engine, producer and scorer in separate pods. The AWS
+setup uses EKS, Amazon MSK with IAM authentication, S3 and the Glue Iceberg REST
+catalog. Complete the prerequisites and corpus setup in the
+[AWS guide](../deploy/aws/README.md), then follow this sequence for each run.
 
 ```bash
 scripts/run.sh runs/aws-100mbs-skew-flink-hash.yaml --publish results/
@@ -124,8 +113,7 @@ would delete — and the line it prints names `scripts/teardown.sh <run_id>`.
 `engine: external` spec waits after staging for `--external-ready-file <path>`
 to appear, or for a newline on stdin.
 
-The same run one driver at a time, which is what to reach for when a chained run
-stops half way — each takes the run id `run.sh` printed:
+To run or recover individual steps, use the run id printed by staging:
 
 ```bash
 RUN_ID=$(scripts/stage.sh runs/aws-100mbs-skew-flink-hash.yaml | awk -F': ' '/^run_id: /{print $2}')
@@ -136,16 +124,14 @@ scripts/finish.sh "$RUN_ID" --publish results/   # geometry, the verdict, the re
 scripts/purge.sh "$RUN_ID" --artifacts     # once you are done with the table
 ```
 
-`runs/aws-100mbs-skew-flink-hash.yaml` and its Spark sibling are the shipped
-hour-long runs to copy: same corpus, same topic, same offer, so the two differ
-only in the engine. Their fleets are where the probe ladder starts and each file
-says so — raise the fleet and re-run until the gate stops reporting
-`UNDERSIZED`, and publish the one that passed.
+Use `runs/aws-100mbs-skew-flink-hash.yaml` and its Spark sibling as hour-long
+starting specs. They share the corpus, Kafka settings and offer. Their fleet
+sizes are starting points for capacity probes: increase capacity and rerun while
+the gate reports `UNDERSIZED`, then publish a passing run.
 
-The sequence is the same for either managed engine — the drivers read the kind of
-object a run is, where its state sits and which Service carries its API out of
-the engine's own module, and run `verify-<engine>` against the copied spec before
-the run is offered a corpus.
+Both managed engines use the same drivers. Engine modules supply resource and
+status details; `verify-<engine>` checks the running configuration against the
+copied spec before production starts.
 
 | Driver | What it does |
 |---|---|
@@ -163,11 +149,8 @@ and pod sizes as environment variables, listed in its `--help`;
 `SCORER_READ_WORKERS` on `launch.sh` is the one that changes what the scorer
 does rather than how long a driver waits for it.
 
-Teardown comes before `finish.sh` because the score is in the bucket either way,
-and every minute a drained run's fleet stays up is a minute paid for nothing.
-Neither `teardown.sh` nor anything else before `purge.sh` deletes the table or
-the warehouse data: a run's table is its result, and reclaiming it is a separate
-decision taken once the result has been read.
+Teardown releases compute before `finish.sh` reads the artifacts from storage.
+The table and warehouse files remain available until you run `purge.sh`.
 
 `purge.sh` is the only script that deletes measured data. It reads the table's
 location out of the metadata document teardown copied rather than deriving it
@@ -193,28 +176,25 @@ schema is in [`results-format.md`](results-format.md).
 
 ### In-cluster stack
 
-With the broker and the catalog inside the cluster
-([`../deploy/k8s/stack/README.md`](../deploy/k8s/stack/README.md)) the sequence
-is unchanged, but `catalog.props.uri` names a Service your machine cannot reach.
-`teardown.sh`, `finish.sh` and `purge.sh` read the catalog from here, so for a
-`<service>.<namespace>.svc` host they tunnel to it with `kubectl port-forward`;
-only the `uri` changes. `CATALOG_FORWARD_PORT` (`18181`) is the tunnel's local
-end and `CATALOG_FORWARD_PROBE` (`/health`) the path that says it is serving.
+The [in-cluster stack](../deploy/k8s/stack/README.md) uses the same run sequence.
+For catalog hosts named `<service>.<namespace>.svc` (optionally followed by
+`.cluster.local`), local drivers open a `kubectl port-forward` tunnel and rewrite
+only the catalog URI. The catalog must use plain HTTP. `CATALOG_FORWARD_PORT`
+(default `18181`) sets the local port; `CATALOG_FORWARD_PROBE` (default `/health`)
+sets the readiness path. `teardown.sh`, `finish.sh` and `purge.sh` use this shared
+property reader, including when reading copied metadata rather than the catalog.
 
 ### Which steps run in the cluster, and why
 
-Six harness commands run as Jobs, for three reasons. `stage` and `drop-topic`
-have to reach the broker, and MSK brokers listen inside the VPC where your laptop
-is not. The producer shards and the scorer are there because the offer is
-hundreds of megabytes a second into that same VPC and the scorer reads the table
-on every poll. `gen-corpus` and `merge-corpus` are there because a corpus is tens
-to hundreds of gigabytes written into the bucket the pods already hold identity
-for.
+Six harness commands run as Jobs. `stage` and `drop-topic` need access to the
+private MSK brokers. Producer shards and the scorer need sustained throughput
+and frequent table reads. `gen-corpus` and `merge-corpus` write large corpora
+using the pods' storage identity.
 
-Everything else is your machine's: rendering manifests, applying them, waiting on
-a Job, fetching artifacts, judging a verdict. So the harness image carries no
-`kubectl` and no Kubernetes client, and the drivers need `aws`, `kubectl`, `yq`,
-`jq`, `git`, `curl` and `gzip` locally (`push-images.sh` also needs `docker`).
+Your machine renders and applies manifests, waits for Jobs, fetches artifacts
+and evaluates verdicts. The harness image needs no Kubernetes client. Install
+`aws`, `kubectl`, `yq`, `jq`, `git`, `curl` and `gzip` locally; `push-images.sh`
+also requires `docker`.
 
 Install the harness itself with its `aws` extra — `uv sync --extra aws` in a
 checkout, or `pip install '.[aws]'` — because three of the drivers reach the
@@ -225,21 +205,15 @@ so a default install reaches the catalog and then fails on that import.
 
 ### What the site declares about a cluster
 
-**Identity.** Nothing is passed to a pod. `setup.sh` binds one IAM role to all
-three ServiceAccounts through EKS Pod Identity, and every cloud SDK in every pod
-picks its credentials up from the agent. The one value that must be stated is the
-region, as `site.kubernetes.aws_region`; every pod gets it under both names an
-SDK reads it as, for the reason in [`pitfalls.md`](pitfalls.md). A cluster off
-AWS leaves the key out, and no pod is given the variable.
+**Identity.** `setup.sh` binds an IAM role to the three ServiceAccounts through
+EKS Pod Identity. SDKs obtain credentials from the agent. Set
+`site.kubernetes.aws_region`; pods receive both AWS region variables as explained
+in [`pitfalls.md`](pitfalls.md). Omit this key for non-AWS clusters.
 
 **Placement.** `site.kubernetes.node_selector` and `site.kubernetes.tolerations`
-reach every Job and every engine pod, and they are the only place a node pool,
-label or taint of yours is named — nothing in this repository knows about your
-cluster's shape. A Flink run's pods pin `kubernetes.io/arch: amd64` over whatever
-the site selects, because the image has no aarch64 PyFlink to run — which is
-why `deploy/aws/setup.sh` warns about a cluster with no amd64 node, and why a
-Spark-only campaign needs none. A Spark run's pods take the selector as it
-stands.
+apply to every Job and engine pod. Flink overrides the architecture selector
+with `kubernetes.io/arch: amd64` because its image lacks aarch64 PyFlink. Spark
+uses the site selector unchanged.
 
 **Where files go.** `stage.sh` fetches the run directory into `./runs/<run_id>/`
 beside your `site.yaml`, and `RUNS_DIR` moves that. The pods write to
@@ -278,9 +252,8 @@ scorer reads the offered side from there rather than from the local disk.
 
 ## Reading the verdict
 
-`runs/<run_id>/scores/summary.json` is the whole answer, and the scripts print
-the part that matters. What every field means, when `run_valid` is true, what
-`reason` names and what each `state` says are in
+`runs/<run_id>/scores/summary.json` contains the verdict. Scripts print its key
+fields; see definitions of `run_valid`, `reason` and `state` in
 [`methodology.md`](methodology.md) §The verdict.
 
 Two commands read the same artifacts on their own:

@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Build the harness and the engine images and push them to the site's registry,
-# each tagged with the commit it was built from.
-#
-# The tag is the commit and never `latest`: a run publishes the image
-# references it used, and a floating tag would make two runs' references
-# identical while the code inside them was not. That is also why an
-# uncommitted tree refuses — the tag would name a commit that is not what is
-# in the image.
+# Build and push harness and engine images tagged with the checkout's commit. Refuse
+# uncommitted changes unless --allow-dirty is set, since the tag would otherwise
+# misidentify the image's source.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
@@ -31,9 +26,7 @@ USAGE
 }
 
 ALLOW_DIRTY=0
-# The nodes' architecture, not the operator's: an image is built to run on the
-# cluster. amd64 because the engine image is amd64-only, so every cluster this
-# runs on has amd64 nodes.
+# Default to amd64 for cluster nodes; the Flink image requires it.
 PLATFORM=linux/amd64
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -79,8 +72,7 @@ FLINK_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/flink:$TAG"
 SPARK_REF="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/spark:$TAG"
 
 log "signing in to $REGISTRY"
-# Explicit, because a failure inside a pipeline under `pipefail` would
-# otherwise end this script without saying which half of it failed.
+# Report login pipeline failures explicitly under pipefail.
 if ! aws ecr get-login-password --region "$REGION" |
 	docker login --username AWS --password-stdin "$REGISTRY" >&2; then
 	die "could not sign in to $REGISTRY; check that your credentials reach that account in $REGION"
@@ -90,9 +82,7 @@ fi
 build_and_push() {
 	log "building $2 for $3"
 	if [[ $3 == *,* ]]; then
-		# A manifest list cannot be loaded into the local daemon, so buildx
-		# pushes it as it builds rather than leaving an image behind to push
-		# afterwards.
+		# Push multi-platform builds directly; the local daemon cannot load a manifest list.
 		docker buildx build --platform "$3" -f "$1" -t "$2" --push "$REPO_ROOT" >&2
 	else
 		docker build --platform "$3" -f "$1" -t "$2" "$REPO_ROOT" >&2
@@ -101,11 +91,9 @@ build_and_push() {
 }
 
 build_and_push "$REPO_ROOT/Dockerfile" "$HARNESS_REF" "$PLATFORM"
-# amd64 whatever the rest was built for: PyFlink publishes no aarch64 wheel in
-# any release, so there is no other architecture to build this one for.
+# The pinned PyFlink dependency requires amd64.
 build_and_push "$REPO_ROOT/engines/flink/Dockerfile" "$FLINK_REF" linux/amd64
-# Whatever the harness was built for: nothing added to the stock Spark image is
-# native, so this one runs wherever the cluster's nodes do.
+# Build Spark for the same target platform as the harness.
 build_and_push "$REPO_ROOT/engines/spark/Dockerfile" "$SPARK_REF" "$PLATFORM"
 
 log "pushed every image at tag $TAG"

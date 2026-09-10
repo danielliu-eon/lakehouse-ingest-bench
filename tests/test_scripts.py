@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The scripts have to parse, and their documents have to render, before a cluster exists.
-
-A syntax error in `smoke.sh` would otherwise surface only in the compose smoke,
-which is opt-in on a pull request and takes tens of minutes — so it would reach
-`main` and fail there. `bash -n` and the two argument paths that need no Docker
-are the whole of what can be checked without a stack, and they are the cheap
-half of every mistake actually made in a shell script.
-
-The AWS setup scripts cannot be exercised at all without an account, so what is
-checked here is everything they *feed* to `aws` and `kubectl`: the IAM documents
-render to policies whose statements say what they are meant to say, the
-namespace manifest renders to the objects the pods need, and the example site
-config an operator copies loads. A wrong action in a policy document surfaces
-otherwise as a denial minutes into a run on a live cluster.
+"""Check shell syntax, rendered manifests and driver control flow without a cluster.
+Live AWS and Kubernetes calls use stubs; generated documents are parsed.
 """
 
 from __future__ import annotations
@@ -69,15 +57,12 @@ SITE_K8S_FILLINGS = {
     "YOUR_REGISTRY": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
 }
 
-# The two names a pod's region is rendered under, in the order a driver writes
-# them. Java's SDK reads the first, botocore only the second.
+# Java reads AWS_REGION; botocore reads AWS_DEFAULT_REGION.
 REGION_ENV_NAMES = ("AWS_REGION", "AWS_DEFAULT_REGION")
 
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 
-# The drivers read the site with `yq` and a run's facts with `jq`, and neither
-# is a Python dependency — so a machine without them can still run the rest of
-# this file rather than failing on a missing tool the harness never needs.
+# Skip tool-dependent cases when jq or yq is unavailable.
 needs_shell_tools = pytest.mark.skipif(
     any(shutil.which(tool) is None for tool in ("bash", "jq", "yq", "git")),
     reason="the cluster drivers read the site and a run's facts with jq, yq and git",
@@ -86,13 +71,10 @@ needs_shell_tools = pytest.mark.skipif(
 STACK_DEPLOY = REPO_ROOT / "deploy" / "k8s" / "stack"
 KAFKA_CHART = STACK_DEPLOY / "charts" / "kafka"
 
-# The charts are rendered with helm, which the harness never needs; a machine
-# without it runs the rest of this file.
+# Skip chart-rendering tests when Helm is unavailable.
 needs_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not installed")
 
-# What `setup.sh` exports before it renders the IAM documents with envsubst. The
-# values are shaped like the real ones: a document that only renders with a
-# placeholder left in it would not be a policy AWS accepts.
+# Use realistic values for every variable exported to IAM templates.
 IAM_VALUES = {
     "ACCOUNT": "123456789012",
     "REGION": "eu-west-1",
@@ -102,9 +84,7 @@ IAM_VALUES = {
     "MSK_GROUP_ARN": "arn:aws:kafka:eu-west-1:123456789012:group/a-cluster/aaaa-bbbb-1/*",
 }
 
-# Every YOUR_ placeholder in `site.aws.example.yaml`, and something plausible to
-# put in its place. Substituting by name rather than by pattern is what makes a
-# new placeholder a test failure instead of an untested line.
+# Enumerate placeholders so adding one requires a fixture update.
 SITE_AWS_FILLINGS = {
     "YOUR_BUCKET": "a-bucket",
     "YOUR_MSK_IAM_BOOTSTRAP": "b-1.a-cluster.abc123.c2.kafka.eu-west-1.amazonaws.com",
@@ -115,12 +95,7 @@ SITE_AWS_FILLINGS = {
 
 
 def _engine_compose_files() -> list[Path]:
-    """Each engine's Compose shape: how a run of it is started on one machine.
-
-    The other half of the seam `specs/kubernetes.py` is. Sourced by `smoke.sh`
-    for the run's engine alone, which is what keeps the engines' service names,
-    env files and readiness probes out of `scripts/`.
-    """
+    """Each engine's Compose shape: how a run of it is started on one machine."""
     return sorted((REPO_ROOT / "engines").glob("*/compose.sh"))
 
 
@@ -148,9 +123,7 @@ def _iam_documents() -> list[Path]:
     return sorted((AWS_DEPLOY / "iam").glob("*.json"))
 
 
-# The first and last lines of the Kafka-version choice in `setup.sh`, so the
-# block can be lifted out and run on its own. Anchors rather than a copy: a
-# copy would keep passing after the script's own version of it broke.
+# Extract version selection from the script so tests exercise the implementation.
 _VERSION_CHOICE_FIRST = 'MSK_KAFKA_VERSION="$(tr '
 _VERSION_CHOICE_LAST = "set MSK_KAFKA_VERSION yourself"
 
@@ -165,16 +138,8 @@ def _version_choice_block() -> str:
 
 
 def _shell_function(path: Path, name: str) -> str:
-    """One shell function out of a script, to be run on its own.
-
-    Lifted rather than copied for the same reason as the block above: a copy
-    would keep passing after the script's own version of it broke.
-
-    The closing brace is the first line that is one, which these scripts'
-    indentation makes the function's own — every brace inside a body is
-    indented. `bash -n` over the lifted text is what anchors that: a body that
-    broke the convention would otherwise be silently cut in half and the
-    remainder run as if it were the whole function.
+    """Extract and syntax-check a shell function from the actual script.
+    The closing brace must be unindented; nested braces must be indented.
     """
     lines = path.read_text().splitlines()
     starts = [index for index, line in enumerate(lines) if line == f"{name}() {{"]
@@ -199,11 +164,8 @@ def _sequence(value: object) -> list[object]:
 
 
 def _rendered_policy(path: Path) -> dict[str, object]:
-    """``path`` rendered the way ``setup.sh`` renders it, parsed.
-
-    ``string.Template`` takes the same ``${NAME}`` syntax as ``envsubst`` and
-    raises on a placeholder the mapping has no value for, so this is also the
-    check that a document references nothing the script does not export.
+    """Render a policy using envsubst-compatible placeholders and parse the result.
+    string.Template rejects placeholders absent from the exported mapping.
     """
     rendered = Template(path.read_text()).substitute(IAM_VALUES)
     assert "${" not in rendered, f"{path.name} still holds an unrendered placeholder"
@@ -263,8 +225,7 @@ def test_every_script_is_executable() -> None:
     for script in entrypoints:
         assert os.access(script, os.X_OK), f"{script} is not executable"
     for script in sourced:
-        # A sourced file that is executable invites being run, and neither of
-        # these does anything on its own but set variables the caller needs.
+        # Sourced libraries should not be executable entrypoints.
         assert not os.access(script, os.X_OK), f"{script} is sourced, so it should not be executable"
 
 
@@ -276,20 +237,13 @@ class WaitedJob:
     calls: str
 
 
-# The Job's one pod, and what the scheduler said about it. A pod that never
-# scheduled has no log, so this line is the whole of what a timed-out wait has
-# to explain itself with.
+# Unschedulable pods have no logs; scheduler events explain the timeout.
 POD = "a-job-2xk4t"
 SCHEDULER_REFUSAL = "Warning FailedScheduling 0/3 nodes are available: Insufficient cpu"
 
 
 def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
-    """`_k8s.sh`'s own wait, against a `kubectl` answering one reading at a time.
-
-    Lifted and run rather than read, because every branch in it is a different
-    end for a driver: a Job that completed, one that failed with its log to
-    show, and one that is still going when the caller's budget runs out.
-    """
+    """`_k8s.sh`'s own wait, against a `kubectl` answering one reading at a time."""
     with tempfile.TemporaryDirectory() as directory:
         calls = Path(directory) / "kubectl-calls.log"
         calls.touch()
@@ -330,12 +284,9 @@ def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
 @pytest.mark.parametrize(
     ("answers", "status", "said", "tailed"),
     [
-        # A Job announces nothing until it has an end to announce, so the empty
-        # reading is the normal first one.
+        # An active Job has no terminal condition.
         (["", "Complete"], 0, "log job/a-job completed", False),
-        # Both conditions are read, and not `complete` alone: a failed Job
-        # never gains that one, so a wait on it would spend the whole timeout —
-        # hours, for a generation — to report a failure announced in seconds.
+        # A failed Job never becomes Complete; check both terminal conditions.
         (["Failed"], 3, "die job/a-job failed", True),
         (["", ""], 3, "die job/a-job did not complete within 1s", True),
     ],
@@ -346,20 +297,16 @@ def test_a_job_is_waited_for_until_it_reaches_one_of_its_two_ends(
     waited = _waited_job(answers)
     assert waited.result.returncode == status, waited.result.stdout + waited.result.stderr
     assert said in waited.result.stdout, waited.result.stdout
-    # Its own log, and only where the end was not the good one.
     assert ("logs job/a-job --tail=40" in waited.calls) is tailed, waited.calls
     assert ("the job said this" in waited.result.stderr) is tailed, waited.result.stderr
-    # And its pods' events beside it: a pod that never scheduled has an empty
-    # log, and the scheduler's refusal is only ever in the events.
+    # Include scheduler events even when logs are empty.
     assert (f"get events --field-selector involvedObject.name={POD}" in waited.calls) is tailed, waited.calls
     assert (SCHEDULER_REFUSAL in waited.result.stderr) is tailed, waited.result.stderr
-    # Only the conditions the API says are true, so a `Failed: False` cannot be
-    # read as a failure.
+    # Ignore conditions whose status is False.
     assert '{range .status.conditions[?(@.status=="True")]}' in waited.calls, waited.calls
 
 
-# What an m6i.xlarge reports allocatable — four vCPU less the kubelet's own
-# reservation — which is the node the shipped eksctl example builds.
+# Allocatable CPU on the example m6i.xlarge, after kubelet reservations.
 NODE_ALLOCATABLE = "3920m"
 
 
@@ -384,13 +331,8 @@ def _nodes_with_free_cpu(
     millicores: int,
     tolerations: str,
 ) -> subprocess.CompletedProcess[str]:
-    """`_k8s.sh`'s own count, lifted out and run against two files.
-
-    It takes files rather than reading the cluster precisely so this is
-    runnable, and it is worth running rather than reading because the
-    arithmetic is a jq program: a CPU quantity is `"2"`, `"500m"` or `"1.5"`
-    depending on who wrote the manifest, and the answer decides whether an
-    operator is warned that their run will not schedule.
+    """Run the shell CPU-count function against fixture files. Check integer, decimal
+    and millicore quantities through its actual jq arithmetic.
     """
     (tmp_path / "nodes.json").write_text(json.dumps({"items": nodes}))
     (tmp_path / "pods.json").write_text(json.dumps({"items": pods}))
@@ -409,9 +351,7 @@ def _nodes_with_free_cpu(
 @pytest.mark.parametrize(
     ("nodes", "pods", "millicores", "tolerations", "counted"),
     [
-        # Requested and not used: a node whose cores are idle but asked for is
-        # a node the scheduler fits nothing more onto. One 2-CPU pod and the
-        # daemonsets leave an m6i.xlarge short of a second.
+        # Scheduling uses requests, not current utilization; one 2-CPU pod leaves no room for another.
         (
             [_node("node-a"), _node("node-b")],
             [_pod("node-a", "2"), _pod("node-a", "250m", "100m"), _pod("node-b", "350m")],
@@ -419,8 +359,7 @@ def _nodes_with_free_cpu(
             "[]",
             1,
         ),
-        # A pod that has reached an end has released its request, and one no
-        # node is carrying yet was never holding a node's.
+        # Finished and unassigned pods reserve no CPU on these nodes.
         (
             [_node("node-a"), _node("node-b")],
             [_pod("node-a", "2", phase="Succeeded"), _pod("node-b", "2", phase="Failed"), _pod(None, "2")],
@@ -428,11 +367,8 @@ def _nodes_with_free_cpu(
             "[]",
             2,
         ),
-        # Both other spellings of a quantity, on the one node: 1500 + 500 is
-        # 2000, which leaves it short. A `1.5` read as 1.5 millicores would
-        # leave it the roomiest node on the cluster.
+        # 1.5 CPU plus 500m equals 2000m; parsing decimal CPU as millicores would overstate capacity.
         ([_node("node-a"), _node("node-b")], [_pod("node-a", "1.5", "500m"), _pod("node-b", "1")], 2000, "[]", 1),
-        # A container stating no request holds nothing.
         ([_node("node-a")], [_pod("node-a", None)], 2000, "[]", 1),
         # A NoSchedule taint keeps a pod off the node unless the site declares
         # a toleration; PreferNoSchedule keeps it off nothing.
@@ -456,13 +392,6 @@ def test_a_nodes_free_cpu_is_its_allocatable_less_what_its_pods_request(
 
 @needs_shell_tools
 def test_a_cluster_that_could_not_be_read_is_not_a_cluster_with_no_room(tmp_path: Path) -> None:
-    """An unreadable answer must not count as zero free nodes.
-
-    The count is advisory, and the two reads behind it are a `kubectl` an
-    operator's kubeconfig may not be allowed to make. A document with no
-    `items` answered as `0` would warn every launch from a namespace-scoped
-    context that the run will not schedule.
-    """
     (tmp_path / "nodes.json").write_text("")
     (tmp_path / "pods.json").write_text("")
     harness = f"""
@@ -476,14 +405,6 @@ def test_a_cluster_that_could_not_be_read_is_not_a_cluster_with_no_room(tmp_path
 
 
 def test_both_workflows_install_the_same_checked_yq() -> None:
-    """One pinned release, and the digest of the bytes behind it.
-
-    A version tag names a release and not its contents, and this binary reads
-    every site config a run is staged from — so the download is checked rather
-    than trusted. The two workflows install it for the same tests, and a
-    version bumped in one of them alone would leave them running different
-    parsers.
-    """
     installs = {
         path.name: (
             re.findall(r"yq/releases/download/(v[\d.]+)/yq_linux_amd64", path.read_text()),
@@ -500,11 +421,6 @@ def test_both_workflows_install_the_same_checked_yq() -> None:
 
 @needs_bash
 def test_help_needs_no_stack() -> None:
-    """`--help` has to answer before the host-tool check, on any machine.
-
-    It is the one thing a reader runs first, and refusing it for a missing `yq`
-    would be refusing to say what the script does.
-    """
     out = subprocess.run([str(SMOKE), "--help"], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "--external-ready-file" in out.stdout
@@ -519,11 +435,6 @@ def test_an_unknown_argument_is_refused() -> None:
 
 @needs_bash
 def test_measure_producer_answers_before_it_starts_a_stack() -> None:
-    """The one script whose work is a build, a 3 GB corpus and a full offer.
-
-    Answering `--help` by starting that is the most expensive way in the
-    repository to learn what a script does.
-    """
     out = subprocess.run([str(MEASURE_PRODUCER), "--help"], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "takes no arguments" in out.stdout
@@ -536,12 +447,6 @@ def test_measure_producer_answers_before_it_starts_a_stack() -> None:
 @needs_bash
 @pytest.mark.parametrize("script", [GEN_CORPUS, PUSH_IMAGES, STAGE, LAUNCH, GATE, TEARDOWN, FINISH, PURGE, RUN])
 def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
-    """`--help` and an unknown argument, with no site config and no cluster.
-
-    These drivers are read before they are run, and refusing to say what they
-    do until a site config exists would be refusing the first question anyone
-    asks of them.
-    """
     out = subprocess.run([str(script), "--help"], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert "--site PATH" in out.stdout
@@ -553,12 +458,6 @@ def test_a_cluster_driver_answers_before_it_reads_a_site(script: Path) -> None:
 
 @needs_bash
 def test_gen_corpus_refuses_bad_arguments_before_it_needs_a_cluster() -> None:
-    """A non-numeric `--shards` renders a Job with a completions field of 'two'.
-
-    Both refusals happen before the site config is read, because the values
-    reach a manifest and a rejected Job is a slower way to learn the same
-    thing.
-    """
     out = subprocess.run([str(GEN_CORPUS), "smoke", "--shards", "two"], capture_output=True, text=True)
     assert out.returncode == 1, out.stdout
     assert "--shards must be a positive integer" in out.stderr
@@ -569,13 +468,6 @@ def test_gen_corpus_refuses_bad_arguments_before_it_needs_a_cluster() -> None:
 
 
 def test_gen_corpus_shards_each_shard_into_its_own_prefix() -> None:
-    """A sharded corpus needs a `--out` per shard, and one shard needs none.
-
-    Every shard of a preset writes a directory of the same name, so shards
-    sharing one `--out` would overwrite each other's metadata. The script
-    cannot be run without a cluster, so what is checked is the command it
-    renders into the Job.
-    """
     text = GEN_CORPUS.read_text()
     assert "--out $CORPUS_ROOT/shards/\\$JOB_COMPLETION_INDEX" in text
     assert "--shard-index \\$JOB_COMPLETION_INDEX --shard-count $SHARDS" in text
@@ -587,12 +479,6 @@ def test_gen_corpus_shards_each_shard_into_its_own_prefix() -> None:
 
 @needs_bash
 def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
-    """`--all` deletes a corpus, so its meaning has to be readable with nothing set.
-
-    Also the check that argument parsing runs before the required-variable
-    refusals: a reader asking what the flag does should not have to name a
-    cluster first.
-    """
     environment = {key: value for key, value in os.environ.items() if key not in ("AWS_REGION", "CLUSTER_NAME")}
     out = subprocess.run([str(AWS_TEARDOWN), "--help"], capture_output=True, text=True, env=environment)
     assert out.returncode == 0, out.stderr
@@ -605,11 +491,6 @@ def test_teardown_takes_its_argument_before_it_needs_an_account() -> None:
 
 @needs_bash
 def test_setup_takes_its_one_argument_before_it_needs_an_account() -> None:
-    """The teardown's property, on the script that now takes a flag of its own.
-
-    `--write-site` writes the file every later driver reads, so what it does
-    has to be readable without naming a cluster first.
-    """
     environment = {key: value for key, value in os.environ.items() if key not in ("AWS_REGION", "CLUSTER_NAME")}
     out = subprocess.run([str(AWS_SETUP), "--help"], capture_output=True, text=True, env=environment)
     assert out.returncode == 0, out.stderr
@@ -624,9 +505,7 @@ def test_setup_takes_its_one_argument_before_it_needs_an_account() -> None:
 @pytest.mark.parametrize(
     "offered, chosen",
     [
-        # The newest plain 3.x wins, and 10 is newer than 6 rather than sorting
-        # before it. A `.tiered` variant is a different storage mode, so it is
-        # not what an unset knob should pick even though it sorts higher.
+        # Sort versions numerically and exclude tiered-storage variants.
         ("3.6.0\t3.10.0\t3.6.0.tiered\t2.8.1", "3.10.0"),
         ("3.6.0", "3.6.0"),
         # MSK also publishes a minor line's latest patch as a trailing `x`;
@@ -642,13 +521,8 @@ def test_setup_takes_its_one_argument_before_it_needs_an_account() -> None:
     ],
 )
 def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str | None) -> None:
-    """Run `setup.sh`'s own version-selection lines against a fixed answer from MSK.
-
-    The whole path is unreachable from the guard tests — it sits behind a live
-    account — so the block is lifted out of the script and run on its own. It is
-    worth running rather than reading because the filter is a pipeline inside an
-    assignment: under `pipefail` an unguarded one aborts the script the moment
-    `grep` matches nothing, taking the refusal below it with it.
+    """An unmatched grep under pipefail must reach the explicit refusal instead of
+    aborting the assignment early.
     """
     harness = f"""
         set -euo pipefail
@@ -681,16 +555,8 @@ class Growth:
 
 
 def _volume_growth(*, described: str, refusal: str = "", asked: int = 1000) -> Growth:
-    """`setup.sh`'s own growth lines, against fixed answers from MSK.
-
-    The path sits behind a live account, so the function is lifted out and run
-    on its own. Worth running rather than reading: every branch in it exists to
-    keep a second `setup.sh` run from failing on the growth the first one asked
-    for, which is what the file's own header promises.
-
-    The stub records its calls to a file rather than to a stream: the update is
-    made inside a `"$(... 2>&1)"` capture, so anything it wrote to either
-    stream would end up in the variable the script reads its error out of.
+    """Run the actual MSK growth function against fixed responses. Record calls
+    to a file because the function captures stdout and stderr for error handling.
     """
     with tempfile.TemporaryDirectory() as directory:
         calls = Path(directory) / "aws-calls.log"
@@ -726,17 +592,12 @@ def _volume_growth(*, described: str, refusal: str = "", asked: int = 1000) -> G
 @pytest.mark.parametrize(
     ("state", "current", "grown"),
     [
-        # Smaller and ready: an hour's offer needs the room, and a volume that
-        # fills stops the offer rather than the engine.
+        # Grow undersized volumes only when the cluster is ready.
         ("ACTIVE", 100, True),
-        # Equal, and larger: a broker volume cannot shrink, so the only two
-        # answers are grow it and leave it alone.
+        # Leave adequate volumes unchanged; MSK cannot shrink them.
         ("ACTIVE", 1000, False),
         ("ACTIVE", 2000, False),
-        # Smaller and not ready. A cluster applying an earlier update keeps
-        # reporting the old size, so the size alone would ask for the same
-        # growth a second time and MSK would refuse it — exiting the script on
-        # the re-run its own header calls idempotent.
+        # An update may still report the old size. Do not request the same growth twice.
         ("UPDATING", 100, False),
         ("MAINTENANCE", 100, False),
     ],
@@ -748,8 +609,7 @@ def test_an_existing_broker_volume_is_grown_once_and_never_shrunk(state: str, cu
     assert issued is grown, grown_run.calls + grown_run.result.stdout
     if grown:
         assert "VolumeSizeGB=1000" in grown_run.calls, grown_run.calls
-        # The version MSK reported, not a guess: an update carrying the wrong
-        # one is refused, and the refusal is minutes into a setup.
+        # Use the reported version token for the update.
         assert f"--current-version {_CLUSTER_VERSION}" in grown_run.calls, grown_run.calls
     else:
         assert "log msk broker volumes are" in grown_run.result.stdout, grown_run.result.stdout
@@ -759,20 +619,12 @@ def test_an_existing_broker_volume_is_grown_once_and_never_shrunk(state: str, cu
 @pytest.mark.parametrize(
     "refusal",
     [
-        # The two answers that mean "not now": a cluster that left ACTIVE
-        # between the read and the call, and the cooldown MSK holds between
-        # storage updates.
+        # Allow transient non-ACTIVE and storage-update cooldown responses.
         "An error occurred (BadRequestException): The cluster must be in ACTIVE state",
         "An error occurred (BadRequestException): A previous storage update was performed in the last 6 hours",
     ],
 )
 def test_a_growth_msk_will_not_take_yet_leaves_the_setup_converging(refusal: str) -> None:
-    """A re-run has to finish, because everything after this needs the cluster.
-
-    Neither refusal changes what the volume already is, and the growth an
-    earlier run asked for is either applying or already applied — so failing
-    here would abandon a setup over a call with nothing left to do.
-    """
     refused = _volume_growth(described=f"ACTIVE\t{_CLUSTER_VERSION}\t100", refusal=refusal).result
     assert refused.returncode == 0, refused.stdout + refused.stderr
     assert "log a-cluster will not take the growth to 1000 GiB yet" in refused.stdout, refused.stdout
@@ -780,12 +632,6 @@ def test_a_growth_msk_will_not_take_yet_leaves_the_setup_converging(refusal: str
 
 @needs_bash
 def test_a_growth_msk_refuses_for_any_other_reason_stops_the_setup() -> None:
-    """A refusal nobody recognises is not one to shrug at.
-
-    A volume above MSK's ceiling, a malformed request, a denied action: each is
-    a setup that did not do what it said, and reporting it as converged would
-    leave the growth a later run depends on silently undone.
-    """
     refused = _volume_growth(
         described=f"ACTIVE\t{_CLUSTER_VERSION}\t100",
         refusal="An error occurred (AccessDeniedException): not authorized to perform kafka:UpdateBrokerStorage",
@@ -797,12 +643,6 @@ def test_a_growth_msk_refuses_for_any_other_reason_stops_the_setup() -> None:
 
 @needs_bash
 def test_a_broker_volume_size_msk_would_not_report_is_refused() -> None:
-    """No answer is not "it is big enough": an unread size cannot be compared.
-
-    `--output text` prints `None` for a field the API left out, which an
-    arithmetic comparison would read as zero and then try to grow a cluster
-    whose shape nobody knows.
-    """
     unread = _volume_growth(described=f"ACTIVE\t{_CLUSTER_VERSION}\tNone").result
     assert unread.returncode == 3, unread.stdout + unread.stderr
     assert "die a-cluster reports no broker volume size" in unread.stdout, unread.stdout
@@ -818,13 +658,8 @@ class BucketStep:
 
 
 def _bucket_step(script: Path, function: str, *, tags: str | None, answered: str = "yes") -> BucketStep:
-    """One script's own bucket lines, against fixed answers from S3.
-
-    Lifted and run rather than read, like the broker-volume growth above: the
-    path sits behind a live account, and the branches in it are the ones that
-    decide whether a bucket the operator keeps something else in is reconfigured
-    or emptied. ``tags`` is None for a bucket that does not exist, empty for one
-    with no tag of ours, and the tag's value otherwise.
+    """Run bucket operations against S3 stubs. tags is None for an absent bucket,
+    empty for an unowned bucket, or the ownership tag value.
     """
     with tempfile.TemporaryDirectory() as directory:
         calls = Path(directory) / "aws-calls.log"
@@ -863,13 +698,8 @@ def _bucket_step(script: Path, function: str, *, tags: str | None, answered: str
 
 @needs_bash
 def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
-    """Neither of the two calls it would make is additive.
-
-    PutBucketTagging replaces the whole tag set and PutBucketVersioning
-    suspends versioning, so adopting a bucket would silently reconfigure one
-    the operator keeps something else in — and `BUCKET` defaults to a name
-    derived from the account id, which is exactly the name someone may have
-    used already.
+    """PutBucketTagging replaces all tags and PutBucketVersioning suspends versioning;
+    either would alter an unrelated existing bucket.
     """
     refused = _bucket_step(AWS_SETUP, "create_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
@@ -880,7 +710,6 @@ def test_setup_refuses_to_reconfigure_a_bucket_it_did_not_create() -> None:
 
 @needs_bash
 def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
-    """A bucket it created before is adopted, and an absent one is created."""
     created = _bucket_step(AWS_SETUP, "create_bucket", tags=None)
     assert created.result.returncode == 0, created.result.stdout + created.result.stderr
     assert "create-bucket --bucket a-bucket" in created.calls, created.calls
@@ -894,11 +723,6 @@ def test_setup_creates_a_bucket_and_re_runs_over_its_own() -> None:
 
 @needs_bash
 def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
-    """The tag check the security-group deletion has, on the more destructive step.
-
-    `BUCKET` is a name derived from the account id, and what `--all` does to it
-    is remove every corpus, every run's artifacts and the warehouse.
-    """
     refused = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="")
     assert refused.result.returncode == 3, refused.result.stdout
     assert "carries no lakehouse-ingest-bench tag" in refused.result.stdout, refused.result.stdout
@@ -908,11 +732,6 @@ def test_teardown_refuses_to_empty_a_bucket_it_did_not_create() -> None:
 
 @needs_bash
 def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> None:
-    """Describing a deletion is not the same as asking for it.
-
-    `purge.sh` argues the policy for the same class of data and implements the
-    prompt; this is the same data, one level up.
-    """
     asked = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags="true", answered="no")
     assert asked.result.returncode == 3, asked.result.stdout
     assert "remove all of the above?" in asked.asked, asked.asked
@@ -927,7 +746,6 @@ def test_teardown_names_what_the_bucket_holds_and_asks_before_emptying_it() -> N
 
 @needs_bash
 def test_teardown_leaves_a_bucket_that_is_already_gone_alone() -> None:
-    """A re-run after a partial teardown finishes the job rather than failing."""
     gone = _bucket_step(AWS_TEARDOWN, "remove_bucket", tags=None)
     assert gone.result.returncode == 0, gone.result.stdout + gone.result.stderr
     assert "already gone" in gone.result.stdout, gone.result.stdout
@@ -944,14 +762,7 @@ _MSK_BOOTSTRAP = (
 
 
 def _write_site(path: Path, *, registry: bool = False, yq_stub: str = "") -> subprocess.CompletedProcess[str]:
-    """`setup.sh`'s own site writer, against the values a finished setup holds.
-
-    Lifted and run like the bucket and broker-volume steps above: the values it
-    writes are only known at the end of a live setup. What it owes is a file
-    the harness's own loader accepts, which is what the tests below read it
-    with. ``yq_stub`` is a shell function shadowing the real `yq`, for the
-    read-back this cannot otherwise make fail.
-    """
+    """`setup.sh`'s own site writer, against the values a finished setup holds."""
     harness = f"""
         set -euo pipefail
         log() {{ printf 'log %s\\n' "$*"; }}
@@ -978,14 +789,6 @@ def _write_site(path: Path, *, registry: bool = False, yq_stub: str = "") -> sub
 @needs_shell_tools
 @pytest.mark.parametrize("registry", [False, True], ids=["no-registry", "with-registry"])
 def test_the_site_setup_writes_holds_every_key_the_example_does(tmp_path: Path, registry: bool) -> None:
-    """Loaded rather than diffed against a fixture, and its keys held to the example.
-
-    A written file and a filled-in copy of `site.aws.example.yaml` have to be
-    the same document, so a key added to the example and not to the writer is a
-    failure here rather than a driver refusing a site months later. The
-    registry is written only for the setup that deployed one: the URL is the
-    in-cluster Service's, which resolves to nothing otherwise.
-    """
     target = tmp_path / "site.yaml"
     written = _write_site(target, registry=registry)
     assert written.returncode == 0, written.stdout + written.stderr
@@ -1009,8 +812,7 @@ def test_the_site_setup_writes_holds_every_key_the_example_does(tmp_path: Path, 
     assert site.catalog_props["warehouse"] == IAM_VALUES["ACCOUNT"]
     assert site.kubernetes is not None and site.kubernetes.context == SITE_AWS_FILLINGS["YOUR_KUBE_CONTEXT"]
     assert site.kubernetes.spark_service_account == "ingest-bench-spark"
-    # The one value no account can be asked for, so it is written at the zeros
-    # `validate-results.py` refuses and the operator fills it in.
+    # Pricing must be filled in by the operator; zero is not publishable.
     assert (site.pricing_vcpu_hour_usd, site.pricing_gib_hour_usd) == (0.0, 0.0)
     if registry:
         assert site.schema_registry is not None and site.schema_registry.url.endswith("/apis/ccompat/v7")
@@ -1020,7 +822,6 @@ def test_the_site_setup_writes_holds_every_key_the_example_does(tmp_path: Path, 
 
 @needs_shell_tools
 def test_the_written_site_is_never_an_overwrite(tmp_path: Path) -> None:
-    """A site config names the bucket a campaign's every run and result lives in."""
     existing = tmp_path / "site.yaml"
     kept = "corpus_root: s3://another-bucket/corpus\n"
     existing.write_text(kept)
@@ -1040,12 +841,6 @@ def test_the_written_site_is_never_an_overwrite(tmp_path: Path) -> None:
     ids=["unreadable", "not-what-was-written"],
 )
 def test_a_site_that_did_not_read_back_is_removed(tmp_path: Path, yq_stub: str) -> None:
-    """Otherwise the existence refusal turns the retry that fixes it into a refusal.
-
-    A site config a driver cannot read is worth nothing to keep, and the two
-    ways the read-back fails — a file `yq` could not parse, and one whose
-    bootstrap servers are not what was written — leave the same useless file.
-    """
     target = tmp_path / "site.yaml"
     refused = _write_site(target, yq_stub=yq_stub)
     assert refused.returncode == 3, refused.stdout + refused.stderr
@@ -1055,12 +850,6 @@ def test_a_site_that_did_not_read_back_is_removed(tmp_path: Path, yq_stub: str) 
 
 @needs_bash
 def test_setup_refuses_an_existing_site_before_it_touches_the_account(tmp_path: Path) -> None:
-    """The write is the last thing the script does, after a wait of half an hour.
-
-    So the whole script is run with `aws` stubbed to record and fail: the
-    refusal has to come out of it with nothing recorded, whatever the steps
-    between the argument and the write are.
-    """
     existing = tmp_path / "site.yaml"
     existing.write_text("corpus_root: s3://another-bucket/corpus\n")
     calls = tmp_path / "aws-calls.log"
@@ -1083,20 +872,8 @@ def test_setup_refuses_an_existing_site_before_it_touches_the_account(tmp_path: 
 
 
 def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pinned_version() -> None:
-    """The chart, the pin, and the three values the install cannot be right without.
-
-    `spark.jobNamespaces` tells the controller which namespaces to reconcile
-    SparkApplications in; without the harness namespace in it, a staged run's
-    object is created and never looked at, and staging waits out its whole
-    timeout on a state nobody was going to report. The webhook is what grafts
-    `spec.volumes` and the two `volumeMounts` onto the pods, so an install
-    without it starts a driver that dies opening the run's job document. And
-    the chart's own spark identity is off because a run's driver runs as the
-    account Pod Identity is bound to.
-
-    Counted rather than matched as substrings: a second copy of the install
-    satisfies every `in` assertion while printing its own log lines into the
-    values an operator copies, and two copies are two things to keep in step.
+    """The chart must watch the run namespace and enable the webhook that injects
+    mounts. Disable its default identity so drivers use the Pod Identity account.
     """
     setup = AWS_SETUP.read_text()
     assert setup.count("get crd sparkapplications.sparkoperator.k8s.io") == 1
@@ -1114,15 +891,7 @@ def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pin
 
 
 def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:
-    """`downloads.apache.org` carries only the current releases, so a pin 404s there.
-
-    That is not a failure a pinned version can avoid by being new: it becomes
-    one the day the next release lands, and `setup.sh` then refuses a cluster it
-    was working on the day before. `archive.apache.org` keeps every release,
-    current ones included. The version has to reach the URL from the variable
-    too — a second one written into the URL would install a chart the log names
-    wrongly.
-    """
+    """downloads.apache.org removes old releases; archive.apache.org retains pins."""
     setup = AWS_SETUP.read_text()
     urls = re.findall(r'"(https://\S*flink-kubernetes-operator\S*)"', setup)
     assert urls == ["https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/"], urls
@@ -1130,13 +899,6 @@ def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> No
 
 
 def test_every_engine_s_image_is_pushed_and_has_a_repository_to_be_pushed_to() -> None:
-    """One image name, stated in three places: the renderer, the push and the account.
-
-    A renderer naming a repository nothing pushes leaves the operator waiting on
-    an `ImagePullBackOff`, and a push to a repository `setup.sh` never created
-    fails on a registry 404 — both minutes into a campaign, and both from a name
-    that was only ever written down twice.
-    """
     prefix = re.search(r"^IMAGE_REPOSITORY_PREFIX=(\S+)$", (SCRIPTS / "_k8s.sh").read_text(), re.M)
     assert prefix is not None, "_k8s.sh no longer states the registry path both images are pushed under"
     listed = re.search(r'^ECR_REPOSITORIES="([^"]+)"$', AWS_SETUP.read_text(), re.M)
@@ -1156,12 +918,6 @@ def test_every_engine_s_image_is_pushed_and_has_a_repository_to_be_pushed_to() -
 
 
 def test_the_setup_script_renders_only_the_placeholders_it_exports() -> None:
-    """The envsubst argument in `setup.sh` and the documents' variables are one list.
-
-    envsubst given a restricted list silently leaves out anything not in it, so
-    a placeholder added to a document and not to the script would reach IAM
-    verbatim and be refused as a malformed ARN.
-    """
     setup = AWS_SETUP.read_text()
     for path in _iam_documents():
         for name in Template(path.read_text()).get_identifiers():
@@ -1185,12 +941,7 @@ def test_every_iam_document_renders_to_a_policy() -> None:
 
 
 def test_the_trust_document_grants_assume_role_and_tag_session() -> None:
-    """Pod Identity needs both.
-
-    The agent tags the session it hands the pod, so a trust policy with only
-    `sts:AssumeRole` fails at credential-vending time — after the pod is
-    running, as an unattributed AccessDenied from inside a cloud SDK.
-    """
+    """EKS Pod Identity tags sessions, so its trust policy needs both actions."""
     statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "trust.json"))
     pod_identity = [s for s in statements if s["Principal"] == {"Service": "pods.eks.amazonaws.com"}]
     assert len(pod_identity) == 1, statements
@@ -1210,11 +961,6 @@ def test_the_harness_policy_covers_the_three_bucket_prefixes() -> None:
 
 
 def test_the_harness_policy_names_the_table_namespace_the_harness_uses() -> None:
-    """The Glue database in the policy is the namespace `derive` creates tables in.
-
-    They are the same name written in two files, and a policy scoped to a
-    different database denies `CreateTable` on the first run rather than here.
-    """
     statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "harness-policy.json"))
     region, account = IAM_VALUES["REGION"], IAM_VALUES["ACCOUNT"]
     glue = _one(
@@ -1230,13 +976,7 @@ def test_the_harness_policy_names_the_table_namespace_the_harness_uses() -> None
 
 
 def test_the_msk_topic_statement_allows_idempotent_writes() -> None:
-    """`WriteDataIdempotently`, without which `InitProducerId` is denied.
-
-    The producer is idempotent, so its very first send fails without this
-    action — and the denial names a producer id rather than the policy.
-    `cluster` is its only resource type, so it belongs on the cluster ARN,
-    not the topic ARN alongside `WriteData`.
-    """
+    """InitProducerId requires WriteDataIdempotently on the cluster ARN, not a topic."""
     statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "harness-policy.json"))
 
     topics = _one(statements, {IAM_VALUES["MSK_TOPIC_ARN"]}, "the topics")
@@ -1272,9 +1012,7 @@ def test_the_namespace_manifest_renders_every_identity_and_each_engine_s_rbac() 
             named = metadata["name"] if kind == "Namespace" else metadata["namespace"]
             assert named == "a-namespace", f"{kind} was rendered into {named!r}"
 
-    # The site example names the accounts a run's pods ask for; a manifest that
-    # creates differently named ones leaves every pod unschedulable for want of
-    # a ServiceAccount nobody created.
+    # ServiceAccount names must agree between the example and rendered manifest.
     site = _mapping(_mapping(yaml.safe_load(SITE_AWS_EXAMPLE.read_text()))["kubernetes"])
     accounts = {str(_mapping(document["metadata"])["name"]) for document in by_kind["ServiceAccount"]}
     assert accounts == {
@@ -1283,12 +1021,8 @@ def test_the_namespace_manifest_renders_every_identity_and_each_engine_s_rbac() 
         site["spark_service_account"],
     }
 
-    # Each engine raises its own fleet: a JobManager creates its TaskManager
-    # pods and the ConfigMaps that configure them, and a Spark driver creates
-    # its executors, their configuration and the Service they find it by. So
-    # these are the resources a run cannot start without. The verbs are
-    # enumerated rather than `*`, so a Role that widens to a wildcard is a
-    # failure and not a silent grant of everything the API group ever gains.
+    # Enumerate the resources and verbs each engine needs to create its workers; reject wildcard
+    # grants.
     expected: dict[str, tuple[set[str], set[tuple[str, str]]]] = {
         str(site["flink_service_account"]): (
             {"get", "list", "watch", "create", "update", "patch", "delete"},
@@ -1311,9 +1045,7 @@ def test_the_namespace_manifest_renders_every_identity_and_each_engine_s_rbac() 
                     granted.add((str(group), str(resource)))
         assert granted == resources, name
 
-    # Each binding names its own Role and the account of the same name: a
-    # binding pointing at the other engine's would grant a driver the rules a
-    # JobManager needs and none of its own.
+    # Bind each engine account to its own Role.
     bindings = {str(_mapping(binding["metadata"])["name"]): binding for binding in by_kind["RoleBinding"]}
     assert set(bindings) == set(expected)
     for name, binding in bindings.items():
@@ -1324,12 +1056,6 @@ def test_the_namespace_manifest_renders_every_identity_and_each_engine_s_rbac() 
 
 
 def test_the_schema_registry_manifest_renders_a_deployment_and_a_service() -> None:
-    """The two objects a `confluent` run reaches by service name.
-
-    The Service's name is half of the URL `setup.sh` prints and an operator
-    pastes into `site.yaml`, and its selector is what makes that name resolve
-    to the registry pod rather than to nothing.
-    """
     template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
     rendered = render_template(
         template,
@@ -1347,9 +1073,7 @@ def test_the_schema_registry_manifest_renders_a_deployment_and_a_service() -> No
     pod = _mapping(_mapping(deployment["template"])["spec"])
     assert pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"} and pod["tolerations"] == []
     container = _mapping(_sequence(pod["containers"])[0])
-    # Both probes, because the registry answers on its port before it will
-    # serve a registration: readiness is what holds the endpoint back until a
-    # `stage` against it can succeed.
+    # The registry may accept connections before registrations; readiness must gate the Service.
     assert _mapping(_mapping(container["readinessProbe"])["httpGet"])["path"] == "/health/ready"
     assert _mapping(_mapping(container["livenessProbe"])["httpGet"])["path"] == "/health/live"
 
@@ -1361,11 +1085,6 @@ def test_the_schema_registry_manifest_renders_a_deployment_and_a_service() -> No
 
 
 def test_the_setup_script_substitutes_every_marker_the_registry_template_carries() -> None:
-    """`setup.sh` renders that template with `sed`, so its list and the markers are one.
-
-    A marker the template gains and the script does not substitute reaches the
-    API server verbatim, which is refused there rather than here.
-    """
     template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
     setup = AWS_SETUP.read_text()
     markers = {match[2:-2] for match in MARKER_RE.findall(template.read_text())}
@@ -1377,10 +1096,6 @@ def test_the_setup_script_substitutes_every_marker_the_registry_template_carries
 
 
 def test_the_stack_and_the_cluster_run_the_same_registry_image() -> None:
-    """One image in both places, so a local `confluent` run proves the cluster's.
-
-    Two pins drift, and the one nobody rereads is the one a cluster runs.
-    """
     template = (REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl").read_text()
     compose = yaml.safe_load((REPO_ROOT / "deploy" / "compose" / "local" / "docker-compose.yml").read_text())
     image = str(_mapping(_mapping(_mapping(compose)["services"])["schema-registry"])["image"])
@@ -1388,12 +1103,6 @@ def test_the_stack_and_the_cluster_run_the_same_registry_image() -> None:
 
 
 def test_the_eksctl_example_parses_and_holds_its_placeholders() -> None:
-    """The example is copied and edited, so it has to parse before it is edited.
-
-    The two placeholders are the whole of what an operator replaces; a third
-    value left over from the machine that wrote the file would build a cluster
-    somewhere nobody asked for.
-    """
     config = yaml.safe_load((AWS_DEPLOY / "eksctl-cluster.example.yaml").read_text())
     assert config["kind"] == "ClusterConfig"
     assert config["metadata"]["name"] == "YOUR_CLUSTER_NAME"
@@ -1423,12 +1132,7 @@ STACK_HOOKS_AWS = AWS_DEPLOY / "_stack_hooks.sh"
 
 
 def test_the_stack_policy_covers_the_three_prefixes_and_nothing_else() -> None:
-    """The stack has no managed broker and no Glue, so its role holds only the bucket.
-
-    A statement for either would grant the pods access to services the stack
-    never creates; the whole point of a separate role is that it can be bound
-    without a managed broker existing.
-    """
+    """The in-cluster stack needs bucket access but no MSK or Glue permissions."""
     statements = _statements(_rendered_policy(AWS_DEPLOY / "iam" / "stack-policy.json"))
     bucket = f"arn:aws:s3:::{IAM_VALUES['BUCKET']}"
     listing = _one(statements, {bucket}, "listing the bucket")
@@ -1443,7 +1147,7 @@ def test_the_stack_policy_covers_the_three_prefixes_and_nothing_else() -> None:
 
 
 def test_the_stack_policy_uses_only_the_bucket_placeholder() -> None:
-    """The hook exports BUCKET alone, so a second placeholder would reach IAM verbatim."""
+    """The hook exports only BUCKET; additional placeholders would reach IAM unresolved."""
     identifiers = set(Template((AWS_DEPLOY / "iam" / "stack-policy.json").read_text()).get_identifiers())
     assert identifiers == {"BUCKET"}
     assert "envsubst '${BUCKET}'" in STACK_HOOKS_AWS.read_text()
@@ -1459,11 +1163,9 @@ def test_the_kafka_storage_class_renders_a_provisioned_gp3_class() -> None:
     assert rendered["provisioner"] == "ebs.csi.aws.com"
     parameters = _mapping(rendered["parameters"])
     assert parameters["type"] == "gp3"
-    # Strings: the CSI driver's parameters are a string map, and a bare number
-    # here is refused by the API server rather than coerced.
+    # CSI parameters must be strings; the API server does not coerce numbers.
     assert parameters["throughput"] == "250" and parameters["iops"] == "6000"
-    # A broker's claim grows when a campaign moves from a smoke to an hour
-    # run, and its volume is created in the zone of the broker it serves.
+    # Allow expansion and provision each volume in its broker's zone.
     assert rendered["allowVolumeExpansion"] is True
     assert rendered["volumeBindingMode"] == "WaitForFirstConsumer"
     hooks = STACK_HOOKS_AWS.read_text()
@@ -1472,11 +1174,7 @@ def test_the_kafka_storage_class_renders_a_provisioned_gp3_class() -> None:
 
 
 def test_the_kafka_nodegroup_example_parses_tainted_and_labelled() -> None:
-    """The example is copied and edited; it has to parse and carry the two placeholders only.
-
-    The taint is what keeps every other pod off the brokers' nodes, and the
-    label is what the KAFKA_NODE_SELECTOR beside it selects.
-    """
+    """The selector targets broker nodes; the taint excludes pods without a toleration."""
     config = yaml.safe_load((AWS_DEPLOY / "eksctl-kafka-nodegroup.example.yaml").read_text())
     assert config["kind"] == "ClusterConfig"
     assert config["metadata"] == {"name": "YOUR_CLUSTER_NAME", "region": "YOUR_REGION"}
@@ -1490,8 +1188,6 @@ def test_the_kafka_nodegroup_example_parses_tainted_and_labelled() -> None:
 
 @needs_bash
 def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
-    """The stack scripts dispatch on CLOUD to these names; a missing one is a
-    `command not found` half way through a setup."""
     text = STACK_HOOKS_AWS.read_text()
     for name in (
         "stack_preflight",
@@ -1511,7 +1207,7 @@ def test_the_aws_hook_defines_every_function_the_stack_calls() -> None:
 
 @needs_shell_tools
 def test_the_storage_profile_keeps_the_catalog_off_the_data_path() -> None:
-    """Vending and remote signing off: every pod already reaches the bucket as its own identity."""
+    """Pods use their own identities, so disable credential vending and remote signing."""
     function = _shell_function(STACK_HOOKS_AWS, "stack_storage_profile_json")
     out = subprocess.run(
         ["bash", "-c", f"{function}\nstack_storage_profile_json"],
@@ -1549,7 +1245,7 @@ def test_the_storage_credential_is_the_pods_own_identity() -> None:
 
 
 def test_setup_creates_the_warehouse_with_hard_deletes() -> None:
-    """purge.sh removes a table's files itself; a soft delete would reserve the location."""
+    """purge.sh removes table files; soft deletion would leave their location reserved."""
     setup = STACK_SETUP.read_text()
     assert '"delete-profile": {type: "hard"}' in setup
     assert "stack_storage_profile_json" in setup and 'stack_storage_credential_json "$EXTERNAL_ID"' in setup
@@ -1581,9 +1277,7 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
     assert site.catalog_props["warehouse"] == "123456789012"
     assert site.catalog_props["uri"] == "https://glue.eu-west-1.amazonaws.com/iceberg"
     assert site.catalog_props["rest.signing-name"] == "glue"
-    # Compared whole rather than field by field: this block is the one part of
-    # the example a driver reads attribute by attribute, so a key that does not
-    # survive loading is a pod with no identity, registry or region.
+    # Compare the full Kubernetes block to catch keys lost during loading.
     assert site.kubernetes == KubernetesConfig(
         context="a-cluster",
         namespace="ingest-bench",
@@ -1602,14 +1296,6 @@ def test_the_aws_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
 @needs_shell_tools
 @pytest.mark.parametrize("region", ["eu-west-1", None])
 def test_the_job_env_names_the_region_under_both_names_an_sdk_reads(tmp_path: Path, region: str | None) -> None:
-    """A pod's region has to reach botocore as well as Java's SDK.
-
-    Java's reads `AWS_REGION`; botocore reads `AWS_DEFAULT_REGION` alone and
-    treats `AWS_REGION` as a hint for something else, so a pod given only that
-    name has an S3 client with no region — which resolves the global endpoint
-    and is refused for a bucket that lives anywhere else. A cluster off AWS
-    names no region and gets neither variable rather than an empty one.
-    """
     site = _filled_site()
     if region is None:
         site = "".join(line for line in site.splitlines(keepends=True) if "aws_region" not in line)
@@ -1648,13 +1334,8 @@ def _site_reader(site_file: Path, call: str) -> subprocess.CompletedProcess[str]
 
 @needs_shell_tools
 def test_a_sites_reference_reaches_a_pods_python_as_the_site_wrote_it(tmp_path: Path) -> None:
-    """A `${env:NAME}` has to survive the shell that splits a Job's command line.
-
-    The image's entrypoint is `/bin/sh -c`, so the whole command reaches a pod
-    as one string that shell expands. Unquoted, dash refuses the form outright
-    and a POSIX-mode bash expands it to nothing — either way the process that
-    was meant to resolve it never sees it. Single-quoted, it arrives as the
-    characters the site wrote, which is what `resolve_env_placeholders` reads.
+    """The pod runs sh -c. Single quoting must preserve ${env:NAME} for Python
+    instead of letting the shell expand or reject it.
     """
     reference = "${env:IB_KAFKA_PASSWORD}"
     site_file = tmp_path / "site.yaml"
@@ -1682,12 +1363,8 @@ def test_a_sites_reference_reaches_a_pods_python_as_the_site_wrote_it(tmp_path: 
 @needs_shell_tools
 @pytest.mark.parametrize("quote", ["'", '"'])
 def test_a_property_a_quote_cannot_carry_is_refused_by_name(tmp_path: Path, quote: str) -> None:
-    """Neither quote survives the round trip, and each fails somewhere else.
-
-    A single quote ends the quoting that makes the value opaque to the pod's
-    shell; a double quote survives that shell and then closes the YAML scalar
-    the whole command line is rendered into, so `kubectl apply` reports a parse
-    error rather than the value that caused it.
+    """A single quote breaks shell quoting; a double quote breaks the enclosing
+    YAML scalar. Reject either before rendering.
     """
     site_file = tmp_path / "site.yaml"
     property_line = f"    sasl.password: {json.dumps('a' + quote + 'b')}\n    aws.region:"
@@ -1700,12 +1377,6 @@ def test_a_property_a_quote_cannot_carry_is_refused_by_name(tmp_path: Path, quot
 @needs_shell_tools
 @pytest.mark.parametrize("secret", ["ingest-bench-env", None])
 def test_the_env_a_pod_reads_a_secret_from_is_the_one_the_site_names(tmp_path: Path, secret: str | None) -> None:
-    """One Secret for the site, or an empty list where the site names none.
-
-    A key per property would be a statement, in this harness, of which of an
-    operator's properties hold credentials. A Secret's keys are already a set
-    of variable names, which is exactly what a `${env:NAME}` names.
-    """
     site_file = tmp_path / "site.yaml"
     site = _filled_site()
     if secret is not None:
@@ -1720,13 +1391,7 @@ def test_the_env_a_pod_reads_a_secret_from_is_the_one_the_site_names(tmp_path: P
 @needs_shell_tools
 @pytest.mark.parametrize("path", [".corpus_root", ".runs_root", ".warehouse"])
 def test_a_root_these_drivers_cannot_reach_is_refused_by_name(tmp_path: Path, path: str) -> None:
-    """The corpus and the renderers serve `gs://`; the drivers do not.
-
-    Every driver fetches a run directory, an artifact or a listing by shelling
-    out to the `aws` CLI, so a GCS site gets a working corpus generator and a
-    driver layer that cannot read what it wrote. Refused where the root is read,
-    rather than surfacing as an `aws s3` error about a URI it could not parse.
-    """
+    """Drivers use aws s3 even though corpus tools also support gs URIs."""
     site_file = tmp_path / "site.yaml"
     key = path.removeprefix(".")
     site_file.write_text(
@@ -1747,13 +1412,6 @@ def test_a_root_these_drivers_cannot_reach_is_refused_by_name(tmp_path: Path, pa
 
 
 def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:
-    """An inline `python -c` is a call site neither mypy nor a test would see.
-
-    `measure-producer.sh` reaches into `kafka_admin` directly, so a change to
-    one of those signatures leaves that script passing an arity nothing checks,
-    and nothing short of running it can say so. Every call whose arguments are
-    literals is bound against the real signature here.
-    """
     checked = 0
     for script in _shell_entrypoints():
         for snippet in re.findall(r"python -c '(.*?)'", script.read_text()):
@@ -1785,13 +1443,6 @@ def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:
 
 
 def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
-    """Every `producer:` key reaches a command line rather than a hardcoded value.
-
-    The staged run directory keeps the spec verbatim as the record of what was
-    asked for, so a spec key the script ignores publishes a claim about a run
-    that did not happen. Checked as text because the alternative needs Docker,
-    a broker and a corpus, which is the compose smoke and not a unit test.
-    """
     text = SMOKE.read_text()
     for key in ("speed", "seconds", "behind_max_ms", "compression"):
         assert f"yq '.producer.{key}'" in text, f"smoke.sh never reads producer.{key}"
@@ -1807,7 +1458,6 @@ def test_the_smoke_offers_the_run_the_spec_asks_for() -> None:
 
 @pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
 def test_both_drivers_tell_the_scorer_who_runs_the_ddl(script: Path) -> None:
-    """An absent table is a phase of the run or a fault, and only the spec says which."""
     text = script.read_text()
     assert "yq '.table.managed_by'" in text, f"{script.name} never reads table.managed_by"
     assert "--table-managed-by $MANAGED_BY" in text, f"{script.name} reads it but never passes it"
@@ -1815,13 +1465,6 @@ def test_both_drivers_tell_the_scorer_who_runs_the_ddl(script: Path) -> None:
 
 @pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
 def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None:
-    """The encoding and the schema id come off `facts.json`, not off the spec.
-
-    Staging is what registered the schema, so the id it was given is a fact
-    about the run and not something a driver could derive. A driver that read
-    the encoding and dropped the id would offer records whose header names
-    schema zero.
-    """
     text = script.read_text()
     for fact in ("value_encoding", "schema_id"):
         assert f"jq -r '.{fact} // empty'" in text, f"{script.name} never reads {fact} out of facts.json"
@@ -1830,12 +1473,6 @@ def test_both_drivers_frame_the_values_the_way_staging_did(script: Path) -> None
 
 @pytest.mark.parametrize("script", (SMOKE, LAUNCH), ids=lambda path: path.name)
 def test_both_drivers_offer_the_codec_the_spec_asks_for(script: Path) -> None:
-    """The codec comes off the spec, and is left off where the spec says nothing.
-
-    A driver that restated the producer's default would be a second copy of it
-    to keep in step; a driver that hardcoded one would offer records the spec
-    does not describe.
-    """
     text = script.read_text()
     assert "yq '.producer.compression'" in text, f"{script.name} never reads producer.compression"
     assert "--compression $COMPRESSION" in text, f"{script.name} reads the codec but never passes --compression"
@@ -1844,11 +1481,7 @@ def test_both_drivers_offer_the_codec_the_spec_asks_for(script: Path) -> None:
 
 
 def _compose_hooks() -> list[str]:
-    """The hooks `smoke.sh` calls, read off the loop that refuses a missing one.
-
-    Read rather than restated, so a fifth hook is a failure in every engine
-    that has not declared it instead of a call into nothing.
-    """
+    """The hooks `smoke.sh` calls, read off the loop that refuses a missing one."""
     match = re.search(r"for hook in ((?:engine_compose_\w+ ?)+); do", SMOKE.read_text())
     assert match is not None, "smoke.sh no longer states which hooks an engine declares"
     return match.group(1).split()
@@ -1859,12 +1492,6 @@ def _shell_functions(path: Path) -> set[str]:
 
 
 def test_every_engine_declares_the_whole_compose_contract() -> None:
-    """A hook an engine did not declare is a call into nothing, minutes in.
-
-    `smoke.sh` refuses it at source time for the same reason `engine-k8s`
-    refuses a descriptor field no driver reads: the failure has to land before
-    a corpus is generated, not after.
-    """
     hooks = _compose_hooks()
     assert len(hooks) == 4, hooks
     files = _engine_compose_files()
@@ -1874,12 +1501,6 @@ def test_every_engine_declares_the_whole_compose_contract() -> None:
 
 
 def test_the_smoke_names_no_engine_service_of_its_own() -> None:
-    """The contract `docs/adding-an-engine.md` states: no engine branches in `scripts/`.
-
-    Checked against the service names the engines' own compose files declare,
-    so it is the engines that say what must not appear here rather than a list
-    in this test. A third engine adds a directory, not a line under `scripts/`.
-    """
     services = {
         service
         for path in (REPO_ROOT / "engines").glob("*/compose.yaml")
@@ -1894,12 +1515,6 @@ def test_the_smoke_names_no_engine_service_of_its_own() -> None:
 
 @needs_shell_tools
 def test_the_stack_activates_every_profile_its_engines_declare() -> None:
-    """A service invisible to the one command that needs it is the failure this avoids.
-
-    Compose interpolates the whole model before it filters by profile, so
-    naming them all costs nothing — and the names come from the compose files
-    that declare them, which is what keeps them out of `_lib.sh`.
-    """
     declared = {
         profile
         for path in (REPO_ROOT / "engines").glob("*/compose.yaml")
@@ -1925,7 +1540,6 @@ def test_the_stack_activates_every_profile_its_engines_declare() -> None:
 
 
 def test_the_smoke_stages_the_spec_it_was_given() -> None:
-    """`--spec` names a file under `runs/`, which is what the container mounts."""
     text = SMOKE.read_text()
     assert "--spec)" in text and 'SPEC_FILE="$REPO_ROOT/runs/smoke-$ENGINE.yaml"' in text
     assert '--spec /runs/$(basename "$SPEC_FILE")' in text
@@ -1936,10 +1550,8 @@ def test_the_smoke_stages_the_spec_it_was_given() -> None:
 # The cluster drivers, against a stub kubectl and aws
 # ---------------------------------------------------------------------------
 
-# Every invocation is recorded and then answered, so the drivers' own parsing —
-# the run id off a Job's log, the epoch arithmetic, the command lines the Jobs
-# carry — is exercised with no cluster and no account. Anything not matched here
-# answers nothing and succeeds, which is what `kubectl apply` and `delete` do.
+# Record calls and return fixture responses so driver parsing runs without a cluster. Unmatched calls
+# succeed silently.
 KUBECTL_STUB = """
 printf '%s\\n' "$*" >>"$STUB_LOG"
 case "$*" in
@@ -1976,20 +1588,8 @@ case "$*" in
 esac
 """
 
-# `s3 sync` stands in for a prefix the pods published, copying one directory
-# when a test names it; every other subcommand succeeds silently. Guarded on
-# that directory rather than on the subcommand alone, because the drivers sync
-# several prefixes and only the staged one has a stand-in.
-#
-# `s3 ls` answers with the listing a test names, and refuses the one path a
-# test names as absent — which is how a bucket that is missing a shard is
-# expressed, since `aws s3 ls` exits non-zero over a path that matches nothing.
-#
-# `s3 cp` writes its destination, from `STUB_S3_CP_DIR/<basename>` when a test
-# put a file there and empty otherwise: the drivers read what they fetch, and a
-# `cp` that recorded the call and wrote nothing would leave them reading a file
-# that is not there. `STUB_S3_CP_ABSENT` is one object a test names as missing,
-# which is how an artifact the pods never published is expressed.
+# Simulate sync from fixture directories, listings from fixture text, and cp from STUB_S3_CP_DIR.
+# Missing-path variables model absent objects.
 AWS_STUB = """
 printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
 if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
@@ -2016,9 +1616,7 @@ CURL_STUB = """
 printf '%s\\n' "$*" >>"$STUB_CURL_LOG"
 """
 
-# The engine check, whose answer the driver branches on: 0 verified, 3 drift,
-# anything else an endpoint it could not read. One body for every engine's, since
-# what a driver does with it is the same.
+# All engine checks use the same stub: success, drift or unreadable endpoint.
 VERIFY_STUB = """
 printf '%s\\n' "$*" >>"$STUB_VERIFY_LOG"
 # The pod list too, and not only its path: the driver writes it to a temporary
@@ -2114,29 +1712,17 @@ RUN_ID = "smoke-flink-20260908T120000Z"
 RUN_OBJECT = RUN_ID.lower()
 BOOTSTRAP = SITE_AWS_FILLINGS["YOUR_MSK_IAM_BOOTSTRAP"] + ":9098"
 
-# The corpus root the filled example declares, spelled out rather than built
-# from the filling above it: the bucket is a fixture name the tree is allowed
-# to hold, and a URI assembled around an expression is one the guard on what
-# this repository may name cannot read.
-#
-# Then a sharded generation under it. A corpus directory is its preset's name
-# and the hash of that preset, so every shard of one generation writes a
-# directory of this one name.
+# Use an explicit allowed fixture URI so the public-surface scan can inspect it.
 CORPUS_ROOT = "s3://a-bucket/corpus"
 SHARDED_PRESET = "events-100mbs-skew"
 CORPUS_DIR = f"{SHARDED_PRESET}-7aa0f164"
 
-# What a shard prefix holds once a second preset has been generated into the
-# same bucket. The prefixes are shared, and the batches under them are part of
-# each merged corpus, so this is the steady state rather than leftovers.
+# Shared shard prefixes retain directories for previously generated presets.
 TWO_CORPORA = f"                           PRE {CORPUS_DIR}/\n                           PRE smoke-e13842f9/"
 
 
 def _stage_job_log(run_id: str) -> str:
-    """What the stage Job printed, in the shape `stage` prints it.
-
-    The run id first, because that is the line the driver reads.
-    """
+    """What the stage Job printed, in the shape `stage` prints it."""
     return (
         f"run_id: {run_id}\n"
         f"bootstrap: {BOOTSTRAP}\n"
@@ -2195,13 +1781,8 @@ def _run_driver(
     programs: dict[str, str] | None = None,
     job_log: str | None = None,
 ) -> DriverRun:
-    """Run one driver in its own working directory with `kubectl` and `aws` stubbed.
-
-    The working directory is the operator's: `./site.yaml` and `./runs` are
-    resolved against it, so nothing here writes into the checkout. ``programs``
-    stubs a harness command as well, which shadows the installed one because
-    the stub directory is first on `PATH`, and ``job_log`` is what the stage
-    Job printed — the run id a driver reads is only ever that Job's answer.
+    """Run a driver in an isolated operator directory with AWS and Kubernetes stubs.
+    programs overrides harness commands; job_log supplies the stage Job output.
     """
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
@@ -2221,9 +1802,7 @@ def _run_driver(
         cwd=work,
         capture_output=True,
         text=True,
-        # No terminal and nothing to read, so a driver that asks before it
-        # deletes gets the same answer here however these tests were started —
-        # from a shell whose stdin is a TTY as much as from CI.
+        # Use closed stdin so deletion prompts behave consistently in CI and local runs.
         stdin=subprocess.DEVNULL,
         env={
             **os.environ,
@@ -2261,9 +1840,7 @@ def _named_job(run: DriverRun, name: str) -> dict[str, object]:
 
 def _sharded_generation(tmp_path: Path, environment: dict[str, str]) -> DriverRun:
     """A two-shard generation whose shard prefixes hold two presets' corpora."""
-    # Both logs in the shape the harness prints them: a shard's line carries
-    # its index between the URI and the figures, and the merge's the shard
-    # count — so a driver that read either by position reads them both.
+    # Match the real shard and merge log field positions.
     merge_log = tmp_path / "merge.log"
     merge_log.write_text(f"wrote {CORPUS_ROOT}/{CORPUS_DIR} from 2 shards: 12000000 rows, 600000000 encoded bytes\n")
     return _run_driver(
@@ -2283,13 +1860,8 @@ def _sharded_generation(tmp_path: Path, environment: dict[str, str]) -> DriverRu
 
 @needs_shell_tools
 def test_a_sharded_merge_names_the_corpus_its_generation_wrote(tmp_path: Path) -> None:
-    """The shard prefixes are shared, so the directory is chosen by name.
-
-    Every multi-shard preset generated into one bucket writes under the same
-    `shards/<i>/` prefixes, and the batches there are part of each merged
-    corpus rather than leftovers — so a shard prefix holds one directory per
-    preset ever generated, and the merge cannot be the one directory it finds.
-    The name comes from what the generation itself reported writing.
+    """Shard prefixes can contain several presets. Select the directory reported
+    by this generation rather than the first directory listed.
     """
     run = _sharded_generation(tmp_path, {})
 
@@ -2307,12 +1879,6 @@ def test_a_sharded_merge_names_the_corpus_its_generation_wrote(tmp_path: Path) -
 
 @needs_shell_tools
 def test_a_generation_missing_a_shard_is_refused_before_the_merge(tmp_path: Path) -> None:
-    """A shard that wrote nothing is named, rather than merged around.
-
-    The merge reads every shard's metadata and publishes one document over the
-    lot, so a missing shard is a corpus short of its batches — and the figures
-    the whole run is scored against would describe a workload nobody offered.
-    """
     run = _sharded_generation(tmp_path, {"STUB_S3_LS_ABSENT": f"shards/1/{CORPUS_DIR}"})
 
     assert run.result.returncode != 0
@@ -2322,12 +1888,6 @@ def test_a_generation_missing_a_shard_is_refused_before_the_merge(tmp_path: Path
 
 @needs_shell_tools
 def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_path: Path) -> None:
-    """The run id comes from the Job, and the engine's documents come from the bucket.
-
-    Only staging knows the run id — the stamp in it is the moment staging ran —
-    so a driver that derived it a second time would name a different run every
-    time the two calls straddled a second.
-    """
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -2355,9 +1915,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
     assert json.loads((fetched / "facts.json").read_text())["topic"] == RUN_ID
     assert run.aws_calls.strip() == f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/ --only-show-errors"
 
-    # Every call names the cluster and the namespace the site declares: a
-    # `kubectl` that fell back to the caller's current context would apply a
-    # run to whichever cluster was last selected.
+    # Never fall back to the caller's current Kubernetes context or namespace.
     for line in run.calls.splitlines():
         assert line.startswith("--context a-cluster --namespace ingest-bench "), line
 
@@ -2377,10 +1935,7 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
     ]
     assert f"get flinkdeployment/{RUN_OBJECT}" in run.calls
 
-    # Once it is RUNNING, the job is read back through a tunnel to the REST
-    # Service the operator names after the deployment, and checked against the
-    # copied spec — by an absolute path, because the harness may be run from
-    # the checkout, which resolves a relative one against its own root.
+    # Verify through the operator's REST Service using an absolute spec path.
     assert f"port-forward svc/{RUN_OBJECT}-rest 18081:8081" in run.calls
     checked = verify_calls.read_text().strip()
     assert Path(checked.split()[1]) == (tmp_path / "work" / "runs" / RUN_ID / "spec.yaml").resolve()
@@ -2399,13 +1954,6 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
 def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
     tmp_path: Path, status: int, refusal: str
 ) -> None:
-    """Drift and an unreadable endpoint are refused, and for different reasons.
-
-    A result is only ever attributed to the spec it was staged from, so a job
-    whose effective settings are not that spec's — and a job whose settings
-    could not be read at all — are both runs not worth offering a corpus to.
-    Drift is final; an endpoint that did not answer is tried again first.
-    """
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -2423,9 +1971,7 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
             "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
             "STUB_VERIFY_LOG": str(verify_calls),
             "STUB_VERIFY_STATUS": str(status),
-            # The retries are the only wait left in this path, and three of
-            # them at the driver's default would hold the test for half a
-            # minute to prove the same thing.
+            # Shorten retries to keep this failure test fast.
             "ENGINE_POLL_S": "0",
         },
         programs={"curl": CURL_STUB, "verify-flink": VERIFY_STUB},
@@ -2452,13 +1998,8 @@ def test_stage_refuses_a_run_whose_engine_it_could_not_hold_to_the_spec(
 def test_stage_waits_out_a_fleet_that_is_still_being_placed(
     tmp_path: Path, statuses: str, succeeds: bool, tries: int
 ) -> None:
-    """Placement is a wait; an endpoint that did not answer is a retry.
-
-    An object reaches its running state before its last pod has been
-    scheduled, so a check reporting a half-placed fleet is answered by waiting
-    — against the engine's own running wait, which is what a cold node and an
-    image pull are already budgeted against — and not by the three tries an
-    unreadable endpoint gets.
+    """Placement uses the engine running timeout; unreadable endpoints have a
+    separate retry limit.
     """
     staged = tmp_path / "staged"
     staged.mkdir()
@@ -2477,8 +2018,7 @@ def test_stage_waits_out_a_fleet_that_is_still_being_placed(
             "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
             "STUB_VERIFY_LOG": str(verify_calls),
             "STUB_VERIFY_STATUSES": statuses,
-            # A placement wait is counted in poll intervals, so a zero poll
-            # would never reach the expiry the second case asks for.
+            # Use a nonzero poll interval so the placement timeout advances.
             "ENGINE_POLL_S": "1",
             "ENGINE_RUNNING_WAIT_S": "60" if succeeds else "0",
         },
@@ -2496,12 +2036,6 @@ def test_stage_waits_out_a_fleet_that_is_still_being_placed(
 @needs_shell_tools
 @pytest.mark.parametrize("script", [LAUNCH, TEARDOWN])
 def test_a_driver_addresses_the_topic_staging_named(tmp_path: Path, script: Path) -> None:
-    """The topic comes off `facts.json`, because staging is what created it.
-
-    It is named after the run id today, and a driver that rebuilt the name
-    from the id would publish to — or drop — a topic of its own the day the
-    two stop being the same string, leaving the run's own behind.
-    """
     topic = f"{RUN_ID}-as-staged"
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
@@ -2537,12 +2071,7 @@ def test_a_driver_addresses_the_topic_staging_named(tmp_path: Path, script: Path
     ],
 )
 def test_a_service_name_is_told_apart_from_any_other_catalog_host(host: str, answer: str | None) -> None:
-    """Only Kubernetes' own `<service>.<namespace>.svc` shape names a tunnel.
-
-    The shape is the cluster DNS convention and not a heuristic: a name of it
-    resolves nowhere but inside the cluster, so it is exactly the set of hosts
-    an operator's machine cannot reach as written.
-    """
+    """Recognize Kubernetes Service DNS names rather than guessing from arbitrary hosts."""
     function = _shell_function(K8S_LIB, "k8s_service_host")
     out = subprocess.run(
         ["bash", "-c", f'{function}\nk8s_service_host "$1"', "_", host], capture_output=True, text=True
@@ -2573,13 +2102,7 @@ def _staged_for_teardown(tmp_path: Path) -> None:
 @needs_shell_tools
 @pytest.mark.parametrize("host", ["lakekeeper.ingest-bench.svc", "lakekeeper.ingest-bench.svc.cluster.local"])
 def test_an_in_cluster_catalog_is_reached_through_a_tunnel(tmp_path: Path, host: str) -> None:
-    """A catalog addressed by Service name is a ClusterIP, which this machine cannot reach.
-
-    `stage` and `drop-topic` already run as Jobs for the broker's sake; the two
-    catalog reads a teardown and a purge make from here are the whole gap, and
-    a tunnel to the Service the URI names is what closes it. Only the `uri`
-    flag changes: every other property reaches the command as the site wrote it.
-    """
+    """Tunnel the Service URI for local commands; preserve every other catalog property."""
     _staged_for_teardown(tmp_path)
     run = _run_driver(
         TEARDOWN,
@@ -2605,7 +2128,6 @@ def test_an_in_cluster_catalog_is_reached_through_a_tunnel(tmp_path: Path, host:
 
 @needs_shell_tools
 def test_a_catalog_off_the_cluster_is_reached_as_written(tmp_path: Path) -> None:
-    """A public endpoint needs no tunnel, and gets none."""
     _staged_for_teardown(tmp_path)
     run = _run_driver(
         TEARDOWN,
@@ -2643,7 +2165,7 @@ def test_a_purge_asks_an_in_cluster_catalog_through_the_same_tunnel(tmp_path: Pa
 
 @needs_shell_tools
 def test_an_https_service_uri_is_refused_by_name(tmp_path: Path) -> None:
-    """The tunnel carries plain HTTP; a TLS Service name is a site to fix, not to guess at."""
+    """The URI rewrite supports plain HTTP only; reject HTTPS rather than downgrading it."""
     _staged_for_teardown(tmp_path)
     run = _run_driver(
         TEARDOWN,
@@ -2661,12 +2183,8 @@ def test_an_https_service_uri_is_refused_by_name(tmp_path: Path) -> None:
 
 @needs_shell_tools
 def test_finish_reaches_an_in_cluster_catalog_through_a_tunnel_too(tmp_path: Path) -> None:
-    """`finish.sh` reads the catalog properties for the same reason `teardown.sh` does.
-
-    It never opens a catalog connection — `file-sizes` reads the copied
-    document — but the object-store settings among the properties still come
-    through `read_catalog_prop_flags`, which opens the same tunnel for a
-    Service-shaped `uri` and has to stop it on the way out.
+    """finish.sh reads copied metadata, but the shared property reader still opens
+    and cleans up a catalog tunnel.
     """
     _torn_down_run(tmp_path)
     run = _run_driver(
@@ -2683,13 +2201,6 @@ def test_finish_reaches_an_in_cluster_catalog_through_a_tunnel_too(tmp_path: Pat
 
 @needs_shell_tools
 def test_a_failed_stage_takes_its_configmaps_with_it(tmp_path: Path) -> None:
-    """The two ConfigMaps a stage Job mounts belong to that Job alone.
-
-    They carry the operator's own site config, so an exit that never reached
-    the deletion of them — a Job that failed, a run directory that could not
-    be fetched — would leave it in the namespace for as long as the cluster
-    lives.
-    """
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -2712,13 +2223,6 @@ def test_a_failed_stage_takes_its_configmaps_with_it(tmp_path: Path) -> None:
 
 @needs_shell_tools
 def test_launch_passes_the_scorers_read_width_only_when_it_is_set(tmp_path: Path) -> None:
-    """A knob this driver does not default: set it and it reaches the scorer.
-
-    How many of a commit's data files are read at once is the scorer's own
-    default, and a second default here would be a number to keep in step with
-    that one — so the flag is appended when an operator names a width and left
-    off entirely otherwise.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2734,13 +2238,6 @@ def test_launch_passes_the_scorers_read_width_only_when_it_is_set(tmp_path: Path
 @needs_shell_tools
 @pytest.mark.parametrize("lead", [None, 42])
 def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, lead: int | None) -> None:
-    """The epoch is in the future by the lead, and the run directory says which.
-
-    A first batch already due when the producer opened its first connection is
-    acked late, and a late ack is read as the offer rather than the engine
-    setting the rate — which voids the run. The lead is what buys a cold node
-    and an image pull.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2762,9 +2259,7 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert before + expected_lead <= epoch <= after + expected_lead
     assert (run_dir / "timeline.log").read_text().splitlines()[-1].endswith(f" launched epoch={epoch}")
 
-    # The scorer is applied first: a producer publishing before the table was
-    # read would have rows committed by the first sample, and the keep-up curve
-    # would start part way up.
+    # Start scoring before production to record an empty baseline.
     assert [str(_mapping(document["metadata"])["name"]) for document in run.applied] == [
         f"scorer-{RUN_OBJECT}",
         f"producer-{RUN_OBJECT}",
@@ -2777,10 +2272,7 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--idle-stop-s 600 --publish-shards 1" in scorer
     # Unset, so the scorer's own default stands rather than one this driver restates.
     assert "--read-workers" not in scorer
-    # Every catalog property the site declares, because the scorer reads the
-    # table itself and no site config reaches a pod.
-    # Quoted, because a pod's shell splits this line: an unquoted value
-    # would lose a `${env:NAME}` reference before Python could resolve it.
+    # The scorer needs all catalog properties; pods do not receive the site file.
     assert "--catalog-prop 'uri=https://glue.eu-west-1.amazonaws.com/iceberg'" in scorer
     assert "--catalog-prop 'warehouse=123456789012'" in scorer
     # The spec's scoring keys, so the run scored is the run the spec asks for.
@@ -2801,14 +2293,7 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
 @needs_shell_tools
 @pytest.mark.parametrize("nodes", [2, 6], ids=["too-few", "enough"])
 def test_launch_says_when_the_cluster_has_no_room_for_its_own_pods(tmp_path: Path, nodes: int) -> None:
-    """A pod nothing schedules has an empty log, so the wait for it explains nothing.
-
-    The scorer and every producer shard ask for a whole node's worth of CPU on
-    the node size the shipped cluster builds, and a cluster already holding an
-    engine fleet may have room for none of them. Warned and not refused: a
-    cluster with an autoscaler is one where the Pending pod is what buys the
-    node, so the launch has to go on to apply them.
-    """
+    """Warn and continue: Pending pods may trigger an autoscaler to add capacity."""
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2845,12 +2330,6 @@ def test_launch_says_when_the_cluster_has_no_room_for_its_own_pods(tmp_path: Pat
 
 
 def test_the_cpu_a_launch_counts_against_is_what_its_pods_request() -> None:
-    """The driver's figure and the two manifests' requests are one number.
-
-    A template raised to three cores with the driver still counting nodes that
-    have two free would warn about a run that fits and say nothing about one
-    that does not.
-    """
     stated = re.search(r"^POD_CPU_MILLICORES=(\d+)$", LAUNCH.read_text(), re.M)
     assert stated is not None, "launch.sh no longer states what the pods it applies request"
     for name in ("scorer-job.yaml.tmpl", "producer-job.yaml.tmpl"):
@@ -2863,15 +2342,6 @@ def test_the_cpu_a_launch_counts_against_is_what_its_pods_request() -> None:
 @needs_shell_tools
 @pytest.mark.parametrize("managed_by", ["engine", None])
 def test_launch_starts_the_producer_for_a_table_its_engine_will_create(tmp_path: Path, managed_by: str | None) -> None:
-    """The scorer is told who runs the DDL, so an absent table is a phase or a fault.
-
-    Under `managed_by: engine` the table does not exist until the offer starts,
-    and the scorer is applied first because its first reading is the baseline —
-    so unless it reads an absent table as empty, the launch waits out its whole
-    budget for a reading, the producer never starts, and the engine never sees
-    the record it would have created the table from. Left off where the spec
-    says nothing, so the scorer applies its own default.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2889,21 +2359,11 @@ def test_launch_starts_the_producer_for_a_table_its_engine_will_create(tmp_path:
         assert "--table-managed-by" not in scorer, scorer
     else:
         assert f"--table-managed-by {managed_by}" in scorer, scorer
-    # And the producer is applied, which is what the ordering above exists to
-    # reach.
     assert _job_command(_named_job(run, f"producer-{RUN_OBJECT}")).startswith("produce ")
 
 
 @needs_shell_tools
 def test_a_batch_sized_pod_can_be_given_the_memory_its_preset_needs(tmp_path: Path) -> None:
-    """The two Jobs whose peak follows the preset's batch bytes, not the pod count.
-
-    A generator holds a whole batch while it encodes one and a producer shard
-    reads one whole batch object and decompresses it whole, so a 600 MB/s
-    preset's batch needs gigabytes where the smoke one's needs hundreds of
-    megabytes. Both requests come from the driver's own variable, so raising
-    either is an environment variable and not an edit to this repository.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2931,12 +2391,6 @@ def test_a_batch_sized_pod_can_be_given_the_memory_its_preset_needs(tmp_path: Pa
 
 @needs_shell_tools
 def test_two_generations_of_different_presets_are_two_jobs(tmp_path: Path) -> None:
-    """A driver deletes the Job of its own name on the way in, so the name is the preset's.
-
-    Under one fixed name a second generation would delete the first hours into
-    it, and the first driver would then wait out its budget on a Job that no
-    longer exists.
-    """
     run = _run_driver(
         GEN_CORPUS,
         [SHARDED_PRESET, "--image-tag", "abc1234"],
@@ -2952,7 +2406,6 @@ def test_two_generations_of_different_presets_are_two_jobs(tmp_path: Path) -> No
 
 @needs_shell_tools
 def test_launch_offers_the_codec_the_spec_names(tmp_path: Path) -> None:
-    """The producer Job carries `--compression`, so the wire is the spec's."""
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -2970,13 +2423,6 @@ def test_launch_offers_the_codec_the_spec_names(tmp_path: Path) -> None:
 
 @needs_shell_tools
 def test_the_jobs_a_launch_applies_name_a_credential_and_never_hold_one(tmp_path: Path) -> None:
-    """The whole of the secret path, end to end through the two Jobs a launch applies.
-
-    The site names a variable and the Secret that answers it. What is applied
-    has to carry the reference and the Secret's name and nothing else: the Job
-    documents are the objects a namespace-reader sees, and the same text is
-    what `stage` published into the run's prefix in the bucket.
-    """
     reference = "${env:IB_KAFKA_PASSWORD}"
     site = (
         _filled_site()
@@ -2997,18 +2443,14 @@ def test_the_jobs_a_launch_applies_name_a_credential_and_never_hold_one(tmp_path
         assert container["envFrom"] == [{"secretRef": {"name": "bench-env"}}]
     producer = _job_command(_named_job(run, f"producer-{RUN_OBJECT}"))
     assert f"--kafka-prop 'sasl.password={reference}'" in producer
-    # And nothing applied resolved it: only the pod's own process may.
+    # Resolve credentials only inside the pod process.
     assert "IB_KAFKA_PASSWORD}" in producer and "sasl.password=$" in producer
 
 
 @needs_shell_tools
 def test_launch_refuses_to_start_the_producer_once_its_lead_has_expired(tmp_path: Path) -> None:
-    """The scorer's first-reading wait can eat EPOCH_LEAD_S; the producer must not start once it has.
-
-    A producer applied with the epoch no longer safely ahead has its first
-    batch due before its first connection opens, and the run voids as
-    producer_bound — a wasted fleet the check turns into a named refusal
-    instead.
+    """The scorer wait can consume EPOCH_LEAD_S. Starting after that would make
+    the producer late before its first connection.
     """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
@@ -3037,13 +2479,6 @@ exit "${STUB_METADATA_STATUS:-0}"
 
 @needs_shell_tools
 def test_launch_refuses_a_site_whose_properties_it_cannot_read(tmp_path: Path) -> None:
-    """A site `yq` cannot flatten stops the launch instead of dropping the properties.
-
-    The catalog properties and the Kafka security block are the only way a pod
-    is told how to reach either service, so a reader that answered "no
-    properties" would apply a scorer that cannot open the table and a producer
-    that cannot authenticate — minutes of pods to say what this says at once.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -3078,12 +2513,6 @@ def test_launch_refuses_a_site_whose_properties_it_cannot_read(tmp_path: Path) -
 def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
     tmp_path: Path, status: int, copied: bool, refused: bool
 ) -> None:
-    """An absent table is not the same answer as an unreachable catalog.
-
-    Reading every non-zero exit as "the table was never created" would report a
-    teardown as clean while an expired credential, a missing harness or an
-    unreachable catalog quietly cost the run its last artifact.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -3107,8 +2536,7 @@ def test_teardown_copies_a_metadata_document_or_says_why_it_could_not(
         programs={"table-metadata": TABLE_METADATA_STUB},
     )
 
-    # Everything destructive happens before the document is read, so it happens
-    # whatever the answer was.
+    # Resource teardown must still run if metadata lookup fails.
     assert f"delete -f ./runs/{RUN_ID}/flinkdeployment.yaml" in run.calls
     assert f"delete job producer-{RUN_OBJECT}" in run.calls and f"delete job scorer-{RUN_OBJECT}" in run.calls
     drop = [document for document in run.applied if document["kind"] == "Job"]
@@ -3137,14 +2565,7 @@ exit "${STUB_GATE_STATUS:-0}"
 
 @needs_shell_tools
 def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> None:
-    """The exit code is the gate's own, whatever the teardown it asked for did.
-
-    A teardown replacing it would report a status this script never defines,
-    and a caller that reads 0 PASS, 3 UNDERSIZED and 5 VOID would have to
-    guess which of them a run had reached. The teardown here fails because
-    there is no run directory for it to read, which is also the shape of the
-    real failure: a run torn down twice.
-    """
+    """The gate retains its documented verdict exit code even if teardown fails."""
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
 
@@ -3160,9 +2581,7 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
 
     assert run.result.returncode == 3, run.result.stdout + run.result.stderr
     assert "so its fleet may still be running" in run.result.stderr, run.result.stderr
-    # The two artifacts the gate reads and the spec whose windows it judges by,
-    # and no others: fetching the whole set every minute would pay for a run's
-    # record to answer one question.
+    # Fetch only the summary, samples and spec needed for gating.
     assert [line.split("/")[-1] for line in run.aws_calls.splitlines()] == [
         "summary.json --only-show-errors",
         "keepup_samples.jsonl --only-show-errors",
@@ -3172,14 +2591,7 @@ def test_a_teardown_that_failed_does_not_replace_the_verdict(tmp_path: Path) -> 
 
 @needs_shell_tools
 def test_the_gate_reads_the_runs_own_windows_out_of_the_bucket(tmp_path: Path) -> None:
-    """The windows come from the published spec, so the verdict is the run's own.
-
-    Read from a local run directory instead, the verdict would change with the
-    presence of a file: gating the same run from another machine, or after
-    `RUNS_DIR` moved, would silently fall back to the gate's own defaults — and
-    a run that asked for a longer adaptation precisely to survive its cold
-    start would be judged at the shorter one and torn down.
-    """
+    """Read the published spec so gating from another machine uses the same windows."""
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
     published = tmp_path / "published"
@@ -3209,7 +2621,6 @@ def test_the_gate_reads_the_runs_own_windows_out_of_the_bucket(tmp_path: Path) -
 
 @needs_shell_tools
 def test_a_spec_the_gate_could_not_read_is_a_refusal_and_not_a_default(tmp_path: Path) -> None:
-    """A window the gate guessed is a verdict about a run nobody asked for."""
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
     run = _run_driver(
@@ -3225,11 +2636,7 @@ def test_a_spec_the_gate_could_not_read_is_a_refusal_and_not_a_default(tmp_path:
 
 
 def _gated(tmp_path: Path, arguments: list[str], status: str, gate_calls: Path) -> subprocess.CompletedProcess[str]:
-    """One `gate.sh` tick, in a working directory the ticks share.
-
-    Shared because the count of consecutive verdicts lives beside the run, so
-    what is under test is what one tick leaves for the next.
-    """
+    """One `gate.sh` tick, in a working directory the ticks share."""
     run = _run_driver(
         GATE,
         [RUN_ID, *arguments],
@@ -3243,15 +2650,7 @@ def _gated(tmp_path: Path, arguments: list[str], status: str, gate_calls: Path) 
 @needs_shell_tools
 @pytest.mark.parametrize("required", [None, 1])
 def test_a_teardown_waits_for_the_verdict_to_repeat(tmp_path: Path, required: int | None) -> None:
-    """One tick is not a run's answer, and `--teardown` destroys the fleet.
-
-    The gate judges the lag as of the last sample, so a fleet still working
-    through a cold start, a checkpoint that took a moment, or a poll that read
-    a stale prefix each produce a single breaching tick that the next one
-    contradicts. Requiring the verdict to repeat is what separates those from
-    a fleet that will never catch up. `--breaches 1` acts on the first
-    breaching tick, for a caller that wants it.
-    """
+    """Require consecutive breaches to avoid teardown after one transient lag spike."""
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
     arguments = ["--teardown"] if required is None else ["--teardown", "--breaches", str(required)]
@@ -3271,12 +2670,6 @@ def test_a_teardown_waits_for_the_verdict_to_repeat(tmp_path: Path, required: in
 
 @needs_shell_tools
 def test_a_pass_forgets_the_breaches_before_it(tmp_path: Path) -> None:
-    """Consecutive means consecutive: one passing tick starts the count again.
-
-    Otherwise a run that breached twice hours apart would be torn down by an
-    unrelated third, which is the same false positive the requirement exists
-    to remove.
-    """
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
 
@@ -3290,7 +2683,6 @@ def test_a_pass_forgets_the_breaches_before_it(tmp_path: Path) -> None:
 
 @needs_shell_tools
 def test_a_gate_without_teardown_judges_and_leaves_the_fleet_alone(tmp_path: Path) -> None:
-    """The verdict is the exit code either way; only `--teardown` acts on it."""
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
     for status in ("0", "3", "5"):
@@ -3301,14 +2693,6 @@ def test_a_gate_without_teardown_judges_and_leaves_the_fleet_alone(tmp_path: Pat
 
 @needs_shell_tools
 def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -> None:
-    """Every object a teardown deletes is named by the lowercased run id.
-
-    An RFC 1123 subdomain is lowercase and the `T`/`Z` in a run id's stamp are
-    not, so an object named by the id as it stands is refused by the API server
-    rather than by anything a driver can see. The topic and the run directory
-    are the published identifier and stay as they are, which is why the two
-    spellings have to be told apart per use rather than once per run.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -3339,13 +2723,6 @@ def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -
 @needs_shell_tools
 @pytest.mark.parametrize("engine", ["flink", "spark"])
 def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path: Path, engine: str) -> None:
-    """No engine's names are in the shell, so a third engine adds no line to it.
-
-    The kind of object a run is, where its state sits, the Service that carries
-    its API, the pods provenance is read off and whether its check is handed a
-    pod list at all: each comes from the engine's descriptor, and each is what
-    the driver would otherwise have had to hardcode per engine.
-    """
     descriptor = engines.kubernetes_for(engine)
     run_id = f"smoke-{engine}-20260908T120000Z"
     run_object = run_id.lower()
@@ -3386,9 +2763,7 @@ def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path
     assert f"--run-id {run_id} --rest http://localhost:18081" in checked
     if descriptor.pods_selector:
         assert f"get pods -l {for_name(descriptor.pods_selector, run_object)} -o json" in run.calls
-        # The document itself, echoed by the check: the driver writes it to a
-        # temporary file it removes on the way out, so a path alone would not
-        # say the pods had been read by the time the check ran.
+        # Echo pod data before the temporary file is removed to prove verification received it.
         assert "--pods " in checked
         assert json.loads(checked.splitlines()[1])["items"][0]["metadata"]["name"] == f"{run_object}-driver"
     else:
@@ -3397,34 +2772,17 @@ def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path
 
 
 def test_the_shell_reads_every_field_the_descriptor_prints() -> None:
-    """A field no driver reads is a refusal, so adding one to the descriptor is a shell change.
-
-    `k8s_read_engine` dies on a key it has no case for, and it would take every
-    cluster run with it — at staging, after the topic and the table exist. So
-    the two lists are held together here rather than by a run.
-    """
     text = K8S_LIB.read_text()
     for field in FIELDS:
         assert f"\n\t\t{field}) ENGINE_" in text, f"scripts/_k8s.sh reads no {field}"
 
 
 def test_the_shell_and_the_descriptor_mark_a_run_s_name_the_same_way() -> None:
-    """The one name in the descriptor the driver has to substitute itself.
-
-    Two spellings of the marker would leave a driver addressing an object
-    called `<name>` — which the API server refuses, minutes into a staged run.
-    """
     assert f"ENGINE_NAME_MARKER='{NAME}'" in (SCRIPTS / "_k8s.sh").read_text()
 
 
 @needs_shell_tools
 def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Path) -> None:
-    """The one place a driver reads the operator's own Deployment by name.
-
-    A tail under the un-lowercased name answers "not found" and the refusal
-    carries no jobmanager log, which is the whole of what says why the engine
-    never ran.
-    """
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -3445,18 +2803,6 @@ def test_an_engine_that_failed_is_tailed_under_its_lower_case_name(tmp_path: Pat
 @needs_shell_tools
 @pytest.mark.parametrize("pods", [False, True])
 def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path, pods: bool) -> None:
-    """A rejected document reports no state at all, so the state wait never ends.
-
-    The state belongs to a job the operator never created; the rejection sits
-    in the error field instead. Without reading it a driver would spend the
-    whole running wait on a document that will never run — and the text there
-    is the only statement of why it was rejected.
-
-    A document rejected outright has no pods to have written a log, and one the
-    operator gave up on after starting them does — so the tail is on the pods
-    existing rather than on the kind of failure. `get pod -l` is what the stub
-    answers, so a named image there stands for a fleet that was started.
-    """
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -3470,9 +2816,7 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path, 
         tmp_path,
         {
             "STUB_STAGE_DIR": str(staged),
-            # No state, which is what an operator that created no job reports,
-            # and a running wait long enough that spending it would be the
-            # failure rather than the assertion below.
+            # A rejected deployment has no job state; it must fail before the running timeout.
             "STUB_ENGINE_STATE": "",
             "STUB_ENGINE_ERROR": rejection,
             # The operator has given up on the document, which is what makes
@@ -3496,13 +2840,8 @@ def test_a_document_the_operator_rejected_ends_the_wait_at_once(tmp_path: Path, 
 
 @needs_shell_tools
 def test_an_error_the_operator_has_not_given_up_over_does_not_end_the_wait(tmp_path: Path) -> None:
-    """A reconcile the operator will retry writes an error field too.
-
-    So the error alone cannot be the refusal: an engine whose first reconcile
-    hit a transient failure and whose second would have succeeded would be torn
-    down over a document that was on its way up. The lifecycle beside the error
-    is what separates the two, and until it says the operator has given up the
-    error is reported once and waited out.
+    """An error can be retryable. Use lifecycle state to distinguish reconciliation
+    from terminal rejection.
     """
     staged = tmp_path / "staged"
     staged.mkdir()
@@ -3539,11 +2878,7 @@ def test_an_error_the_operator_has_not_given_up_over_does_not_end_the_wait(tmp_p
 # Geometry, collection and reclamation
 # ---------------------------------------------------------------------------
 
-# The site's warehouse root, as the filled example declares it, and where the
-# run's table put its files under it. A location is read from the copied
-# metadata document rather than derived, because a catalog places a table where
-# it likes under its warehouse; and it is checked against that root, because
-# every prefix at or above the root is other data.
+# Read the table location from metadata and require it to be below the warehouse root.
 WAREHOUSE_ROOT = "s3://a-bucket/warehouse"
 TABLE_LOCATION = f"{WAREHOUSE_ROOT}/ingest_bench/t_smoke_flink_20260908T120000Z-1a2b"
 
@@ -3595,12 +2930,7 @@ def _torn_down_run(
 
 
 def _stub_logs(tmp_path: Path, names: dict[str, str]) -> dict[str, str]:
-    """Log paths for the stubs, created empty.
-
-    Created rather than left to the stub, so that "the stub never ran" reads as
-    an empty file rather than as a missing one — the assertion that nothing was
-    deleted is exactly that read.
-    """
+    """Log paths for the stubs, created empty."""
     environment = {}
     for variable, name in names.items():
         path = tmp_path / name
@@ -3632,13 +2962,6 @@ FINISH_PROGRAMS = {
 
 @needs_shell_tools
 def test_finish_measures_the_geometry_from_the_copied_document_and_reports_it(tmp_path: Path) -> None:
-    """The document, the epoch and the spec's ladder, and the p50 on the verdict.
-
-    Geometry is read from the copied document rather than through the catalog,
-    because every figure in it is about files and a finished campaign may have
-    dropped the table from its catalog already. The epoch is the ladder's
-    origin and only the launch knew it, so it comes off the run's own facts.
-    """
     _torn_down_run(tmp_path)
     run = _run_driver(FINISH, [RUN_ID], tmp_path, _finish_environment(tmp_path), programs=FINISH_PROGRAMS)
     assert run.result.returncode == 0, run.result.stderr
@@ -3665,12 +2988,6 @@ def test_finish_measures_the_geometry_from_the_copied_document_and_reports_it(tm
 
 @needs_shell_tools
 def test_finish_reports_a_table_that_never_committed_without_failing(tmp_path: Path) -> None:
-    """`file-sizes`' no-geometry code is a fact about the run, not a failed read.
-
-    A run whose engine never committed has no files to measure, and refusing
-    there would cost it the document that says so — which is the one artifact
-    that explains what happened.
-    """
     _torn_down_run(tmp_path)
     run = _run_driver(
         FINISH,
@@ -3687,12 +3004,6 @@ def test_finish_reports_a_table_that_never_committed_without_failing(tmp_path: P
 
 @needs_shell_tools
 def test_finish_refuses_to_publish_an_invalid_run_unless_told_to(tmp_path: Path) -> None:
-    """`run_valid: false` is not a headline result, and `--publish-invalid` is the exception.
-
-    Publishing is refused before anything is written, and the refusal names the
-    flag: a result whose validity state is disclosed is publishable under
-    publication rules, one that quietly stands beside the valid ones is not.
-    """
     _torn_down_run(tmp_path, run_valid=False)
     refused = _run_driver(
         FINISH,
@@ -3711,12 +3022,8 @@ def test_finish_refuses_to_publish_an_invalid_run_unless_told_to(tmp_path: Path)
 
 @needs_shell_tools
 def test_finish_publishes_an_invalid_run_when_told_to_and_still_refuses_it(tmp_path: Path) -> None:
-    """The document is published and the verdict still fails.
-
-    Two different questions: whether a result may be recorded with its state
-    disclosed, and whether this run passed. `--publish-invalid` answers only
-    the first, so the exit code has to stay non-zero — a sweep branching on it
-    must not read a published invalid run as a passing one.
+    """--publish-invalid permits recording the result, but must not change its
+    failing exit status.
     """
     _torn_down_run(tmp_path, run_valid=False)
     run = _run_driver(
@@ -3743,12 +3050,6 @@ def test_finish_publishes_an_invalid_run_when_told_to_and_still_refuses_it(tmp_p
 
 @needs_shell_tools
 def test_finish_refuses_to_publish_a_document_that_names_no_engine(tmp_path: Path) -> None:
-    """The engine names the directory the result is filed under.
-
-    `jq -r` prints the string `null` for a field a document does not carry, so
-    reading it without a refusal would file the result under `results/null/` —
-    a directory the results table would then render a row out of.
-    """
     _torn_down_run(tmp_path)
     run = _run_driver(
         FINISH,
@@ -3769,12 +3070,6 @@ def test_finish_refuses_to_publish_a_document_that_names_no_engine(tmp_path: Pat
     reason="this checkout declares results-table, so there is no absent-renderer branch to take",
 )
 def test_finish_leaves_the_results_table_alone_when_the_renderer_is_absent(tmp_path: Path) -> None:
-    """A checkout without `results-table` still publishes the document.
-
-    The guard is on the command being available to `harness_local`, not on it
-    being on `PATH`: in a checkout `uv` provides it, and this project's script
-    table is the only statement of which commands exist.
-    """
     _torn_down_run(tmp_path)
     published = dict(FINISH_PROGRAMS)
     del published["results-table"]
@@ -3792,14 +3087,6 @@ def test_finish_leaves_the_results_table_alone_when_the_renderer_is_absent(tmp_p
 
 @needs_shell_tools
 def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> None:
-    """A torn-down run has a document even if nothing is ever done with it again.
-
-    The pod that wrote the scores is gone by then, so they are fetched before
-    the document is assembled from them; the metadata document is copied both
-    beside the run and into the bucket, because the local copy is what
-    `finish.sh` and `purge.sh` open and the other is what outlives this
-    machine's working directory.
-    """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
     (run_dir / "facts.json").write_text(json.dumps(FACTS))
@@ -3836,13 +3123,6 @@ def test_teardown_fetches_the_scores_and_collects_the_run(tmp_path: Path) -> Non
 
 @needs_shell_tools
 def test_the_engine_image_is_recorded_off_the_jobmanager_pod(tmp_path: Path) -> None:
-    """The digest the node pulled, not the tag it was pulled under.
-
-    A floating tag repointed after a run would otherwise leave a result naming
-    an image that is no longer the one measured. `app` and `component` are the
-    operator's own labels on the pods it creates — the FlinkDeployment declares
-    none — and both are lowercase because the run id's stamp is not.
-    """
     staged = _staged_engine_run(tmp_path)
     image = "a-registry/lakehouse-ingest-bench/flink:abc1234"
     digest = f"{image.split(':')[0]}@sha256:{'a' * 64}"
@@ -3862,12 +3142,6 @@ def test_the_engine_image_is_recorded_off_the_jobmanager_pod(tmp_path: Path) -> 
 
 @needs_shell_tools
 def test_a_pod_that_reports_no_digest_still_stages(tmp_path: Path) -> None:
-    """Provenance is not worth failing a run over.
-
-    A null digest is a recorded absence, which `collect` names in `missing`;
-    inventing one from the tag would put a claim in a result that nothing
-    checked.
-    """
     staged = _staged_engine_run(tmp_path)
     image = "a-registry/lakehouse-ingest-bench/flink:abc1234"
     run = _run_driver(
@@ -3888,11 +3162,7 @@ def test_a_pod_that_reports_no_digest_still_stages(tmp_path: Path) -> None:
 
 
 def _staged_engine_run(tmp_path: Path) -> Path:
-    """What the stage Job published, as the AWS stub copies it into the run directory.
-
-    `spec.yaml` among the documents because staging checks the started engine
-    against the spec it was staged from before it goes any further.
-    """
+    """What the stage Job published, as the AWS stub copies it into the run directory."""
     staged = tmp_path / "staged"
     staged.mkdir()
     (staged / "facts.json").write_text(json.dumps(FACTS))
@@ -3916,17 +3186,8 @@ PURGE_PROGRAMS = {"drop-table": DROP_TABLE_STUB}
 @needs_shell_tools
 @pytest.mark.parametrize("name", ["00003-abc.gz.metadata.json", "00003-abc.metadata.json"])
 def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(tmp_path: Path, name: str) -> None:
-    """Iceberg allows a gzip-compressed metadata document, and `jq` cannot read one.
-
-    The codec is a table property, so which of the two a run ends up with is
-    the writer's choice and not the harness's. Both readers of the copied
-    document parse it as JSON, and a gzip body reaches them as a syntax error
-    against a table nothing can then reclaim — so it is decompressed on the way
-    in and the file is JSON whichever way the table wrote it.
-
-    Both names, because the body is what decides: `*.gz.metadata.json` is the
-    convention the codec usually travels under, and a table that compressed its
-    metadata without taking that name has to be read the same way.
+    """Detect gzip by content, including when the filename lacks a gzip suffix.
+    Downstream readers require decompressed JSON.
     """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     (run_dir / "scores").mkdir(parents=True)
@@ -3966,12 +3227,6 @@ def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(
 
 @needs_shell_tools
 def test_purge_names_what_it_would_remove_and_removes_nothing_unasked(tmp_path: Path) -> None:
-    """Every deletion is stated first, and an unanswered prompt is not consent.
-
-    This is the one script that deletes measured data, so "nothing answered"
-    has to end it. Without a terminal there is nothing to answer with, which is
-    also what a purge run from a script looks like — hence `--yes`.
-    """
     _torn_down_run(tmp_path)
     run = _run_driver(PURGE, [RUN_ID], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
     assert run.result.returncode != 0
@@ -3987,12 +3242,6 @@ def test_purge_names_what_it_would_remove_and_removes_nothing_unasked(tmp_path: 
 
 @needs_shell_tools
 def test_purge_refuses_while_the_run_is_still_being_scored(tmp_path: Path) -> None:
-    """A scorer reading the table is what makes this a refusal rather than a race.
-
-    Deleting the table underneath it would not stop it — it would make it
-    report loss and corruption against a table it can no longer read, so the
-    run's last artifacts would be a lie about the engine.
-    """
     _torn_down_run(tmp_path)
     run = _run_driver(
         PURGE,
@@ -4009,15 +3258,6 @@ def test_purge_refuses_while_the_run_is_still_being_scored(tmp_path: Path) -> No
 
 @needs_shell_tools
 def test_purge_asks_the_catalog_when_no_document_was_copied(tmp_path: Path) -> None:
-    """An absent document is not an absent table, so the catalog is asked.
-
-    A run torn down by hand, or never torn down at all, has no copied metadata
-    document and may still have a table holding every byte it wrote. Reading
-    the absence as "no table" would leave exactly that table behind while
-    reporting a purge that succeeded — so the catalog answers the question, and
-    its answer also carries the location, which is the thing that must never be
-    guessed.
-    """
     _torn_down_run(tmp_path, metadata=False)
     published = tmp_path / "published"
     published.mkdir()
@@ -4049,13 +3289,6 @@ def test_purge_asks_the_catalog_when_no_document_was_copied(tmp_path: Path) -> N
 
 @needs_shell_tools
 def test_purge_reclaims_the_artifacts_of_a_run_the_catalog_holds_no_table_for(tmp_path: Path) -> None:
-    """A run whose table was never created still has a prefix worth reclaiming.
-
-    Its artifacts are what a failed run leaves — the staged documents, the
-    scores it got as far as — and they are paid for whether or not a table was
-    ever made. The catalog saying it holds no such table is what makes removing
-    them alone the whole of the purge rather than half of one.
-    """
     _torn_down_run(tmp_path, metadata=False)
     run = _run_driver(
         PURGE,
@@ -4083,14 +3316,6 @@ def test_purge_reclaims_the_artifacts_of_a_run_the_catalog_holds_no_table_for(tm
 
 @needs_shell_tools
 def test_purge_claims_no_purge_when_there_is_nothing_to_remove(tmp_path: Path) -> None:
-    """No table in the catalog and no `--artifacts`: nothing goes, and it says so.
-
-    Prompting over an empty list and then logging a purge would put a success
-    line behind a script that removed nothing — and this is the one script that
-    deletes measured data, so its report of what it did has to be worth
-    trusting. It returns before the prompt, which is why no `--yes` is needed
-    here.
-    """
     _torn_down_run(tmp_path, metadata=False)
     run = _run_driver(
         PURGE,
@@ -4113,13 +3338,6 @@ def test_purge_claims_no_purge_when_there_is_nothing_to_remove(tmp_path: Path) -
 
 @needs_shell_tools
 def test_purge_refuses_when_it_cannot_ask_the_catalog(tmp_path: Path) -> None:
-    """ "I could not ask" and "there is no table" have to be different answers.
-
-    A catalog this script could not reach says nothing about whether the table
-    is there, and a purge that read the failure as an absence would remove a
-    run's artifacts — the copied document among them — and leave its table with
-    nothing left pointing at where its files are.
-    """
     _torn_down_run(tmp_path, metadata=False)
     run = _run_driver(
         PURGE,
@@ -4156,13 +3374,8 @@ def test_purge_refuses_when_it_cannot_ask_the_catalog(tmp_path: Path) -> None:
     ],
 )
 def test_purge_refuses_a_location_that_is_not_one_table(tmp_path: Path, location: str) -> None:
-    """`aws s3 rm --recursive` takes a prefix and asks nothing.
-
-    A metadata document naming the bucket or the warehouse root passes every
-    check about the string being present, so the prefix itself has to be
-    checked against the site's warehouse: under it, and naming something below
-    it. Otherwise one malformed document removes the corpus, every other run's
-    artifacts, or every table the site holds.
+    """Recursive deletion must target a path below the warehouse, never the
+    warehouse or bucket root.
     """
     _torn_down_run(tmp_path, location=location)
     run = _run_driver(
@@ -4178,13 +3391,7 @@ def test_purge_refuses_a_location_that_is_not_one_table(tmp_path: Path, location
 @needs_shell_tools
 @pytest.mark.parametrize("artifacts", [False, True])
 def test_purge_removes_the_table_then_its_files_then_the_artifacts(tmp_path: Path, artifacts: bool) -> None:
-    """The catalog entry first, then the prefixes, and the run's own only on request.
-
-    Dropping the table before its files means nothing can load a table whose
-    data is on its way out. The run's artifacts are a separate flag because
-    they are the record of what was measured, and a reclaimed table does not
-    make them worthless.
-    """
+    """Drop the catalog entry before deleting files; remove artifacts only on request."""
     _torn_down_run(tmp_path)
     run = _run_driver(
         PURGE,
@@ -4406,12 +3613,8 @@ def test_a_chained_run_ends_when_the_run_does(
 
 @needs_shell_tools
 def test_a_teardown_that_did_not_converge_is_a_code_of_its_own(tmp_path: Path) -> None:
-    """The verdict is still read and published, and then the fleet is reported.
-
-    A run whose fleet outlived its teardown is as measured as one whose did
-    not, so exiting before `finish.sh` would throw the run away. But exiting 0
-    afterwards would report a finished run to a caller that is still being
-    billed for the fleet, which is why the code is one no driver below defines.
+    """Finish and preserve the measured result, then return a distinct status for
+    compute that may still be running.
     """
     run = _run_chained(tmp_path, [], ["drained"], {"STUB_TEARDOWN_STATUS": "1"})
     assert run.result.returncode == 6, run.result.stdout + run.result.stderr
@@ -4421,12 +3624,8 @@ def test_a_teardown_that_did_not_converge_is_a_code_of_its_own(tmp_path: Path) -
 
 @needs_shell_tools
 def test_a_breach_file_that_holds_no_count_does_not_abort_the_loop(tmp_path: Path) -> None:
-    """Because the alternative loses the run and leaves the fleet billing.
-
-    In arithmetic a bareword is a variable name, so comparing the file's bytes
-    directly aborts the shell under `set -u` — mid-loop, so nothing tears the
-    fleet down and the only output is `abc: unbound variable`. `gate.sh` dies
-    over the same content, so this is the state run.sh reaches the read in.
+    """Under set -u, arithmetic interprets a bareword as an unset variable. Validate
+    the file before arithmetic so cleanup remains reachable.
     """
     run = _run_chained(
         tmp_path,
@@ -4443,11 +3642,6 @@ def test_a_breach_file_that_holds_no_count_does_not_abort_the_loop(tmp_path: Pat
 
 @needs_shell_tools
 def test_an_external_run_that_was_never_started_is_not_launched(tmp_path: Path) -> None:
-    """The wait is bounded, and its end is a refusal rather than a launch.
-
-    Launching into an engine that never started would offer the corpus to
-    nothing and score the run as having lost every row.
-    """
     run = _run_chained(
         tmp_path,
         ["--external-ready-file", str(tmp_path / "never")],
@@ -4462,13 +3656,6 @@ def test_an_external_run_that_was_never_started_is_not_launched(tmp_path: Path) 
 
 @needs_shell_tools
 def test_an_external_chained_run_waits_before_it_launches(tmp_path: Path) -> None:
-    """Both forms of the wait, on the tier that is the primary contract.
-
-    Launching before the engine is consuming loses the head of the offer, and
-    the run is then scored as having lost those rows — so an external run has
-    to hold between staging and the launch, and a file is what an unattended
-    one holds on.
-    """
     ready = tmp_path / "engine-ready"
     ready.touch()
     waited = _run_chained(
@@ -4492,7 +3679,7 @@ def test_an_external_chained_run_waits_before_it_launches(tmp_path: Path) -> Non
 
 @needs_shell_tools
 def test_external_ready_file_is_refused_before_a_managed_run_is_staged(tmp_path: Path) -> None:
-    """Because staging a managed run starts a fleet, which a refusal would leave up."""
+    """Validate before staging creates a fleet that a later refusal would leave up."""
     run = _run_chained(tmp_path, ["--external-ready-file", str(tmp_path / "never")], ["drained"])
     assert run.result.returncode == 1, run.result.stdout + run.result.stderr
     assert run.calls == [], "a fleet was started for a run that was refused"
@@ -4500,12 +3687,6 @@ def test_external_ready_file_is_refused_before_a_managed_run_is_staged(tmp_path:
 
 
 def test_the_breach_count_run_defaults_to_is_the_one_the_gate_defaults_to() -> None:
-    """`run.sh` compares a breach count as well as passing one, so it resolves its own.
-
-    Left to `gate.sh`'s default, the number the loop reads the count against
-    would be a second copy of it, and a change to one would silently make the
-    loop wait for a threshold the gate had already acted on.
-    """
     chained = re.search(r'^BREACHES="\$\{BREACHES:-(\d+)\}"$', RUN.read_text(), re.M)
     gated = re.search(r"^BREACHES_REQUIRED=(\d+)$", GATE.read_text(), re.M)
     assert chained and gated, "one of the two drivers no longer states a breach default"
@@ -4514,7 +3695,6 @@ def test_the_breach_count_run_defaults_to_is_the_one_the_gate_defaults_to() -> N
 
 @needs_shell_tools
 def test_a_chained_run_hands_each_flag_to_the_driver_that_owns_it(tmp_path: Path) -> None:
-    """And exits with `finish.sh`'s status, which is the run's own verdict."""
     run = _run_chained(
         tmp_path,
         ["--image-tag", "abc1234", "--breaches", "2", "--publish", "results/", "--variant", "tuned"],
@@ -4556,11 +3736,8 @@ def _helm_template(chart: Path, settings: dict[str, str]) -> dict[str, dict[str,
 @needs_helm
 @pytest.mark.parametrize("brokers, factor, isr", [("1", 1, 1), ("2", 2, 1), ("3", 3, 2), ("5", 3, 2)])
 def test_the_kafka_chart_derives_replication_from_the_broker_count(brokers: str, factor: int, isr: int) -> None:
-    """`min(3, brokers)` replicas and one fewer in sync, which is what staging asks for too.
-
-    Staging creates the topic with `min(3, brokers)` replicas; a cluster whose
-    own default disagreed would place the offsets and transaction topics
-    differently from the run's, and a single broker would refuse a factor of 3.
+    """Match staging replication for internal topics too. Keep at least one in-sync
+    replica when the broker count is small.
     """
     kafka = _mapping(_mapping(_helm_template(KAFKA_CHART, {"brokers": brokers})["Kafka"]["spec"])["kafka"])
     config = _mapping(kafka["config"])
@@ -4574,11 +3751,6 @@ def test_the_kafka_chart_derives_replication_from_the_broker_count(brokers: str,
 
 @needs_helm
 def test_the_kafka_chart_exposes_one_plain_listener() -> None:
-    """One internal listener on 9092 without TLS or authentication: the Compose stack's shape.
-
-    That is what `kafka.security: {}` in the site means, and what lets the
-    local smoke stand for the cluster's broker.
-    """
     rendered = _helm_template(KAFKA_CHART, {})
     kafka = _mapping(_mapping(rendered["Kafka"]["spec"])["kafka"])
     listeners = [_mapping(listener) for listener in _sequence(kafka["listeners"])]
@@ -4590,11 +3762,7 @@ def test_the_kafka_chart_exposes_one_plain_listener() -> None:
 
 @needs_helm
 def test_the_kafka_chart_places_and_sizes_its_brokers() -> None:
-    """Every knob setup.sh takes reaches the node pool, and nothing else does.
-
-    Strimzi's pod template has no `nodeSelector`, so a selector is rendered as
-    the required node affinity that means the same thing.
-    """
+    """Strimzi has no pod nodeSelector field; render equivalent required node affinity."""
     rendered = _helm_template(
         KAFKA_CHART,
         {
@@ -4639,11 +3807,7 @@ def test_the_kafka_chart_places_and_sizes_its_brokers() -> None:
 
 @needs_helm
 def test_the_kafka_chart_leaves_placement_and_class_out_when_unset() -> None:
-    """An empty selector, no tolerations and no class render nothing, not empty fields.
-
-    An empty `class` would ask for a StorageClass literally named "", and an
-    empty affinity block is refused by the operator's schema.
-    """
+    """Omit empty settings so storage uses its default class and no invalid affinity is rendered."""
     pool = _mapping(_helm_template(KAFKA_CHART, {})["KafkaNodePool"]["spec"])
     volume = _mapping(_sequence(_mapping(pool["storage"])["volumes"])[0])
     assert "class" not in volume
@@ -4705,7 +3869,6 @@ def _without(*names: str) -> dict[str, str]:
 
 @needs_bash
 def test_stack_setup_answers_before_it_needs_a_cloud() -> None:
-    """`--help` and an unknown argument, with no CLOUD, no tools and no cluster."""
     environment = _without("CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION")
     out = subprocess.run([str(STACK_SETUP), "--help"], capture_output=True, text=True, env=environment)
     assert out.returncode == 0, out.stderr
@@ -4726,7 +3889,6 @@ def test_stack_setup_answers_before_it_needs_a_cloud() -> None:
     ],
 )
 def test_stack_setup_refuses_a_cloud_it_has_no_hook_for_by_name(cloud: str | None, said: str) -> None:
-    """Before any tool check: the answer for GCP is 'not yet', not 'helmfile is missing'."""
     environment = _without("CLOUD")
     if cloud is not None:
         environment["CLOUD"] = cloud
@@ -4738,7 +3900,7 @@ def test_stack_setup_refuses_a_cloud_it_has_no_hook_for_by_name(cloud: str | Non
 
 @needs_bash
 def test_stack_setup_refuses_a_heap_that_is_not_below_the_pod_s_memory() -> None:
-    """Before any tool check: a broker with no page cache left OOMs minutes after it starts, not before."""
+    """Leave memory outside the JVM heap for native overhead and the page cache."""
     environment = _without(
         "CLOUD", "KUBE_CONTEXT", "CLUSTER_NAME", "BUCKET", "AWS_REGION", "KAFKA_JVM_HEAP", "KAFKA_MEM_GI"
     )
@@ -4752,7 +3914,6 @@ def test_stack_setup_refuses_a_heap_that_is_not_below_the_pod_s_memory() -> None
 
 
 def test_stack_setup_substitutes_every_marker_the_registry_template_carries() -> None:
-    """The same `sed` as deploy/aws/setup.sh, over the same template."""
     template = REPO_ROOT / "deploy" / "k8s" / "schema-registry.yaml.tmpl"
     setup = STACK_SETUP.read_text()
     markers = {match[2:-2] for match in MARKER_RE.findall(template.read_text())}
@@ -4764,11 +3925,6 @@ def test_stack_setup_substitutes_every_marker_the_registry_template_carries() ->
 
 
 def test_stack_setup_prints_every_value_the_site_example_asks_for() -> None:
-    """What setup.sh prints at the end is what the operator pastes into site.yaml.
-
-    Each printed key names a key of the example, so a key the example gains
-    and the script never prints is a value the operator has to guess.
-    """
     setup = STACK_SETUP.read_text()
     for printed in (
         "kafka.bootstrap_servers:",
@@ -4789,7 +3945,7 @@ def test_stack_setup_reuses_the_namespace_manifest_rather_than_copying_it() -> N
 
 
 def test_stack_setup_binds_the_catalog_beside_the_three_run_identities() -> None:
-    """Four associations, the catalog's among them: it writes the warehouse's metadata."""
+    """The catalog also writes warehouse metadata and needs an identity association."""
     setup = STACK_SETUP.read_text()
     site = _mapping(_mapping(yaml.safe_load(SITE_AWS_EXAMPLE.read_text()))["kubernetes"])
     for account in (site["harness_service_account"], site["flink_service_account"], site["spark_service_account"]):
@@ -4801,12 +3957,6 @@ def test_stack_setup_binds_the_catalog_beside_the_three_run_identities() -> None
 
 
 def test_every_helmfile_input_is_something_setup_exports() -> None:
-    """`requiredEnv` fails a render on a missing name; this fails it here instead.
-
-    The helmfile and its values read the environment setup.sh builds, so the
-    two lists are one, and a name added to a template without an `export` in
-    the script would stop the first `helmfile sync` on a live cluster.
-    """
     names = _helmfile_environment_names()
     assert names, "the helmfile reads nothing from the environment"
     setup = STACK_SETUP.read_text()
@@ -4834,10 +3984,8 @@ def test_stack_teardown_takes_its_arguments_before_it_needs_a_cloud() -> None:
 
 
 def test_stack_teardown_removes_the_broker_before_the_operator_that_owns_it() -> None:
-    """Strimzi deletes a broker's claims only while it is running.
-
-    The Kafka release goes first and the operator last, under `--all`; the
-    other order leaves every broker volume behind, billed and orphaned.
+    """Keep Strimzi running until it has removed broker claims; deleting the operator
+    first can orphan volumes.
     """
     text = STACK_TEARDOWN.read_text()
     kafka = text.index("--selector name=kafka")
@@ -4862,12 +4010,7 @@ def test_the_k8s_site_example_refuses_its_own_placeholders(tmp_path: Path) -> No
 
 
 def test_the_k8s_site_example_loads_once_every_placeholder_is_filled(tmp_path: Path) -> None:
-    """The in-cluster shape: a plain broker, a REST catalog by Service name, a warehouse by name.
-
-    That is the Compose stack's shape on a cluster, which is what lets the
-    local smoke stand for it — and `warehouse` is a name and not a path, as it
-    is for Glue, so every location comes from `site.warehouse`.
-    """
+    """The catalog warehouse is a name; physical locations come from site.warehouse."""
     text = SITE_K8S_EXAMPLE.read_text()
     in_values = set(re.findall(r"YOUR_[A-Z_]+", yaml.safe_dump(yaml.safe_load(text))))
     assert in_values == set(SITE_K8S_FILLINGS), "the example's placeholders and the ones filled here have drifted"
@@ -4904,7 +4047,6 @@ def test_the_k8s_site_example_loads_once_every_placeholder_is_filled(tmp_path: P
 
 
 def test_the_k8s_site_example_names_what_setup_prints() -> None:
-    """Every address in the example is one setup.sh prints, at the default namespace."""
     example = _mapping(yaml.safe_load(SITE_K8S_EXAMPLE.read_text()))
     setup = STACK_SETUP.read_text().replace("$KAFKA_NAME", "ingest-bench").replace("$NAMESPACE", "ingest-bench")
     assert str(_mapping(example["kafka"])["bootstrap_servers"]) in setup

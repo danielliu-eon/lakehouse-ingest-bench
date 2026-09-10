@@ -1,9 +1,5 @@
-# The catalog block of site.yaml, as the KEY=VALUE lines the table tools take
-# via --catalog-prop-file. A file rather than repeated --catalog-prop flags
-# because a credential on argv lands in every process listing; here it stays
-# in a mount.
-#
-# Mounted at /catalog.props in the harness container:
+# Catalog properties for --catalog-prop-file, mounted at /catalog.props.
+# A file keeps credentials out of process arguments. Example:
 #   create-table --catalog-prop-file /catalog.props --table bench.events …
 uri=http://iceberg-rest:8181
 warehouse=s3://warehouse/

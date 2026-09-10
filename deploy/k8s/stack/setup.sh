@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Everything a run needs of a Kubernetes cluster that is to hold its own
-# broker and catalog, and that no run creates for itself: the namespace and
-# the identities the pods run as, the cloud's binding of those identities to
-# the bucket, a StorageClass for the brokers, the Strimzi operator and a Kafka
-# cluster under it, Lakekeeper with its Postgres, and the catalog's warehouse.
-# It ends by printing the values to put in site.yaml.
-#
-# Every step describes before it creates, so a re-run converges rather than
-# failing on what is already there. Everything cloud-specific is in one sourced
-# file per cloud, deploy/<cloud>/_stack_hooks.sh, chosen by CLOUD.
-#
-# It never creates, deletes or reconfigures the cluster, its node groups or its
-# add-ons. Those are the operator's; deploy/aws/eksctl-kafka-nodegroup.example.yaml
-# makes the brokers' node group.
+# Provision an in-cluster Kafka and Lakekeeper stack, its identities, storage,
+# and warehouse; then print site.yaml values. Check existing resources so
+# interrupted setup can resume. CLOUD selects deploy/<cloud>/_stack_hooks.sh.
+# Manage the cluster, node groups, and add-ons separately.
 set -euo pipefail
 PREREQ_DOC="deploy/k8s/stack/README.md"
 STACK_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,8 +44,7 @@ done
 # Parameters
 # ---------------------------------------------------------------------------
 
-# Before the tool check, so the answer for a cloud this has no hook for is
-# that, and not a missing helmfile.
+# Reject unsupported clouds before checking unrelated host tools.
 CLOUD="${CLOUD:-}"
 case "$CLOUD" in
 aws) ;;
@@ -69,16 +58,14 @@ KAFKA_VOLUME_GI="${KAFKA_VOLUME_GI:-500}"
 KAFKA_CPU="${KAFKA_CPU:-4}"
 KAFKA_MEM_GI="${KAFKA_MEM_GI:-16}"
 KAFKA_JVM_HEAP="${KAFKA_JVM_HEAP:-6g}"
-# One-line JSON, as the manifests take it. An empty selector is `{}`, which
-# cannot be written as a `${VAR:-...}` default without escaping the brace.
+# Use explicit empty JSON objects to avoid brace parsing in ${VAR:-...}.
 KAFKA_NODE_SELECTOR="${KAFKA_NODE_SELECTOR:-}"
 [[ -n $KAFKA_NODE_SELECTOR ]] || KAFKA_NODE_SELECTOR='{}'
 KAFKA_TOLERATIONS="${KAFKA_TOLERATIONS:-[]}"
 CATALOG_NODE_SELECTOR="${CATALOG_NODE_SELECTOR:-}"
 [[ -n $CATALOG_NODE_SELECTOR ]] || CATALOG_NODE_SELECTOR='{}'
 CATALOG_TOLERATIONS="${CATALOG_TOLERATIONS:-[]}"
-# Pinned: the operator's CRD version and the fields the chart renders have to
-# agree, and `latest` would move under a running campaign.
+# Pin chart versions so rendered CRD fields remain compatible across a campaign.
 STRIMZI_VERSION="${STRIMZI_VERSION:-1.2.0}"
 LAKEKEEPER_CHART_VERSION="${LAKEKEEPER_CHART_VERSION:-0.12.0}"
 WITH_SCHEMA_REGISTRY="${WITH_SCHEMA_REGISTRY:-false}"
@@ -96,9 +83,8 @@ NAMESPACE="${NAMESPACE:-ingest-bench}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-${CLUSTER_NAME:-}}"
 [[ -n $KUBE_CONTEXT ]] || die "KUBE_CONTEXT must name the kubeconfig context of the cluster (it defaults to CLUSTER_NAME)"
 
-# Fixed names, shared with teardown.sh. The Kafka cluster's name is half of
-# the bootstrap address; the ServiceAccount names are what the pod identity
-# associations are made for, so a name that varied would need a new binding.
+# Share stable names with teardown. Service account names also identify
+# Pod Identity bindings; the Kafka name determines its bootstrap address.
 KAFKA_NAME=ingest-bench
 WAREHOUSE_NAME=ingest-bench
 CATALOG_SECRET=ingest-bench-catalog-keys
@@ -125,8 +111,8 @@ log "context $KUBE_CONTEXT, namespace $NAMESPACE, $(wc -l <<<"$NODES" | tr -d ' 
 stack_preflight
 stack_preflight_storage
 
-# Said rather than refused: a Flink campaign needs neither, and an operator
-# shared with another namespace is not this script's to reconfigure.
+# Warn about missing engine operators without modifying shared installations.
+# Only the operator for the chosen engine is required.
 if kubectl --context "$KUBE_CONTEXT" get crd flinkdeployments.flink.apache.org >/dev/null 2>&1; then
 	log "the flinkdeployments CRD is present"
 else
@@ -149,8 +135,7 @@ fi
 # The namespace and the identities
 # ---------------------------------------------------------------------------
 
-# The same manifest deploy/aws/setup.sh applies: its content is cloud-neutral,
-# so it is rendered here rather than copied.
+# Reuse the cloud-neutral namespace and RBAC manifest from AWS setup.
 export NAMESPACE
 log "applying the namespace, the three run identities and the engine RBAC"
 envsubst '${NAMESPACE}' <"$REPO_ROOT/deploy/aws/k8s/namespace.yaml.tmpl" |
@@ -164,15 +149,13 @@ stack_storage_class
 # The catalog's secrets
 # ---------------------------------------------------------------------------
 
-# A bounded read of urandom rather than a stream into `head`: under pipefail
-# a writer cut off by its reader fails the substitution.
+# Bound the urandom read to avoid SIGPIPE from an unbounded stream under pipefail.
 random_token() {
 	head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32
 }
 
-# Made once and never regenerated: the encryption key guards what the catalog
-# has already stored, and the external id is part of the warehouse's
-# credential. A re-run finds the Secret and leaves it.
+# Reuse the Secret on reruns: replacing its encryption key would make stored
+# catalog secrets unreadable, and the warehouse uses its external ID.
 if kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" get secret "$CATALOG_SECRET" >/dev/null 2>&1; then
 	log "secret $CATALOG_SECRET exists"
 else
@@ -195,12 +178,10 @@ fi
 stack_catalog_settings
 export STRIMZI_VERSION LAKEKEEPER_CHART_VERSION KAFKA_BROKERS KAFKA_VOLUME_GI KAFKA_STORAGE_CLASS KAFKA_CPU KAFKA_MEM_GI KAFKA_JVM_HEAP KAFKA_NODE_SELECTOR KAFKA_TOLERATIONS CATALOG_NODE_SELECTOR CATALOG_TOLERATIONS CATALOG_SECRET STACK_CATALOG_CONFIG_JSON STACK_CATALOG_ENV_JSON
 log "helmfile sync: strimzi $STRIMZI_VERSION, kafka/$KAFKA_NAME ($KAFKA_BROKERS x ${KAFKA_VOLUME_GI}Gi on $KAFKA_STORAGE_CLASS), lakekeeper chart $LAKEKEEPER_CHART_VERSION"
-# `sync` and not `apply`: apply diffs first through a helm plugin this does
-# not require, and sync is the same install-or-upgrade either way.
+# Use sync for install-or-upgrade without requiring the Helm diff plugin.
 helmfile --file "$STACK_DIR/helmfile.yaml.gotmpl" --kube-context "$KUBE_CONTEXT" sync
 
-# Helm's wait sees the operator's Deployment and the catalog's; the Kafka CR's
-# readiness is a condition only the operator sets.
+# Wait separately for Kafka's operator-managed Ready condition.
 log "waiting up to ${KAFKA_READY_WAIT_S}s for kafka/$KAFKA_NAME to be Ready"
 kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" wait "kafka/$KAFKA_NAME" \
 	--for=condition=Ready --timeout="${KAFKA_READY_WAIT_S}s" ||
@@ -211,8 +192,8 @@ kubectl --context "$KUBE_CONTEXT" --namespace "$NAMESPACE" rollout status deploy
 # The catalog's bootstrap and warehouse
 # ---------------------------------------------------------------------------
 
-# mgmt_post <path> <json> — one management call, refused with the catalog's
-# own answer: `curl -f` would hide the body that says what was wrong.
+# mgmt_post <path> <json>
+# Retain error response bodies; curl -f would hide the catalog's explanation.
 mgmt_post() {
 	local status body
 	body="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-mgmt.XXXXXX")" || die "could not make a temporary file for the catalog's answer"
@@ -277,8 +258,7 @@ fi
 # ---------------------------------------------------------------------------
 
 log "setup complete. Copy site.k8s.example.yaml to site.yaml and fill it in with:"
-# The roots and the region below are AWS's shape; a second cloud extends this
-# block when it lands.
+# Printed roots and region are AWS-specific, matching the supported cloud hook.
 cat <<SITE
   kafka.bootstrap_servers:        $KAFKA_NAME-kafka-bootstrap.$NAMESPACE.svc:9092
   kafka.security:                 {}

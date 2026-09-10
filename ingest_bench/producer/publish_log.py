@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What the producer actually published, batch by batch.
+"""Record producer acknowledgements and completion, batch by batch.
 
-Freshness is measured from when a batch finished being published, not from when
-it was due: a producer that fell behind must not be scored as engine lag. The
-publish log is that record, written as it goes so a run that dies still says
-how far it got, and read back by the scorer as the offered side of every
-figure it computes.
+The scorer uses these logs to distinguish producer delay from engine lag.
+Incremental writes preserve progress if the producer stops unexpectedly.
 """
 
 from __future__ import annotations
@@ -25,11 +22,9 @@ _DONE_KEY = "done"
 
 @dataclass(frozen=True)
 class PublishRecord:
-    """One batch's publish outcome, as the scorer reads it.
+    """One batch's delivery outcome.
 
-    ``last_ack_ms`` is the batch's emit time: the batch is not offered until
-    its final row is acknowledged, so committing anything of it earlier would
-    be committing rows the broker had not yet confirmed.
+    Use the last acknowledgement as the batch emit time for scoring.
     """
 
     batch: int
@@ -57,12 +52,7 @@ def _record_from_json(raw: dict[str, object]) -> PublishRecord:
 
 
 def _parse(text: str, source: str) -> list[PublishRecord]:
-    """Every batch record in ``text``, with the trailer left out.
-
-    The trailer says the shard finished rather than what it published, so it is
-    not a record; a reader that turned it into one would count a batch that
-    does not exist.
-    """
+    """Parse batch records, excluding completion trailers."""
     records = []
     for line in text.splitlines():
         if not line.strip():
@@ -78,7 +68,7 @@ def _parse(text: str, source: str) -> list[PublishRecord]:
 
 
 def append(path: Path, record: PublishRecord) -> None:
-    """Add one record, flushed, so a killed producer still published its history."""
+    """Append and flush a batch record to preserve incremental progress."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(record.to_json() + "\n")
@@ -86,11 +76,9 @@ def append(path: Path, record: PublishRecord) -> None:
 
 
 def append_done(path: Path, shard: int, batches: int) -> None:
-    """Mark the shard finished, after its last batch.
+    """Append a completion trailer after the shard's final batch.
 
-    A shard that stops early and one that has nothing left to send both go
-    quiet, and the scorer has to tell them apart: without the trailer a run
-    that died at half its batches would look like a run still in flight.
+    The trailer distinguishes completion from a producer that stopped early.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -111,11 +99,7 @@ def _trailed(text: str) -> bool:
 
 
 def shard_done(path: Path) -> bool:
-    """Whether the shard that owns ``path`` published everything it selected.
-
-    An absent log is not a finished one: the scorer polls while shards run, and
-    a log that has not been written or uploaded yet reads as still in flight.
-    """
+    """Return whether the log has a completion trailer; absent logs are unfinished."""
     if not path.exists():
         return False
     return _trailed(path.read_text(encoding="utf-8"))
@@ -128,13 +112,7 @@ def log_names(uri_prefix: str) -> list[str]:
 
 
 def shard_index(name: str) -> int:
-    """The shard a log file name belongs to.
-
-    A name carrying no index is refused rather than skipped: the scorer decides
-    the offer is over by comparing the finished shards against the shards it
-    expects, and a log it cannot attribute would leave that comparison waiting
-    on a shard nobody can name.
-    """
+    """Extract the shard index from a log filename, rejecting malformed indices."""
     raw = name[len(LOG_NAME_PREFIX) : -len(LOG_NAME_SUFFIX)]
     if not raw.isdigit():
         raise ValueError(f"publish log {name!r} does not name a shard index")
@@ -142,25 +120,16 @@ def shard_index(name: str) -> int:
 
 
 def shards_done(uri_prefix: str) -> set[int]:
-    """The shards whose logs under ``uri_prefix`` carry the done trailer.
-
-    This is how the scorer learns the offer is over, and it is a set rather
-    than a count because shards do not finish in order. A shard that stopped
-    early never writes its trailer, so a run that died mid-offer is never read
-    as one that finished.
-    """
+    """Return shard indices whose logs contain completion trailers."""
     if not uri.exists(uri_prefix):
         return set()
     return {shard_index(name) for name in log_names(uri_prefix) if _trailed(uri.read_text(uri.join(uri_prefix, name)))}
 
 
 def read_all(uri_prefix: str) -> list[PublishRecord]:
-    """Every shard's records under ``uri_prefix``, merged into one send order.
+    """Read all shard logs in batch order.
 
-    A batch belongs to exactly one shard, so the same batch appearing twice
-    means two producers were sent the same work — the offered figures would
-    double-count it, and every rate derived from them would be wrong. That is
-    refused rather than deduplicated.
+    Reject duplicate batches rather than silently altering the offered totals.
     """
     # A prefix with nothing under it is the normal state before the first
     # upload lands, not a missing input.
@@ -182,12 +151,7 @@ def read_all(uri_prefix: str) -> list[PublishRecord]:
 
 
 def behind_ms(records: list[PublishRecord]) -> int:
-    """How far the worst batch's first acknowledgement fell behind its due time.
-
-    This is the producer's own lag, and the scorer's gate against reporting it
-    as the engine's: a run where the producer could not keep up says nothing
-    about how fresh the engine kept the table.
-    """
+    """Return the maximum delay from scheduled time to first acknowledgement."""
     return max((record.first_ack_ms - record.scheduled_ms for record in records), default=0)
 
 

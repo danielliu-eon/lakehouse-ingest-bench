@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Every drift `verify-spark` can report, against recorded driver and pod answers.
-
-Staging's RUNNING wait says the operator submitted something. What it cannot
-say is that what it submitted is the run the spec asked for: Spark accepts a
-setting it does not use, an executor the scheduler never placed leaves the
-fleet narrower than the one the result is costed for, and a pod whose CPU
-request and limit differ runs on cores the node may take back. Each of those is
-silent. So these readings are what stands between a published figure and one
-attributed to knobs the engine never honoured, and each is exercised here
-against the documents the driver and `kubectl` answer rather than a cluster.
-"""
+"""Check Spark configuration and fleet drift against recorded driver and pod responses."""
 
 from __future__ import annotations
 
@@ -56,12 +46,8 @@ def _answers(
     properties: dict[str, str] | None = None,
     drop: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """The two documents a driver answers, with one reading changed.
-
-    Shaped after a live 3.5 UI: `sparkProperties` is a list of two-element
-    arrays rather than an object, and the entries beside the ones read here are
-    carried so that a reader which started matching on position rather than on
-    name would fail.
+    """Build recorded endpoint responses with one reading changed. Preserve unrelated
+    fields to catch parsing by position instead of by name.
     """
     settings = {
         "spark.app.name": name,
@@ -148,12 +134,6 @@ def test_a_fleet_running_what_the_spec_asked_for_drifts_nowhere() -> None:
 
 
 def test_a_setting_the_driver_was_not_given_is_named_rather_than_guessed() -> None:
-    """Absence is a reading about the run, not an unreadable document.
-
-    A driver submitted without one of these has a fleet the spec does not
-    describe, which is exactly the case worth refusing — so it is reported as
-    drift rather than raised as a document that could not be read.
-    """
     assert _drift(answers=_answers(drop=("spark.executor.instances",))) == [
         "executors: spec 2, engine not reported",
     ]
@@ -171,22 +151,11 @@ def test_a_setting_the_driver_was_not_given_is_named_rather_than_guessed() -> No
     ],
 )
 def test_every_setting_the_fleet_is_sized_by_is_read_back(key: str, value: str, expected: str) -> None:
-    """The operator restates the sizing as submit arguments, so the driver is asked.
-
-    A knob that reached the SparkApplication and not the session would
-    otherwise pass unnoticed, and the shuffle width is the writer count under a
-    `hash` or `range` distribution — two hundred of them is two hundred files a
-    commit.
-    """
     assert _drift(answers=_answers(properties={key: value})) == [expected]
 
 
 def test_an_override_the_run_chose_is_what_it_is_held_to() -> None:
-    """`extra_spark_conf` is applied last, so it is what the engine was told.
-
-    Reporting the knob it displaced would be drift on a run whose author chose
-    the override.
-    """
+    """extra_spark_conf is applied last and therefore defines the effective setting."""
     spec = replace(_spec(), engine_block={**_spec().engine_block, "extra_spark_conf": {"spark.driver.memory": "4096m"}})
     fetch = _reader(_answers(properties={"spark.driver.memory": "4096m"}))("http://localhost:14040")
     assert verify(spec, RUN_ID, fetch, _pods()) == []
@@ -195,13 +164,6 @@ def test_an_override_the_run_chose_is_what_it_is_held_to() -> None:
 
 
 def test_a_setting_that_pretends_to_move_the_cadence_is_refused() -> None:
-    """Spark has no session setting for a trigger, which is what makes this checkable.
-
-    The interval reaches the query through `job.json`. A property under this
-    prefix is a run trying to move its own commit cadence through
-    configuration nothing reads, so the result would be attributed to an
-    interval the query never used.
-    """
     pretending = {"spark.sql.streaming.trigger.interval": "60 seconds"}
     assert _drift(answers=_answers(properties=pretending)) == [
         "trigger settings: spec none, engine ['spark.sql.streaming.trigger.interval']",
@@ -210,12 +172,8 @@ def test_a_setting_that_pretends_to_move_the_cadence_is_refused() -> None:
 
 @pytest.mark.parametrize("reported", [RUN_ID, RUN_OBJECT])
 def test_either_spelling_of_the_run_s_name_identifies_its_driver(reported: str) -> None:
-    """The submitted app name and the object's name differ only in case.
-
-    `render_conf` submits the run id, whose stamp is uppercase; the object is
-    named by the lowercased id. Which of the two the driver reports depends on
-    whether the operator's own `spark.app.name` displaces the submitted one —
-    so refusing either would fail a staging over a letter's case.
+    """The submitted app name preserves case; the Kubernetes object name is lowercase.
+    The operator may expose either as spark.app.name.
     """
     assert _drift(answers=_answers(name=reported)) == []
 
@@ -237,16 +195,6 @@ def test_either_spelling_of_the_run_s_name_identifies_its_driver(reported: str) 
 def test_an_endpoint_that_is_not_this_runs_driver_names_what_it_found(
     listed: list[dict[str, object]], shown: str
 ) -> None:
-    """A tunnel is addressed by a port, so the name is what identifies the driver.
-
-    The names are in the line and not just how many there were: this is the
-    check most likely to fail on a live cluster, the cause is an application
-    called something nobody predicted, and nothing else in the run says what
-    the operator called it. Nothing further is read either — the settings of an
-    application that is not the run's describe someone else's fleet — but the
-    pods are still reported, because they are what say whether this run has a
-    driver at all.
-    """
     # Sorted, so an uppercase stamp comes before its lowercased twin.
     accepted = f"['{RUN_ID}', '{RUN_OBJECT}']"
     assert _drift(answers=_answers(applications=listed)) == [
@@ -255,11 +203,6 @@ def test_an_endpoint_that_is_not_this_runs_driver_names_what_it_found(
 
 
 def test_an_executor_the_scheduler_never_placed_is_a_narrower_fleet() -> None:
-    """The count is what a result is costed for, and the driver cannot see it.
-
-    An application runs with whatever executors it was given, so a fleet short
-    of one publishes a rate attributed to compute that was never paid for.
-    """
     short = [_pod(DRIVER_POD, "driver"), _pod(EXECUTOR_PODS[0], "executor")]
     with pytest.raises(FleetNotPlaced) as not_placed:
         _drift(pods=_pods(short))
@@ -273,11 +216,6 @@ def test_an_executor_the_run_never_asked_for_is_drift_rather_than_a_wait() -> No
 
 
 def test_a_pod_that_borrows_its_cores_is_refused() -> None:
-    """Burstable means the node may reclaim the CPU mid-run.
-
-    A rate measured on cores the kubelet can take back is the node's answer
-    under whatever else was scheduled beside it, not the engine's.
-    """
     borrowed = [
         _pod(DRIVER_POD, "driver"),
         _pod(EXECUTOR_PODS[0], "executor", qos="Burstable"),
@@ -289,11 +227,6 @@ def test_a_pod_that_borrows_its_cores_is_refused() -> None:
 
 
 def test_a_pod_the_api_server_has_not_admitted_reports_neither_phase_nor_class() -> None:
-    """A QoS class appears at admission, so its absence is a pod not yet running.
-
-    Named as unreported rather than raised: the document is readable and what
-    it says is that this half of the fleet is not up.
-    """
     pending = [
         _pod(DRIVER_POD, "driver"),
         _pod(EXECUTOR_PODS[0], "executor", phase="Pending", qos=None),
@@ -305,7 +238,6 @@ def test_a_pod_the_api_server_has_not_admitted_reports_neither_phase_nor_class()
 
 
 def test_a_pending_pod_beside_a_borrowing_one_is_refused_not_waited_for() -> None:
-    """Drift is a verdict; a fleet still being placed is not. Drift wins."""
     mixed = [
         _pod(DRIVER_POD, "driver"),
         _pod(EXECUTOR_PODS[0], "executor", phase="Pending", qos=None),
@@ -324,11 +256,6 @@ def test_a_missing_driver_is_reported_before_its_executors_are_counted() -> None
 
 
 def test_a_pod_the_selector_matched_and_the_operator_did_not_label_is_named() -> None:
-    """A pod sharing the run's labels and neither role is not part of the fleet.
-
-    It is sharing the namespace with the run, which is worth saying: whatever
-    it is doing on the node is not what this measures.
-    """
     stray = [
         _pod(DRIVER_POD, "driver"),
         *(_pod(name, "executor") for name in EXECUTOR_PODS),
@@ -351,7 +278,6 @@ def test_a_pod_the_selector_matched_and_the_operator_did_not_label_is_named() ->
 def test_a_pod_list_that_is_not_one_is_refused_rather_than_read_as_a_clean_fleet(
     pods: dict[str, object], message: str
 ) -> None:
-    """An empty verdict reads as a verified run, which is the one answer nobody may guess."""
     with pytest.raises(ValueError, match=message):
         _drift(pods=pods)
 
@@ -376,12 +302,7 @@ def test_a_driver_answer_that_cannot_be_read_is_refused(answers: dict[str, objec
 def test_the_console_script_separates_drift_from_a_reading_it_could_not_make(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Three answers, three exit codes: verified, drifted, and could not look.
-
-    Staging retries the last and refuses on the middle one, so a shared
-    non-zero status would make it either retry a real drift forever or refuse a
-    run over a tunnel that was not up yet.
-    """
+    """Staging retries unreadable endpoints but rejects confirmed drift."""
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(SPEC_FILE.read_text())
     pods_path = tmp_path / "pods.json"
@@ -418,11 +339,7 @@ def test_the_console_script_separates_drift_from_a_reading_it_could_not_make(
 def test_a_pod_list_the_driver_could_not_write_is_worth_another_look(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An absent file is an unmade reading, not a refused run.
-
-    `kubectl` writes it a moment before this is called, so a file that is not
-    there yet is the same kind of answer as a tunnel that has not come up.
-    """
+    """A missing pod-list file is a retryable read failure, not configuration drift."""
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(SPEC_FILE.read_text())
     monkeypatch.setattr(verify_module, "fetch_json", _reader(_answers()))

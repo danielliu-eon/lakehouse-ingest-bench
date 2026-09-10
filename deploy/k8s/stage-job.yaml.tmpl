@@ -1,16 +1,8 @@
-# Staging as a Job. It is the one harness command that creates a topic, so it
-# runs where the broker is: a managed broker is reachable from inside its own
-# network and not from an operator's machine.
+# Stage inside the broker's network. Mount the run spec and site config
+# from ConfigMaps created by the driver. Unlike generic harness commands,
+# staging needs both files.
 #
-# It also differs from every other harness command in reading two files — the
-# run spec and the site config — which reach it as ConfigMaps the driver creates
-# for this Job and deletes afterwards. A template of its own rather than an
-# optional mount on `harness-job.yaml.tmpl`: the other commands there carry no
-# files, and a mount they all had to name would be a ConfigMap each of them
-# would have to invent.
-#
-# The run directory is written to an `emptyDir` and published to the runs
-# prefix, because this pod's filesystem goes with the pod.
+# Publish the run directory from emptyDir to object storage before the pod exits.
 apiVersion: batch/v1
 kind: Job
 metadata:

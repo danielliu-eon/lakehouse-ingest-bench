@@ -102,11 +102,8 @@ def test_corpus_json_publishes_types_roles_and_gates(tiny: tuple[preset.Preset, 
 
 
 def _unbounded_payload_columns() -> tuple[c.ColumnDistribution, ...]:
-    """The narrowest schema that declares an unbounded payload, so the entropy gate has something to judge.
-
-    Every bounded cardinality here sits above the sketch size, so no column
-    carries a closed-form expectation and the schema drives the entropy gate
-    without the cardinality gate having an opinion.
+    """Build a schema for the entropy gate. Bounded cardinalities exceed the sketch
+    size so cardinality validation does not interfere.
     """
     return c.build_columns(
         (
@@ -194,14 +191,6 @@ def test_naive_corpus_epoch_is_refused(tiny: tuple[preset.Preset, str, dict[str,
 def test_event_times_are_whole_milliseconds_in_their_batch_window(
     tiny: tuple[preset.Preset, str, dict[str, object]],
 ) -> None:
-    """The published corpus's own event times, read back the way an engine reads them.
-
-    Every engine reads this column off the wire as a `long` of epoch
-    milliseconds and commits it into a microsecond Iceberg column, so a value
-    with anything under a millisecond in it would be one no engine could
-    reproduce. The window is the batch's, since event time has to track batch
-    order for the freshness measurement to mean anything.
-    """
     p, corpus_uri, _ = tiny
     published = cast(dict[str, object], json.loads(uri.read_text(uri.join(corpus_uri, "schema.avsc"))))
     fields = cast(list[dict[str, object]], published["fields"])

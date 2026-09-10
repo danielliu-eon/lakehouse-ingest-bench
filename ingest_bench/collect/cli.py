@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The commands that turn a finished run into a publishable result, and that
-turn a directory of results into the table a reader compares them on.
+"""Collect run artifacts and render the published results table.
 
-`collect` is run once by teardown, so a run has a document even if nothing else
-is ever done with it, and again by finish once the geometry has been measured.
-Both write the same document; the second one is simply the one with every
-input present. `results-table` is run over `results/` itself, by a contributor
-publishing a result and by CI checking that nobody forgot to.
+Teardown collects partial results; finish collects again after geometry is
+available. Both commands write the same document format.
 """
 
 from __future__ import annotations
@@ -26,33 +22,23 @@ from ingest_bench.specs.model import load_site
 
 DISTRIBUTION = "lakehouse-ingest-bench"
 
-# The variant a run is published under when nothing else is said. Every shipped
-# spec distributes writes by hash, so it is the shape a reader comparing engines
-# is looking at unless a result says otherwise.
+# Default variant for the shipped specs, which distribute writes by hash.
 DEFAULT_VARIANT = "hash"
 
 _RESULTS_DATE_FORMAT = "%Y-%m-%d"
 
 
 def results_name(engine: str, corpus: str, variant: str, collected_at: datetime) -> str:
-    """The file name a published result takes under ``results/<engine>/``.
-
-    Date, engine, corpus and variant, because those four are what distinguish
-    two results anyone may publish: the same engine on the same corpus tuned
-    differently is a separate variant rather than a second version of one file.
-    """
+    """Build a result filename from date, engine, corpus, and variant."""
     date = collected_at.astimezone(UTC).strftime(_RESULTS_DATE_FORMAT)
     return f"{date}-{engine}-{corpus}-{variant}.json"
 
 
 def _out_path(out: str | None, run_dir: Path, *, name: str) -> Path:
-    """Where the document is written.
+    """Resolve the output path, filling existing directories with the result name.
 
-    A directory is filled with the results name and a file path is taken as
-    given, so publishing is `--out results/<engine>` and re-collecting in place
-    is no `--out` at all. A path that does not exist yet counts as a directory
-    only if it says so with a trailing separator: guessing would turn a
-    misspelled file name into a directory nobody meant to create.
+    A nonexistent directory must have a trailing separator; other paths are
+    used as filenames. Without ``--out``, write in the run directory.
     """
     if out is None:
         return run_dir / RUN_JSON_FILE
@@ -113,9 +99,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     out_path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     missing = cast(list[str], document["missing"])
     print(f"COLLECTED out={out_path} schema_version={document['schema_version']} missing={len(missing)}")
-    # Named rather than counted, because which input is absent decides whether
-    # the document is publishable: a run with no geometry is still a result,
-    # while one with no scores is not.
+    # Name missing inputs so publication checks can distinguish missing scores
+    # from optional measurements.
     for name in missing:
         print(f"  missing: {name}")
     return 0
@@ -127,12 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def load_results(results_dir: Path) -> list[tuple[Path, dict[str, object]]]:
-    """Every `run.json` under `results_dir`, refusing anything that is not one.
-
-    A directory nobody has published to yet has no JSON files at all, so an
-    empty list is a normal answer, not an error — `results/` starts and ends a
-    dry spell with its table still valid.
-    """
+    """Load run documents under ``results_dir``; an empty directory yields no rows."""
     documents: list[tuple[Path, dict[str, object]]] = []
     for path in sorted(results_dir.glob("**/*.json")):
         document = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))

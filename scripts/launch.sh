@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Start the offer and the reader of a staged run: the scorer first, the producer
-# shards once the scorer has taken a reading.
-#
-# In that order because the scorer's first reading is the run's baseline. A
-# producer that began publishing before the table was read would have rows
-# already committed by the first sample, and the offered-against-committed
-# curve would start part way up.
+# Start the scorer, wait for its baseline reading, then start producer shards. This keeps
+# the first sample free of rows committed before scoring began.
 set -euo pipefail
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
@@ -14,29 +9,19 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
 # shellcheck source=scripts/_k8s.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_k8s.sh"
 
-# How far in the future the run's time origin is put. Six times the local
-# stack's lead, because on a cluster the first batch is due after a pod has been
-# scheduled onto a node that may have to be provisioned and has to pull an
-# image. A first batch that was already due when the producer opened its first
-# connection is acked late, and the scorer reads a late ack as producer_bound —
-# which voids the run rather than measuring the engine.
+# Leave time for producer scheduling and image pulls before the first batch is due. A late
+# start can mark the run producer_bound.
 EPOCH_LEAD_S="${EPOCH_LEAD_S:-180}"
-# How long the scorer waits for a commit before it gives up on a table with
-# rows still outstanding.
+# Stop scoring after this long without a commit while rows remain outstanding.
 IDLE_STOP_S="${IDLE_STOP_S:-600}"
-# How long the scorer may take to publish its first reading, and how often that
-# is looked for.
+# Timeout and polling interval for the scorer's baseline reading.
 FIRST_POLL_WAIT_S="${FIRST_POLL_WAIT_S:-300}"
 FIRST_POLL_S="${FIRST_POLL_S:-5}"
-# What one producer shard's pod asks for. A shard reads one whole batch object
-# into memory and decompresses it whole, so its peak follows the preset's batch
-# bytes — `offered_bytes_per_s x batch_interval_ms / 1000` — and not the shard
-# count. The default fits the smoke preset; see "Generating a corpus" in
-# docs/running.md for what the larger ones need.
+# Each shard buffers and decompresses a whole batch, so memory scales with
+# offered_bytes_per_s * batch_interval_ms / 1000, not shard count. The default fits smoke;
+# see docs/running.md for larger presets.
 PRODUCER_MEMORY="${PRODUCER_MEMORY:-2Gi}"
-# How many of a commit's data files the scorer reads at once. Unset here on
-# purpose: it is the scorer's own default, and stating a second one in this
-# script would be a number to keep in step with that one.
+# Leave unset to use the scorer's own read-worker default.
 SCORER_READ_WORKERS="${SCORER_READ_WORKERS:-}"
 
 usage() {
@@ -102,24 +87,16 @@ IMAGE="$REGISTRY/$IMAGE_REPOSITORY_PREFIX/harness:$TAG"
 BOOTSTRAP="$(jq -r .bootstrap "$FACTS")"
 CORPUS_URI="$(jq -r .corpus_uri "$FACTS")"
 TABLE="$(jq -r .table "$FACTS")"
-# The topic staging created, rather than the run id it was named after: the two
-# are the same string today, and a producer that rebuilt the name would publish
-# to a topic of its own the day they stop being.
+# Use the staged topic name instead of deriving it from the run ID.
 TOPIC="$(jq -r .topic "$FACTS")"
 [[ -n $TOPIC && $TOPIC != null ]] || die "$FACTS names no topic, so there is nothing for the producer to publish to"
-# `key_column` is null when the spec asked for unkeyed records, and the flag is
-# then left off rather than passed empty.
+# Omit --key-column for unkeyed records.
 KEY_COLUMN="$(jq -r '.key_column // empty' "$FACTS")"
-# What the producer frames each value as, and the id its header names, both
-# settled at stage time. `schema_id` is null for a raw-Avro run and the flag is
-# then left off rather than passed empty.
+# Use the encoding and schema ID resolved at staging. Raw Avro has no schema ID.
 VALUE_ENCODING="$(jq -r '.value_encoding // empty' "$FACTS")"
 SCHEMA_ID="$(jq -r '.schema_id // empty' "$FACTS")"
 
-# Every knob the spec sets about the offer, so the run that happens is the run
-# the copied spec claims. A key the spec leaves out is left out here too, and
-# the producer and the scorer apply their own defaults rather than ones this
-# script would have to keep in step with theirs.
+# Pass configured producer options and leave omitted options to the command defaults.
 SHARDS="$(yq '.producer.shards' "$SPEC")"
 if [[ $SHARDS == null ]]; then
 	SHARDS=1
@@ -136,20 +113,11 @@ EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 # Whether this cluster has room for the run's own pods
 # ---------------------------------------------------------------------------
 
-# What the scorer and each producer shard request, as the two manifests below
-# ask for it. A test holds this to the templates.
+# Must match CPU requests in the producer and scorer templates; tests check this.
 POD_CPU_MILLICORES=2000
 
-# A pod no node has room for never starts, and a pod that never started has an
-# empty log — so the first-reading wait below would report a scorer that
-# published nothing, over a log that says nothing about why. The events
-# `k8s_job_tail` prints carry the scheduler's own answer; this says it before
-# the wait rather than after it.
-#
-# A warning and never a refusal: a cluster with an autoscaler provisions the
-# node a Pending pod asks for, which is a normal way for a run of this size to
-# start. Every read is best-effort for the same reason — a kubeconfig scoped to
-# one namespace cannot list nodes, and that is not a launch to stop.
+# Warn before launch if current CPU requests leave too little room. This is best-effort:
+# autoscaling may add nodes, and namespace-scoped credentials may not permit listing them.
 warn_if_the_pods_will_not_fit() {
 	local scratch="" nodes="" pods="" free="" needed=$((1 + SHARDS))
 	scratch="$(mktemp -d "${TMPDIR:-/tmp}/ingest-bench-launch.XXXXXX")" || return 0
@@ -175,29 +143,24 @@ warn_if_the_pods_will_not_fit
 SCORER_JOB="$(scorer_job "$RUN_ID")"
 SCORE="score --corpus $CORPUS_URI --table $TABLE"
 SCORE="$SCORE --publish-logs $RUNS_ROOT/$RUN_ID/producer --epoch $EPOCH"
-# Written to the pod's own disk and mirrored to the runs prefix on every poll,
-# because gate.sh and finish.sh read the artifacts from there and this pod's
-# filesystem goes with the pod.
+# Mirror scores to object storage on every poll so gate and finish can read them after the
+# pod exits.
 SCORE="$SCORE --out /work/scores --upload-prefix $RUNS_ROOT/$RUN_ID/scores"
 SCORE="$SCORE --idle-stop-s $IDLE_STOP_S --publish-shards $SHARDS"
-# Who created the table, because it decides what an absent one means: an engine
-# that creates its own has none until its first record, and this scorer starts
-# before the producer does. Left off where the spec says nothing, so the scorer
-# applies its own default rather than one this script would keep in step.
+# An engine-managed table may not exist before the first record. Pass ownership so the
+# scorer can handle that absence.
 MANAGED_BY="$(yq '.table.managed_by' "$SPEC")"
 [[ $MANAGED_BY == null ]] || SCORE="$SCORE --table-managed-by $MANAGED_BY"
 SCORE="$SCORE$(site_flags '.catalog.props' --catalog-prop)"
-# A scoring key the spec leaves out is left out here too.
+# Preserve scorer defaults for omitted options.
 for key in warmup_s freshness_bound_s; do
 	value="$(yq ".scoring.$key" "$SPEC")"
 	[[ $value == null ]] || SCORE="$SCORE --${key//_/-} $value"
 done
 [[ $SPEED == null ]] || SCORE="$SCORE --speed $SPEED"
-# The scorer decides whether the producer, rather than the engine, set the rate,
-# so the spec's tolerance has to reach it and not only the producer.
+# The scorer needs the producer's lateness tolerance to determine producer_bound.
 [[ $BEHIND_MAX_MS == null ]] || SCORE="$SCORE --behind-max-ms $BEHIND_MAX_MS"
-# Left off when unset, like the spec's own keys above, so the scorer applies its
-# own default rather than one this script restates.
+
 [[ -z $SCORER_READ_WORKERS ]] || SCORE="$SCORE --read-workers $SCORER_READ_WORKERS"
 
 log "starting the scorer as job/$SCORER_JOB (epoch $EPOCH, idle stop ${IDLE_STOP_S}s)"
@@ -216,9 +179,8 @@ k8s_render_apply deploy/k8s/scorer-job.yaml.tmpl \
 log "waiting up to ${FIRST_POLL_WAIT_S}s for job/$SCORER_JOB to take its first reading"
 waited=0
 while :; do
-	# Read into a variable rather than piped into `grep`: a `grep -q` that
-	# matched closes the pipe, and the `kubectl` behind it then dies of SIGPIPE
-	# — which under `pipefail` reads as a failure to find the line.
+	# Capture before grep -q: an early pipe close would otherwise cause SIGPIPE under
+	# pipefail.
 	logs="$(k8s_job_logs "$SCORER_JOB" 2>/dev/null || true)"
 	if grep -q '^POLL ' <<<"$logs"; then
 		log "the scorer is reading the table"
@@ -236,16 +198,13 @@ done
 # The offer
 # ---------------------------------------------------------------------------
 
-# The scorer's first-reading wait above can eat most or all of EPOCH_LEAD_S; a
-# producer applied with the epoch no longer safely ahead has its first batch
-# due before its first connection opens, and the run voids as producer_bound
-# rather than measuring the engine.
+# The baseline wait may consume the epoch lead. Refuse if the producer no longer has time
+# to start before its first batch is due.
 (($(date +%s) + 30 <= EPOCH)) || die "epoch $EPOCH is under 30s away; raise EPOCH_LEAD_S (currently $EPOCH_LEAD_S) and relaunch"
 
 PRODUCER_JOB="$(producer_job "$RUN_ID")"
 PRODUCE="produce --corpus $CORPUS_URI --bootstrap $BOOTSTRAP --topic $TOPIC --epoch $EPOCH"
-# `$JOB_COMPLETION_INDEX` is escaped here and expanded by the shell that is the
-# image's entrypoint, so one rendered command serves every shard.
+# Expand JOB_COMPLETION_INDEX in the pod's shell so one command serves all shards.
 PRODUCE="$PRODUCE --shard \$JOB_COMPLETION_INDEX --shards $SHARDS"
 PRODUCE="$PRODUCE --publish-log /work/publish_log-\$JOB_COMPLETION_INDEX.jsonl"
 PRODUCE="$PRODUCE --upload-prefix $RUNS_ROOT/$RUN_ID"
@@ -273,9 +232,8 @@ k8s_render_apply deploy/k8s/producer-job.yaml.tmpl \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 
-# The epoch is the one fact staging could not know, and every later reader of
-# the run directory needs it. `jq` cannot edit in place, so the document is
-# rewritten through a temporary file beside it.
+# Record the launch epoch for later readers, replacing facts.json through a temporary
+# file.
 EPOCH_TMP="$(mktemp "$RUN_DIR/facts.json.XXXXXX")"
 jq --argjson epoch "$EPOCH" '.epoch = $epoch' "$FACTS" >"$EPOCH_TMP"
 mv "$EPOCH_TMP" "$FACTS"

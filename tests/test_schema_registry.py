@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The registry client, against a registry that is an HTTP server in this process.
-
-The Confluent registration API is one POST, so what is worth pinning is what
-that POST looks like on the wire — the path, the media type, the body and the
-authorization header — and that a refusal reaches the caller with the
-registry's own reason in it. A live registry would say none of that any more
-loudly and needs a container to say it at all.
-"""
+"""Test registration requests and error handling against a local HTTP server."""
 
 from __future__ import annotations
 

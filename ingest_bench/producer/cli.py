@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Command line for one producer shard.
 
-A run's producers are shards of one command: they share the corpus, the topic
-and the epoch, and differ only in `--shard`. The epoch is passed rather than
-taken from the local clock so every shard, and the scorer, measure from the
-same instant — a shard that chose its own start would offer its batches at
-times no other shard agreed with.
+All shards share the corpus, topic, and epoch; only ``--shard`` differs.
+The explicit epoch keeps shard schedules aligned with the scorer.
 """
 
 from __future__ import annotations
@@ -88,12 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _value_prefix(encoding: str, schema_id: int | None) -> bytes:
-    """The bytes that precede every value, and a refusal for a flag pair that cannot mean anything.
-
-    A `confluent` run with no id would publish records whose header names
-    schema zero, which a reader resolves to whatever was registered first — so
-    the pair is checked here rather than being given a default.
-    """
+    """Build the selected framing header, rejecting incompatible schema-ID flags."""
     if encoding == VALUE_ENCODING_CONFLUENT:
         if schema_id is None:
             raise ValueError(

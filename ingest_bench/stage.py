@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage a run: create the topic and the table, and write down what an engine needs.
+"""Create a run's topic and table, then write its engine configuration.
 
-Staging is the seam between the harness and whatever is being scored. It ends
-with a topic that exists, a table that exists (or the statement to create one)
-and a `facts.json` an operator can read to point any engine at both — which is
-what makes the external tier possible: nothing after this point is specific to
-an engine the harness knows how to run.
-
-The topic is created last among the checks and rolled back on any later
-failure. A half-staged run that left a topic behind would fail the next
-attempt at the same name for a reason unrelated to what actually went wrong.
+Staging writes ``facts.json`` and either creates the table or supplies its DDL.
+External engines can use these facts without a harness-specific integration.
+Validate local inputs before creating the topic, and delete the topic if a
+later step fails so staging can be retried.
 """
 
 from __future__ import annotations
@@ -36,39 +31,26 @@ from ingest_bench.specs.kubernetes import object_name
 from ingest_bench.table.create import create_table, parse_partition
 from ingest_bench.table.ddl import spark_sql_ddl
 
-# Three replicas is what a run's records are worth: enough that losing one
-# broker mid-run does not end it, and no more than the smallest cluster anyone
-# runs this against can satisfy. A cluster with fewer brokers than that gets as
-# many replicas as it has brokers, since a factor above the broker count is
-# refused outright.
+# Use up to three replicas, capped by the broker count.
 MAX_REPLICATION_FACTOR = 3
 
-# The spec's way of saying the producer sends no message key, so records
-# round-robin across partitions instead of following a column's skew.
+# No Kafka message key; records are not partitioned by a column value.
 KEY_NONE = "none"
 
 STAGED = "staged"
 
-# The site key a `confluent` run needs, named in the refusal so an operator
-# reads which block to add rather than which call failed.
+# Use the full configuration path in credential errors.
 _REGISTRY_AUTH_KEY = "site.kafka.schema_registry.basic_auth_user_info"
 
-# The timeline is the run's audit trail, appended to at every phase transition,
-# so its timestamps are seconds-resolution UTC and sort lexicographically.
+# Use sortable UTC timestamps with seconds precision.
 _TIMELINE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class KafkaAdmin(Protocol):
-    """The cluster operations staging needs, behind a protocol so it can be faked.
+    """Kafka operations required by staging, injectable for tests.
 
-    Staging is otherwise untestable without a broker, and the parts worth
-    testing — that a failure after creation drops the topic again, and that the
-    replication factor follows the cluster — are exactly the parts a live
-    broker makes hard to provoke.
-
-    Every method takes the client properties to reach the cluster with, rather
-    than the admin holding them, because the site that declares them is read
-    inside `stage` and a secret they name is resolved at the call itself.
+    Methods receive client properties because staging loads the site and resolves
+    credentials before calling the admin.
     """
 
     def exists(self, bootstrap: str, name: str, client: dict[str, str]) -> bool: ...
@@ -89,7 +71,7 @@ class KafkaAdmin(Protocol):
 
 
 class ClusterAdmin:
-    """The real cluster admin, against the broker the site names."""
+    """Kafka admin backed by the configured cluster."""
 
     def exists(self, bootstrap: str, name: str, client: dict[str, str]) -> bool:
         return kafka_admin.topic_exists(bootstrap, name, client)
@@ -114,11 +96,9 @@ class ClusterAdmin:
 
 @dataclass(frozen=True)
 class SchemaRegistration:
-    """The schema a `confluent` run's records point at, once it has an id.
+    """Registered schema used by every record in a Confluent-framed run.
 
-    The id is what the producer's header carries and what every reader resolves
-    the writer schema by, so it is a fact about the run rather than about the
-    registry: one id for the whole run, chosen before the first record.
+    The producer writes this schema ID into each record header.
     """
 
     url: str
@@ -128,7 +108,7 @@ class SchemaRegistration:
 
 @dataclass(frozen=True)
 class Staged:
-    """What staging produced: the spec it read, the run's names, and its facts."""
+    """Validated spec, derived names, run directory, and generated facts."""
 
     spec: model.RunSpec
     derived: Derived
@@ -137,13 +117,10 @@ class Staged:
 
 
 def resolve_corpus_dir(corpus_root: str, name: str) -> str:
-    """The directory under ``corpus_root`` holding the corpus called ``name``.
+    """Find the unique corpus named ``name`` under ``corpus_root``.
 
-    A corpus directory carries the hash of the preset that produced it, so two
-    generations of the same preset coexist under different names. Ambiguity is
-    refused rather than resolved by recency: the older of the two is a
-    legitimate scoring input, and picking one silently would score a table
-    against a corpus nobody chose.
+    Directories include the preset hash, so several versions may coexist.
+    Reject ambiguous matches rather than silently choosing a scoring input.
     """
     candidates = [
         d
@@ -161,12 +138,10 @@ def resolve_corpus_dir(corpus_root: str, name: str) -> str:
 
 
 def redact(props: dict[str, str]) -> dict[str, str]:
-    """``props`` with every credential-shaped literal value replaced.
+    """Redact literal credentials while preserving configuration URIs.
 
-    No site is passed, so the URIs among the values survive: `facts.json` is
-    what an engine is configured from, and a warehouse property rewritten to a
-    placeholder would point it at nothing. The published copy of the same
-    properties loses them; see `collect.redact`.
+    Engines read these properties from ``facts.json``. Publication also redacts
+    site roots; see ``collect.redact``.
     """
     return redact_props(props, None)
 
@@ -176,13 +151,10 @@ def replication_factor(brokers: int) -> int:
 
 
 def harness_table_properties(spec: model.RunSpec) -> dict[str, str]:
-    """The properties the harness creates the table with.
+    """Return table properties with Iceberg format version 2 enforced.
 
-    Format version 2 explicitly: an engine writing equality or position
-    deletes needs it, and a table created at version 1 would fail the run for
-    a reason that has nothing to do with the engine's ingest path. An
-    engine-owned table is given the spec's properties untouched, since the
-    statement it runs is the one a reader has to be able to check.
+    Equality and position deletes require version 2. Engine-owned tables receive
+    the spec's properties through their DDL instead.
     """
     return {**spec.table.properties, "format-version": "2"}
 
@@ -194,21 +166,11 @@ def _facts(
     ddl: str | None,
     registration: SchemaRegistration | None,
 ) -> dict[str, object]:
-    """Everything an engine needs to join the run, in the order it is printed.
+    """Build engine configuration facts in their printed order.
 
-    ``run_id`` comes first because the scripts read it off the first line.
-    ``epoch`` is null until the run is launched: the time origin is chosen when
-    the producer starts, not when the topic is created, so a staged run that
-    waits an hour for an operator is not scored from the moment it was staged.
-
-    ``value_encoding`` is stated for every run and the three registry facts
-    are null where it is the raw one, rather than being left out: a reader that
-    had to tell an absent key from a null one would read a harness too old to
-    know the difference as a run that offered raw Avro.
-
-    ``compression`` is stated for the same reason. It is the codec a consumer
-    has to decode before it sees a value at all, so it is a fact about the run
-    and not a detail of the producer that offered it.
+    Keep ``run_id`` first for shell readers. Leave ``epoch`` null until launch so
+    staging delays do not count toward the run. Always include ``value_encoding``
+    and ``compression``; raw Avro runs have null registry fields.
     """
     return {
         "run_id": derived.run_id,
@@ -231,13 +193,9 @@ def _facts(
 
 
 def _refuse_an_unaddressable_name(spec: model.RunSpec, derived: Derived) -> None:
-    """Refuse a run whose object name is longer than its engine's operator takes.
+    """Reject object names that exceed the engine operator's declared limit.
 
-    A run's Kubernetes object name is its run id, so it is the spec's name plus
-    a stamp — and the operator that refuses the name refuses the document the
-    render produces, by which point the topic and the table exist and the
-    driver is waiting on a resource that will never run. An engine whose
-    operator publishes no bound declares none, and nothing is checked.
+    Check before creating resources to avoid staging a run that cannot launch.
     """
     limit = kubernetes_for(spec.engine).max_object_name_length
     if limit is None:
@@ -253,11 +211,9 @@ def _refuse_an_unaddressable_name(spec: model.RunSpec, derived: Derived) -> None
 
 
 def _registry_for(spec: model.RunSpec, site: model.SiteConfig) -> model.SchemaRegistryConfig | None:
-    """The registry this run registers with, or ``None`` for a raw-Avro run.
+    """Return the registry for Confluent framing, or ``None`` for raw Avro.
 
-    A `confluent` run against a site that declares no registry is refused here,
-    with the other refusals that cost nothing: the alternative is a topic and a
-    table that exist for a run no engine can be pointed at.
+    Reject a missing required registry before creating cluster resources.
     """
     if spec.kafka.value_encoding != model.VALUE_ENCODING_CONFLUENT:
         return None
@@ -280,11 +236,10 @@ def timeline_line(event: str) -> str:
 
 
 def facts_lines(facts: dict[str, object]) -> list[str]:
-    """The facts as ``key: value`` lines.
+    """Format facts as one ``key: value`` line each.
 
-    A value that is not a single-line string is printed as JSON: the DDL spans
-    lines and the catalog properties are a mapping, and either would break the
-    one-line-per-fact shape the scripts parse.
+    Encode mappings, multiline strings, and other non-string values as JSON so
+    shell readers can parse one fact per line.
     """
     lines: list[str] = []
     for key, value in facts.items():
@@ -296,10 +251,7 @@ def facts_lines(facts: dict[str, object]) -> list[str]:
 def publish_run_dir(run_dir: Path, upload_prefix: str, run_id: str) -> None:
     """Copy the run directory to ``<upload_prefix>/<run_id>/stage/``.
 
-    Staging runs as a Job wherever the broker is only reachable from inside its
-    own network, and that pod's filesystem goes with the pod. Publishing the
-    directory is what leaves it somewhere the operator's machine can fetch it
-    from afterwards.
+    This preserves artifacts from staging Jobs after their pods are removed.
     """
     for path in sorted(run_dir.iterdir()):
         uri.write_bytes(uri.join(upload_prefix, run_id, "stage", path.name), path.read_bytes())
@@ -315,11 +267,9 @@ def stage(
     image_tag: str | None = None,
     upload_prefix: str | None = None,
 ) -> Staged:
-    """Create the run's topic and table and write its run directory.
+    """Create the topic and table and write the run directory.
 
-    Every refusal that can be raised without touching the cluster is raised
-    first, so the common failures — a misspelled knob, a key column the corpus
-    does not carry, an unresolvable corpus — cost nothing to recover from.
+    Validate local inputs before modifying cluster resources.
     """
     site = model.load_site(site_path)
     spec = model.load_run_spec(spec_path)
@@ -339,19 +289,15 @@ def stage(
         knobs = knobs_for(spec.engine)
         knobs.validate(spec.engine_block, spec, meta)
         _refuse_an_unaddressable_name(spec, derived)
-        # Refused here rather than at the render that needs it: by then the
-        # topic exists and the table with it, so a forgotten flag would cost a
-        # rollback instead of an error message.
+        # Require the image tag before creating resources.
         if site.kubernetes is not None and image_tag is None:
             raise ValueError(
                 "a managed run on a cluster starts an image, so staging needs --image-tag: "
                 "the tag push-images.sh pushed"
             )
 
-    # Resolved here and not at load: the site config, the run's facts and the
-    # engine's rendered script all keep the placeholder, and only the calls
-    # below ever see the value. Both are resolved before the cluster is
-    # touched, so an unset variable is a refusal rather than a half-staged run.
+    # Resolve credentials only for client calls; keep placeholders in artifacts.
+    # Resolve all references before creating resources so missing variables fail early.
     kafka_client = resolve_env_placeholders(site.kafka_security)
     catalog_props = resolve_env_placeholders(site.catalog_props)
     registry_auth = None if registry is None else _registry_auth(registry)
@@ -368,10 +314,8 @@ def stage(
     try:
         ddl: str | None = None
         if spec.table.managed_by == model.HARNESS:
-            # Both locations come from `site.warehouse` and never from the
-            # catalog's own `warehouse` property: a Glue Iceberg REST catalog
-            # reads an account id there, so a table created without a location
-            # would land nowhere a bucket can hold.
+            # Use the storage warehouse for explicit locations. Glue REST catalogs use
+            # the catalog `warehouse` property for an account ID, not a storage path.
             namespace, table_name = table_identifier(derived.table)
             create_table(
                 catalog_props,
@@ -386,10 +330,7 @@ def stage(
             ddl = spark_sql_ddl(meta, derived.table, partition, spec.table.properties)
         registration = None
         if registry is not None:
-            # The corpus's own file rather than the schema `corpus.json`
-            # embeds: it is the document `schema_avsc_uri` points every reader
-            # at, so what is registered is byte for byte what a reader that
-            # skipped the registry would use instead.
+            # Register the same schema file that `schema_avsc_uri` gives consumers.
             subject = subject_for(derived.topic)
             schema_id = register_schema(
                 registry.url, registry_auth, subject, uri.read_text(uri.join(derived.corpus_uri, "schema.avsc"))
@@ -398,10 +339,7 @@ def stage(
         facts = _facts(spec, site, derived, ddl, registration)
         run_dir = runs_dir / derived.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        # The spec is copied verbatim rather than re-serialised: it is the
-        # published record of what was asked for, and a round trip through the
-        # loader would drop its comments and print its defaults as if they had
-        # been chosen.
+        # Preserve comments and omitted defaults in the staged spec.
         (run_dir / "spec.yaml").write_text(spec_path.read_text())
         (run_dir / "facts.json").write_text(json.dumps(facts, indent=2) + "\n")
         (run_dir / "timeline.log").write_text(f"{timeline_line(STAGED)}\n")
@@ -412,11 +350,8 @@ def stage(
         if upload_prefix is not None:
             publish_run_dir(run_dir, upload_prefix, derived.run_id)
     except BaseException:
-        # An interrupt gets the same treatment as an error: the topic is the
-        # one thing a failed staging leaves that blocks the next attempt at the
-        # same name. A table it may also have created is left alone — a table
-        # with no data is inert, and a teardown that drops tables on its own is
-        # a worse failure mode than an orphan.
+        # Delete the topic on errors and interrupts so staging can be retried.
+        # Leave any created table for explicit teardown to avoid unintended deletion.
         admin.delete(site.kafka_bootstrap, derived.topic, kafka_client)
         raise
     return Staged(spec=spec, derived=derived, run_dir=run_dir, facts=facts)

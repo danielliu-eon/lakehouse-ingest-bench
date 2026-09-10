@@ -34,13 +34,7 @@ def _minimal_document(
     geometry: dict[str, object] | None = None,
     fleet: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """A document holding only the fields `render_results_table` reads.
-
-    The renderer is otherwise exercised through `collect`'s own fixture
-    builder (`tests.test_collect`), which produces a document `build_run_json`
-    actually assembles; this is for the edges that builder cannot reach
-    without a matching site or run directory, such as zero pricing.
-    """
+    """A document holding only the fields `render_results_table` reads."""
     if fleet is None:
         fleet = [{"role": "worker", "count": 1, "vcpu": 2.0, "gib": 4.0, "machine_type": "m6i.large"}]
     vcpu_price, gib_price = site_pricing

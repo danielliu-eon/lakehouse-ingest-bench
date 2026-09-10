@@ -1,19 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What a running job actually honours, read back and compared with the spec.
+"""Compare the running Flink job with the requested configuration.
 
-Staging waits for the job to reach RUNNING, which says the operator started
-something. It does not say that what it started is the run the spec describes:
-Flink drops a configuration key it does not know, a connector ignores a hint it
-does not implement, and every vertex is sized by whatever configuration reached
-it — none of which fails a submission. A run measured under settings nobody
-chose is worse than a run that never started, because it publishes a number
-attributed to the wrong knobs.
-
-So the settings that decide what a result means — the commit cadence, the
-exactness promise, how many readers and writers, how large the fleet — are read
-off the JobManager's REST endpoint and compared here. `verify` is a function of
-the spec and four JSON documents, so every drift it can report is checked
-against recorded answers instead of a cluster.
+RUNNING alone does not prove that the engine applied every setting. Read the
+checkpoint cadence, exactly-once mode, operator parallelism, and TaskManager
+count from the JobManager REST API. Injected JSON responses keep verification
+testable without a cluster.
 """
 
 from __future__ import annotations
@@ -38,53 +29,38 @@ from ingest_bench.readings import (
 )
 from ingest_bench.specs.model import RunSpec, load_run_spec
 
-# The two resources whose paths hold no job id. The other two are built per
-# job, in the functions that read them, so each path is written once and the
-# request and the name in an error message cannot disagree.
+# Job-independent endpoints; build job-specific paths where they are read.
 JOBS_OVERVIEW = "/jobs/overview"
 CLUSTER_OVERVIEW = "/overview"
 
 RUNNING = "RUNNING"
 
-# What a job the cluster has never heard of is reported as. A name rather than
-# an empty state, because the line is read by a person deciding whether to
-# restage or to look at the operator's log.
+# Use an explicit state for a job absent from the cluster's listing.
 NOT_FOUND = "not found"
 
 # The endpoint's spelling of the mode `render_conf` submits as `EXACTLY_ONCE`.
 EXACTLY_ONCE = "exactly_once"
 
-# The three operators a run is sized by, as the job graph names them. The
-# source is a prefix: Flink chains a SQL source with whatever follows it and
-# suffixes the operator with its transformation id, so the name grows to the
-# right of the table's own. The other two are substrings of the chain they sit
-# in for the same reason.
+# Match graph operator names despite chaining and generated suffixes.
 _SOURCE_PREFIX = f"Source: {SOURCE_TABLE}"
 _WRITER = "IcebergStreamWriter"
 _COMMITTER = "IcebergFilesCommitter"
 
-# Iceberg's sink serialises its commits through one committer whatever the
-# writers do, so a committer at any other parallelism is not the sink this
-# benchmark measures.
+# Iceberg commits are serialized through a single committer.
 COMMITTER_PARALLELISM = 1
 
-# The two settings a run can move out from under its own knobs: `render_conf`
-# applies `extra_flink_conf` last, so a value written there is what the job was
-# submitted with.
+# Explicit configuration overrides take precedence over the corresponding knobs.
 _INTERVAL_KEY = "execution.checkpointing.interval"
 _MIN_PAUSE_KEY = "execution.checkpointing.min-pause"
 
-# Flink's duration grammar, as `TimeUtils.parseDuration` reads it: an integer,
-# optional whitespace, and a unit label that is milliseconds when there is
-# none. Only the four labels a commit cadence is written in are accepted — a
-# duration this cannot read is refused rather than compared against the wrong
-# scale.
+# Match supported Flink duration units; a missing unit means milliseconds.
+# Reject unsupported units instead of comparing values at the wrong scale.
 _DURATION_RE = re.compile(r"^(\d+)\s*([a-z]*)$")
 _UNIT_MS = {"": 1, "ms": 1, "s": 1_000, "m": 60_000, "h": 3_600_000}
 
 
 def duration_ms(value: str, where: str) -> int:
-    """A Flink duration setting in milliseconds, or a refusal naming ``where``."""
+    """Parse a Flink duration in milliseconds, naming ``where`` on failure."""
     match = _DURATION_RE.match(value.strip().lower())
     if match is None or match.group(2) not in _UNIT_MS:
         raise ValueError(
@@ -100,25 +76,17 @@ def duration_ms(value: str, where: str) -> int:
 
 
 def _effective(knobs: Knobs, key: str, knob: str) -> str:
-    """The value the job was submitted with for ``key``.
-
-    An override in `extra_flink_conf` is applied after the knob it displaces,
-    so it is what the engine was told — and reporting the knob instead would
-    be drift on a run whose author chose the override.
-    """
+    """Return the submitted setting, including extra_flink_conf overrides."""
     if key in knobs.extra_flink_conf:
         return knobs.extra_flink_conf[key]
     return knob
 
 
 def _job(run_id: str, overview: object) -> tuple[str, str]:
-    """The run's job state, and the id the other readings are made against.
+    """Return the run's state and the ID of its running attempt.
 
-    A job the cluster restarted keeps the run's name, and the jobmanager
-    archives the attempt it gave up on beside the one it is running — so a
-    name is not unique and the live attempt is the one a reading of the graph
-    can be attributed to. The id is empty for every state but RUNNING, which
-    is the only one anything further is read under.
+    Restarted jobs can share a name with archived attempts. Return an empty ID
+    unless a RUNNING attempt exists.
     """
     jobs = documents(field(document(overview, JOBS_OVERVIEW), "jobs", JOBS_OVERVIEW), f"{JOBS_OVERVIEW}.jobs")
     named = [job for job in jobs if str_field(job, "name", JOBS_OVERVIEW) == run_id]
@@ -143,10 +111,7 @@ def _checkpoint_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) ->
         actual = int_field(config, reported, where)
         if expected != actual:
             lines.append(line(what, expected, actual))
-    # Against the constant and not against the submitted configuration:
-    # exactly once is the promise duplication is scored against rather than a
-    # knob, so a run that relaxed it through `extra_flink_conf` is precisely
-    # what this line exists to catch.
+    # Always require exactly-once mode, including when extra_flink_conf overrides it.
     mode = str_field(config, "mode", where)
     if mode != EXACTLY_ONCE:
         lines.append(line("checkpoint mode", EXACTLY_ONCE, mode))
@@ -154,11 +119,9 @@ def _checkpoint_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) ->
 
 
 def _vertex_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> list[str]:
-    """Every vertex whose parallelism is not the one the spec sizes its role at.
+    """Report graph parallelism that differs from the requested reader/writer counts.
 
-    The writers' number is the sink hint the SQL carries, which is computed
-    from the knobs — so unlike the checkpoint settings it is the knobs, and
-    not the submitted configuration, that says what the engine was told.
+    Writer parallelism comes from the SQL hint derived from fleet knobs.
     """
     where = f"/jobs/{jid}"
     vertices = documents(field(document(fetch(where), where), "vertices", where), f"{where}.vertices")
@@ -171,9 +134,7 @@ def _vertex_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> lis
     for label, matches, expected in roles:
         matched = [vertex for vertex in vertices if matches(str_field(vertex, "name", where))]
         if not matched:
-            # A graph missing a role is not a graph the spec describes, and
-            # the parallelism it would have been sized at cannot be read from
-            # a vertex that is not there.
+            # Report a missing role before attempting to inspect its parallelism.
             lines.append(line(f"{label} vertices", "at least 1", 0))
             continue
         for vertex in matched:
@@ -184,12 +145,7 @@ def _vertex_drift(knobs: Knobs, fetch: Callable[[str], object], jid: str) -> lis
 
 
 def _fleet_drift(knobs: Knobs, fetch: Callable[[str], object]) -> list[str]:
-    """The registered taskmanagers, against the fleet the run asked for.
-
-    The count has no configuration key to be overridden through: the operator
-    sizes the containers from the same knob, so the knob is the whole of what
-    the spec asked for here.
-    """
+    """Compare the registered TaskManager count with the requested fleet size."""
     overview = document(fetch(CLUSTER_OVERVIEW), CLUSTER_OVERVIEW)
     taskmanagers = int_field(overview, "taskmanagers", CLUSTER_OVERVIEW)
     if taskmanagers == knobs.taskmanagers:
@@ -198,18 +154,15 @@ def _fleet_drift(knobs: Knobs, fetch: Callable[[str], object]) -> list[str]:
 
 
 def verify(spec: RunSpec, run_id: str, fetch: Callable[[str], object]) -> list[str]:
-    """One line per setting the running job does not honour; empty when it does.
+    """Return one line per configuration mismatch, or an empty list.
 
-    ``fetch`` answers a REST path with the parsed document, which is what
-    keeps this a function of recorded JSON. A document that cannot be read as
-    the one it should be raises rather than returning a clean verdict.
+    ``fetch`` maps REST paths to parsed JSON. Malformed responses raise instead
+    of producing a successful verdict.
     """
     knobs = read(spec.engine_block)
     state, jid = _job(run_id, fetch(JOBS_OVERVIEW))
     if state != RUNNING:
-        # The only reading worth making about a job that is not running. The
-        # vertices of a failed one report the parallelism it had, which says
-        # nothing about the run being staged.
+        # A stopped job's graph describes a past attempt, not a runnable fleet.
         return [line("job state", RUNNING, state)]
     return [
         *_checkpoint_drift(knobs, fetch, jid),
@@ -247,16 +200,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         drift = verify(load_run_spec(Path(str(args.spec))), run_id, fetch_json(str(args.rest)))
     except ValueError as error:
-        # Not a verdict: the run could not be judged at all, which a caller
-        # answers by looking again rather than by refusing the run.
+        # An unreadable response is retryable, not evidence of configuration drift.
         print(error, file=sys.stderr)
         return UNVERIFIED_EXIT
     for drifted in drift:
         print(drifted)
     if drift:
         return DRIFT_EXIT
-    # On stderr, because the drift lines are this command's answer and a
-    # caller that captures them should not have to filter this out of them.
+    # Keep diagnostics on stderr so stdout contains only drift findings.
     print(f"verified: {run_id} is running the settings its spec asked for", file=sys.stderr)
     return 0
 

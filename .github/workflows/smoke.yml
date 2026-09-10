@@ -1,6 +1,4 @@
-# Manual dispatch only, not on a schedule or per PR: each engine builds its
-# own image and runs the full Compose stack for 20-30 minutes, which is more
-# than this repo's traffic justifies running automatically yet.
+# Run manually: each engine builds an image and starts the full Compose stack.
 name: smoke
 on:
   workflow_dispatch:
@@ -11,16 +9,12 @@ jobs:
       fail-fast: false
       matrix:
         engine: [flink, spark]
-    # The Spark image build (a full Spark distribution plus connector jars)
-    # is the long pole; Flink finishes well inside this too.
+    # Allow time to build the Spark distribution and connector image.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      # No Python: the smoke runs every harness command inside the image it
-      # builds, and needs docker, jq, yq and curl on the runner itself.
-      #
-      # Same pinned yq and digest as ci.yml — snap is not available on every
-      # runner image, and a channel's version drifts under the smoke.
+      # Harness commands run inside containers. Keep the host's yq version and checksum in
+      # sync with ci.yml.
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: |
           sudo curl -fsSL -o /usr/local/bin/yq \

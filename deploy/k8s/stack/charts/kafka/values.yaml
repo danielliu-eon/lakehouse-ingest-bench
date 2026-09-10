@@ -1,21 +1,19 @@
-# The Kafka cluster's name. The bootstrap Service is <name>-kafka-bootstrap.
+# Bootstrap Service name: <name>-kafka-bootstrap.
 name: ingest-bench
-# Strimzi 1.2.0's current line; both must move together.
+# Keep the Kafka and metadata versions compatible with the pinned Strimzi release.
 kafkaVersion: "4.3.1"
 metadataVersion: "4.3-IV0"
-# Node pool replicas, each a controller and a broker. Replication is derived:
-# min(3, brokers) replicas, one fewer in sync — the same factor staging asks for.
+# Each replica is a broker and controller. Derive replication from broker count.
 brokers: 3
 storage:
   size: 500Gi
-  # Empty means the cluster's default StorageClass.
+  # Empty selects the cluster's default StorageClass.
   class: ""
 resources:
   cpu: "4"
   memory: 16Gi
-# Fixed heap, so the rest of the pod's memory is page cache for the log.
+# Reserve memory outside the fixed heap for the log's page cache.
 jvmHeap: 6g
-# A selector is rendered as the required node affinity Strimzi's pod template
-# takes, since it has no nodeSelector of its own.
+# Strimzi requires node affinity rather than a pod-template nodeSelector.
 nodeSelector: {}
 tolerations: []

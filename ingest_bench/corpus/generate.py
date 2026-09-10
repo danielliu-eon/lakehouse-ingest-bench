@@ -32,30 +32,18 @@ from ingest_bench.corpus.stats import (
 
 GENERATOR_VERSION = "5"
 PARTITION_SHARE_MAX_DEVIATION = 0.05
-# The share gate's floor is the coldest key's expected row count, not the
-# corpus's total rows: the noise on a key's realized share falls with the rows
-# behind that key alone, so the coldest key is what decides whether the
-# comparison measures the generator or the seed. A flat row floor cannot serve
-# both a wide key space and a narrow one — at any given corpus size it would
-# gate 512 keys on sampling noise while leaving 8 keys unchecked. Ten thousand
-# rows put the relative noise near 1%, which a 5% gate clears.
+# Gate byte shares only when the coldest key has enough expected rows.
+# At 10,000 rows, roughly 1% sampling noise is below the 5% tolerance.
 PARTITION_SHARE_GATE_MIN_COLD_ROWS = 10_000
 MEAN_ROW_MAX_DEVIATION = 0.02
 CARDINALITY_MAX_DEVIATION = 0.10
-# A blob column asked for a fresh value per row is the corpus's incompressibility
-# axis, so bytes that a codec could fold away mean the axis is not there — however
-# the column is declared.
+# Unbounded blobs provide the incompressibility axis; validate their byte entropy.
 UNBOUNDED_BLOB_MIN_ENTROPY_BITS_PER_BYTE = 7.5
 
 
 @dataclass
 class BatchRecord:
-    """One batch's scoring ground truth, and where its bytes live.
-
-    Exactness is scored against ``rows`` and ``checksum``, so the record is
-    what the scorer compares the table to; the sha256 is what ties those
-    figures to the bytes a producer will actually send.
-    """
+    """Batch location and scoring truth: row count, checksum, and byte digest."""
 
     batch: int
     offset_ms: int
@@ -80,7 +68,7 @@ class BatchRecord:
 
 @dataclass
 class BatchFill:
-    """One batch's encoded rows, beside the truth accumulated while filling it."""
+    """Encoded batch rows and the measurements accumulated while generating them."""
 
     records: bytes
     sizes: np.ndarray
@@ -93,12 +81,10 @@ class BatchFill:
 
 
 def epoch_ms(preset: Preset) -> int:
-    """The instant the corpus's first batch arrives, in milliseconds since the Unix epoch.
+    """Parse the corpus epoch as Unix milliseconds.
 
-    A timestamp without an offset is refused rather than resolved in local time.
-    The offset does not enter the corpus hash, so a naive epoch would let two
-    machines in different zones write different event times under one corpus
-    hash — each internally consistent, neither reproducing the other.
+    Require an explicit timezone to keep generated event times independent of
+    the host timezone.
     """
     moment = datetime.fromisoformat(preset.corpus_epoch.replace("Z", "+00:00"))
     if moment.tzinfo is None:
@@ -117,11 +103,9 @@ def fill_batch(
     stride: int,
     rows_per_batch_estimate: int,
 ) -> BatchFill:
-    """Whole row blocks until the batch holds its byte budget.
+    """Fill the byte budget with whole row blocks.
 
-    The budget is met by overshooting rather than by trimming a block, so a
-    batch's rows are always the rows the block generator produces at those
-    positions and a regenerated batch is byte-identical.
+    Allow the last block to overshoot so row positions remain reproducible.
     """
     start_ms = epoch_ms(preset) + batch * preset.batch_interval_ms
     chunks: list[bytes] = []
@@ -157,9 +141,7 @@ def fill_batch(
             observe_block(block, column_stats, batch * rows_per_batch_estimate + rows, stride)
         rows += block.rows
         total += int(block.encoded_sizes.sum())
-        # A batch owns one identity block, so a batch that outgrew it would hand
-        # the next batch's identities out twice and exactness would score them
-        # against a corpus that never existed.
+        # Reject overflow into the next batch's reserved ID range.
         if rows >= c.ID_BLOCK:
             raise ValueError(f"batch {batch} exceeded its id block")
     return BatchFill(
@@ -185,23 +167,16 @@ def verify_batch(
     columns: tuple[c.ColumnDistribution, ...],
     fill_partition_counts: dict[int, int],
 ) -> None:
-    """Re-derive a batch's whole record from its stored bytes.
+    """Recompute batch truth by decoding stored frames with the published schema.
 
-    Everything the scorer will compare a table to is recomputed here by a
-    reader that shares nothing with the encoder: the frames are decoded under
-    the published schema, so a manifest figure can only be right if a consumer
-    reading the same bytes the same way would agree with it.
+    This independent read checks the encoder's output before publication.
     """
     label = f"batch {record.batch}"
     if frames.sha256_hex(data) != record.sha256:
         raise AssertionError(f"{label}: stored bytes do not match the manifest sha256")
     schema = fastavro.parse_schema(c.avro_schema(columns))
     key_frames = {name: list(frames.iter_frames(frames.decompress(blob))) for name, blob in key_data.items()}
-    # A producer reads a sidecar in lockstep with the batch, so a sidecar of the
-    # wrong length is a corpus fault whatever its contents. Counting the frames
-    # up front is also what makes the row walk below a comparison rather than an
-    # unchecked index: a short sidecar would otherwise fail on the index and a
-    # long one would never be looked at past the last row.
+    # Sidecars must have exactly one frame per batch row before lockstep decoding.
     for name, framed in key_frames.items():
         if len(framed) != record.rows:
             raise AssertionError(f"{label}: sidecar {name} holds {len(framed)} frames for {record.rows} rows")
@@ -211,8 +186,7 @@ def verify_batch(
     decoded = 0
     for frame in frames.iter_frames(frames.decompress(data)):
         row = cast(dict[str, object], fastavro.schemaless_reader(io.BytesIO(frame), schema))
-        # The published schema types `id` as an Avro long, so a decoded row
-        # carries an int; a row that somehow did not would fail the next check.
+        # The Avro schema declares `id` as a long.
         row_id = cast(int, row["id"])
         if row_id != expected_id:
             raise AssertionError(f"{label}: id {row_id} where {expected_id} was expected")
@@ -284,8 +258,7 @@ def generate(
             uri=rel,
             key_uris=key_uris,
         )
-        # The closed form assumes the batch's identities are dense, and the
-        # accumulated residues do not; they agree only if they are.
+        # Compare the dense-ID formula with the independently accumulated checksum.
         if int(fill.partition_sum_mod.sum() % c.P) != record.checksum:
             raise AssertionError(f"batch {batch}: closed-form checksum disagrees with the accumulated residues")
         counts = {key: int(count) for key, count in enumerate(fill.partition_counts.tolist()) if count}
@@ -325,16 +298,10 @@ def generate(
 
 
 def dump_column_stats(column_stats: dict[str, ColumnStats]) -> str:
-    """The sampled column statistics in the form a merge can re-derive them from.
+    """Write mergeable sampler state beside the derived column statistics.
 
-    `corpus.json` publishes derived figures — a distinct-value estimate, an
-    entropy — and those cannot be re-merged: a union of shard sketches is the
-    corpus's sketch, while a union of per-shard estimates is nothing. So the
-    sampler's own state travels beside them, which is what lets a merge apply
-    the corpus-wide gates a shard cannot judge from its own batches.
-
-    Written compactly rather than indented like its neighbours: a sketch is a
-    list of opaque digests, so there is nothing in here for a reader.
+    Merging requires sketches, not per-shard estimates. Store the opaque sketch
+    values compactly.
     """
     document = {name: stats.to_dict() for name, stats in column_stats.items()}
     return json.dumps(document, sort_keys=True, separators=(",", ":"))
@@ -352,11 +319,9 @@ def partition_weights(preset: Preset) -> np.ndarray:
 
 
 def partition_share_deviation(preset: Preset, truth: dict[str, dict[str, int]]) -> float | None:
-    """How far the realized byte share of the worst key is from its Zipf weight.
+    """Return the largest deviation from the requested partition byte shares.
 
-    Bytes rather than rows, because what a skewed key costs an engine is the
-    data it has to write for it, and a row-share match would hide a key whose
-    rows are systematically narrower.
+    Use bytes so varying row widths cannot conceal a skew mismatch.
     """
     total = sum(entry["encoded_bytes"] for entry in truth.values())
     if total == 0:
@@ -384,14 +349,10 @@ def finalize_corpus_json(
     shard_index: int,
     shard_count: int,
 ) -> dict[str, object]:
-    """Everything a consumer needs to know about the corpus, and the gates it passed.
+    """Build corpus metadata and enforce corpus-wide validation gates.
 
-    The gates run here rather than in a checker of their own because a corpus
-    that failed one must not exist to be picked up: a run scored against a
-    corpus whose skew or row width is not what it publishes reports a number
-    about a workload nobody asked for. A shard cannot judge a corpus-wide
-    statistic from its own batches, so the gates hold for the unsharded run,
-    and merging every shard is what applies them to a sharded one.
+    Validate before publishing ``corpus.json``. Individual shards defer these
+    gates until merge, when all batches are available.
     """
     row_count = sum(record.rows for record in records)
     encoded = sum(record.encoded_bytes for record in records)
@@ -406,8 +367,7 @@ def finalize_corpus_json(
     share_gate_enforced = share_dev is not None and preset.alpha > 0 and cold_rows >= PARTITION_SHARE_GATE_MIN_COLD_ROWS
     if share_dev is not None and share_gate_enforced and share_dev > PARTITION_SHARE_MAX_DEVIATION:
         raise ValueError(f"partition byte share deviates {share_dev:.2%} from the Zipf weights")
-    # Coverage is checked whatever the skew: it is all the shares can say when
-    # the gate above is off, and it is still a fault when they agree.
+    # Require every partition key even when the share gate is disabled.
     if shard_count == 1 and any(entry["rows"] == 0 for entry in truth.values()):
         raise ValueError("a partition key received no rows")
     sampled = max((stats.sampled_rows for stats in column_stats.values()), default=0)
@@ -423,9 +383,8 @@ def finalize_corpus_json(
     max_card_dev = max(cardinality_devs.values(), default=None)
     if shard_count == 1 and max_card_dev is not None and max_card_dev > CARDINALITY_MAX_DEVIATION:
         raise ValueError(f"realized column cardinality deviates {max_card_dev:.2%} from the declaration")
-    # The floor over the unbounded blobs rather than a per-column check, because
-    # one compressible payload is enough to cost the corpus the axis; a schema
-    # with no unbounded blob has nothing to judge and yields None.
+    # Use the minimum across unbounded blobs; one compressible blob fails the axis.
+    # No unbounded blobs means there is nothing to check.
     entropies = [
         column_stats[column.name].value_byte_entropy_bits_per_byte()
         for column in preset.columns

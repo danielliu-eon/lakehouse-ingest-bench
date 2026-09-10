@@ -12,10 +12,8 @@ scoring:
   freshness_bound_s: 60
   warmup_s: 60
 spark:
-  # The same four executor cores as the local smoke, on real nodes rather than
-  # threads inside one JVM — so unlike the local run this one actually spends
-  # `executor_mem_mb`, and it is doubled because a 2 GiB executor decodes and
-  # buffers Parquet in whatever the JVM's own overhead leaves it.
+  # Four executor cores, matching local smoke. Cluster executors have separate JVMs;
+  # allocate 4 GiB each for decoding and buffering.
   executors: 2
   executor_cores: 2
   executor_mem_mb: 4096

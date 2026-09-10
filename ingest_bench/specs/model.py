@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The run spec and the site config, as read off disk.
+"""Load and validate run specs and site configuration.
 
-Both loaders refuse what they do not recognise: an unknown key is a typo, and
-a typo in a spec is silent. A misspelled ``producer.shards`` would run one
-shard, publish a spec claiming several, and the two would never disagree
-loudly. Refusing costs an operator one error message and buys the guarantee
-that the published spec is the run that happened.
+Reject unknown keys so misspelled settings cannot silently use defaults.
 """
 
 from __future__ import annotations
@@ -22,48 +18,30 @@ from ingest_bench.kafka_auth import refuse_mechanism_alias
 from ingest_bench.specs import engines
 from ingest_bench.specs.env import refuse_literal_secrets
 
-# A run's name reaches a Kafka topic, an Iceberg table name and a Kubernetes
-# object name, so it is restricted to what all three accept — and bounded by
-# the shortest of the three limits.
-#
-# That is the 63-character `job-name` label the Job controller stamps on every
-# pod it creates. A run id is the name plus a 17-character stamp, and the
-# longest prefix a driver puts in front of one is `drop-topic-` at eleven —
-# so 35 characters of name is the most that can survive as a Job. Refused here,
-# because the failure otherwise lands after the topic, the table and the engine
-# already exist.
+# Allow names shared by Kafka, SQL, and Kubernetes. A 35-character spec name
+# plus a 17-character stamp and the longest Job prefix (`drop-topic-`, 11)
+# fits Kubernetes' 63-character job-name label.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,34}$")
 
 EXTERNAL = "external"
 HARNESS = "harness"
 ENGINE_OWNED = "engine"
 
-# The wire format a record's value carries. `avro` is the default because it is
-# what the corpus publishes and what nothing has to be told; `confluent` is the
-# same Avro binary behind the five-byte header of the Confluent wire format.
+# Raw Avro is the default; Confluent framing adds a five-byte schema header.
 VALUE_ENCODING_AVRO = "avro"
 VALUE_ENCODING_CONFLUENT = "confluent"
 VALUE_ENCODINGS = frozenset({VALUE_ENCODING_AVRO, VALUE_ENCODING_CONFLUENT})
 
-# The codec every batch is compressed with on the wire, from librdkafka's own
-# `compression.type` vocabulary so the spec's word reaches the client unchanged.
-# It belongs to the workload rather than to the producer: it decides how many
-# bytes of the offer cross the link, and a consumer that cannot decode it reads
-# no records at all — so a run states its codec and two runs compare at one.
+# Use librdkafka codec names. Compression is a workload setting shared by
+# compared runs.
 COMPRESSION_DEFAULT = "zstd"
 COMPRESSIONS = frozenset({"gzip", "lz4", "none", "snappy", COMPRESSION_DEFAULT})
 
-# librdkafka client properties are applied over the producer's own
-# configuration, so a `compression.*` property would frame the wire with a codec
-# the run's `facts.json` and `run.json` do not name. The codec is the run's, and
-# a client property that states one is a conflict rather than a preference — so
-# it is refused wherever such properties are read, rather than silently losing
-# to, or beating, `producer.compression`.
+# Reject compression overrides in client properties so the actual codec
+# matches the spec and published facts.
 _COMPRESSION_PROP_PREFIX = "compression."
 
-# The offsets, in seconds from the run's start, at which the scorer measures
-# the table's file geometry. Every run reports the same ladder unless it says
-# otherwise, so two runs' geometry columns line up.
+# Default geometry sample offsets, in seconds from run start.
 DEFAULT_GEOMETRY_OFFSETS_S: tuple[int, ...] = (600, 1200, 1800, 2700, 3600)
 
 _SPEC_KEYS = frozenset({"name", "engine", "corpus", "table", "kafka", "producer", "scoring", "external", "fleet"})
@@ -84,21 +62,14 @@ _KUBERNETES_KEYS = frozenset(
     }
 )
 
-# The identity a Spark run's driver and executors run as. Defaulted rather than
-# required, unlike the two beside it: a site written before Spark could be
-# staged on a cluster names two accounts and not three, and `deploy/aws/setup.sh`
-# creates this one under exactly this name.
+# Default the Spark service account for older site configs. AWS setup creates
+# this same account name.
 _SPARK_SERVICE_ACCOUNT = "ingest-bench-spark"
 
-# Public because `collect.validate` refuses the same prefix in a published
-# fleet's machine_type: a shipped external spec carries `YOUR_MACHINE_TYPE` for
-# its operator to replace, and two spellings of that rule would drift.
+# Share the placeholder prefix with result-publication validation.
 PLACEHOLDER = "YOUR_"
 
-# The corpus's partition column, which every shipped schema carries under this
-# name. It is the default partition source because a run that says nothing
-# about layout should still be partitioned the way the corpus was designed to
-# be read.
+# Default to the partition column used by shipped corpora.
 _PARTITION_DEFAULT_COLUMN = "partition_key"
 
 
@@ -114,10 +85,8 @@ def _as_mapping(value: object, where: str) -> dict[str, object]:
 
 
 def _as_str(value: object, where: str) -> str:
-    # A YAML scalar is not coerced: `version: 0.0` reads as a float whose text
-    # is not what was written, and `path-style-access: true` reads as a bool
-    # whose `str()` is `True`, which no catalog accepts. Quoting is the fix,
-    # and saying so is more useful than passing the wrong text along.
+    # Require quoted strings: YAML booleans and numbers can change spelling
+    # when coerced, producing invalid client properties or version labels.
     if not isinstance(value, str):
         raise ValueError(f"{where} must be a string; quote it in the YAML. Got {value!r}")
     return value
@@ -189,11 +158,10 @@ def _load_yaml(path: Path, where: str) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class TableSpec:
-    """How the table under test comes into being, and how it is laid out.
+    """Table ownership, partitioning, and properties.
 
-    ``managed_by`` decides who runs the DDL: the harness creates the table so
-    the run's properties are the ones the writer sees, and an engine that
-    insists on creating its own is given the equivalent statement instead.
+    ``managed_by`` selects whether the harness creates the table or supplies DDL
+    for the engine to execute.
     """
 
     managed_by: str
@@ -203,16 +171,11 @@ class TableSpec:
 
 @dataclass(frozen=True)
 class KafkaSpec:
-    """The topic's shape, which column becomes the message key, and the wire format.
+    """Topic partition count, message key, and value framing.
 
-    The key decides how records distribute across partitions, so it is part of
-    the workload rather than of the engine: two engines are comparable only
-    when they consumed the same skew.
-
-    ``value_encoding`` is part of the workload for the same reason. It says
-    what a value's bytes are: ``avro`` is the corpus's Avro binary as it
-    stands, and ``confluent`` is the same bytes behind a five-byte header
-    naming a registered schema — which is the only shape some engines read.
+    These settings define the workload and must match across compared engines.
+    ``avro`` sends corpus bytes directly; ``confluent`` adds a five-byte schema
+    registry header.
     """
 
     partitions: int
@@ -231,12 +194,9 @@ class ProducerSpec:
 
 @dataclass(frozen=True)
 class ScoringSpec:
-    """What the scorer measures against, and what the in-flight gate allows.
+    """Scoring settings and optional live-gate overrides.
 
-    The two gate fields are absent unless a run says otherwise, so the gate
-    keeps its own defaults rather than having them restated here — a default
-    written down twice drifts, and the copy nobody rereads is the one that
-    decides whether a run was abandoned.
+    Absent gate fields use the gate's own defaults.
     """
 
     freshness_bound_s: float
@@ -246,20 +206,13 @@ class ScoringSpec:
     gate_window_s: int | None
 
 
-# What a managed run whose knobs named no machine type reports in that column.
-# One word for every engine, because `collect.validate` refuses it by name: two
-# spellings meant one engine's non-disclosure failed the rule and the other's
-# passed it.
+# Shared sentinel for an undisclosed machine type; publication rejects it.
 MACHINE_TYPE_UNSPECIFIED = "unspecified"
 
 
 @dataclass(frozen=True)
 class FleetRole:
-    """One role in the compute an engine was given, for the cost column.
-
-    An external engine reports its own fleet because the harness never sees
-    it; a managed one is sized by its knobs and the roles are derived.
-    """
+    """Compute resources for one fleet role, used to calculate cost."""
 
     role: str
     count: int
@@ -405,11 +358,10 @@ def _fleet(raw: dict[str, object]) -> tuple[FleetRole, ...]:
 
 
 def load_run_spec(path: Path) -> RunSpec:
-    """The spec at ``path``, with its defaults filled in, or a refusal to read it.
+    """Load a run spec and apply defaults.
 
-    The engine block is carried through unread: its knobs belong to the engine
-    that declares them, and validating them here would need the engine's own
-    module — which a machine that only reads specs need not have installed.
+    Leave the engine block for its own validator so reading specs does not require
+    engine-specific dependencies.
     """
     raw = _load_yaml(path, "run spec")
     engine = _as_str(_required(raw, "engine", "spec"), "spec.engine")
@@ -463,23 +415,12 @@ def load_run_spec(path: Path) -> RunSpec:
 
 @dataclass(frozen=True)
 class KubernetesConfig:
-    """The cluster a run's workloads are submitted to, and how they are placed on it.
+    """Cluster placement, identities, and environment for run workloads.
 
-    One namespace and one service account per role per site, not per run: a
-    cloud grants an identity to a (namespace, service account) pair, and it is
-    granted once by whoever stood the cluster up — so a run that invented its
-    own namespace would have no credentials in it.
-
-    ``aws_region`` is absent on a cluster that is not on AWS. Where it is set it
-    reaches every pod as ``AWS_REGION``, which is what an AWS SDK reads when
-    nothing else names a region for it.
-
-    ``secret_name`` names a Kubernetes Secret in ``namespace`` whose every key
-    becomes an environment variable on every pod a run creates — the harness's
-    Jobs and the engine's fleet alike. It is how a ``${env:NAME}`` in this file
-    is answered: the reference travels through ConfigMaps and command lines,
-    and the value it names exists only in that Secret and in this file. Absent
-    where no property references a variable.
+    Namespaces and service accounts belong to the site so runs can reuse their
+    configured cloud identities. ``aws_region`` supplies the pod region when set.
+    ``secret_name`` names a Secret whose keys become environment variables in
+    harness and engine pods, resolving ``${env:NAME}`` references at runtime.
     """
 
     context: str
@@ -497,13 +438,9 @@ class KubernetesConfig:
 
 @dataclass(frozen=True)
 class SchemaRegistryConfig:
-    """The Confluent-API schema registry a `confluent` run registers with.
+    """Confluent-compatible registry URL and optional basic-auth configuration.
 
-    Bring your own: the harness makes one POST against whatever this names, so
-    a hosted registry, a self-managed one and the local stack's are the same
-    thing to it. ``basic_auth_user_info`` is the ``user:password`` a hosted one
-    authenticates with, and it stays as the site wrote it — a ``${env:NAME}``
-    reference is resolved at the call that needs it, never at load.
+    Preserve ``${env:NAME}`` references until the registration request needs them.
     """
 
     url: str
@@ -512,12 +449,7 @@ class SchemaRegistryConfig:
 
 @dataclass(frozen=True)
 class SiteConfig:
-    """Where a run's storage, broker and catalog are, and what compute costs.
-
-    Everything here is local to one operator, which is why it is not part of
-    the spec: a published result carries the spec verbatim, and this file's
-    bucket names and credentials never leave the machine that staged the run.
-    """
+    """Operator-specific storage, Kafka, catalog, cluster, and pricing settings."""
 
     corpus_root: str
     runs_root: str
@@ -532,12 +464,7 @@ class SiteConfig:
 
 
 def _refuse_placeholders(value: object, where: str) -> None:
-    """Refuse the example file's placeholders wherever they survived a copy.
-
-    An unedited placeholder otherwise reaches a bucket or a broker as a
-    hostname, and the failure surfaces as a name-resolution error from inside
-    whichever tool used it first rather than from the file that carries it.
-    """
+    """Reject unreplaced example placeholders with their configuration paths."""
     if isinstance(value, str):
         if PLACEHOLDER in value:
             raise ValueError(f"{where} still holds the {PLACEHOLDER} placeholder: {value!r}")
@@ -553,28 +480,19 @@ def _refuse_placeholders(value: object, where: str) -> None:
 
 
 def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
-    """The cluster block, or ``None`` where there is no cluster.
-
-    An empty block is that answer rather than a missing one: a local run has a
-    site config like any other, and it says so by declaring no cluster instead
-    of by leaving a reader to guess whether the key was forgotten.
-    """
+    """Read the Kubernetes block; return ``None`` when absent or empty."""
     where = "site.kubernetes"
     block = _block(raw, "kubernetes", "site")
     if not block:
         return None
     _refuse_unknown(block, _KUBERNETES_KEYS, where)
-    # An absent region is the answer for a cluster that is not on AWS. An empty
-    # one is no answer at all: it would reach a pod as an `AWS_REGION` that no
-    # SDK can resolve, which surfaces as a signing failure far from this file.
+    # Reject empty regions before they reach pod configuration.
     aws_region: str | None = None
     if "aws_region" in block:
         aws_region = _as_str(block["aws_region"], f"{where}.aws_region")
         if not aws_region:
             raise ValueError(f"{where}.aws_region is empty; leave the key out where there is no AWS region")
-    # Same shape, same reason: an empty name renders an `envFrom` naming no
-    # Secret, which the API server refuses when the Job is applied rather than
-    # here, where the file that asked for it is still in hand.
+    # Reject empty Secret names before Kubernetes resource validation.
     secret_name: str | None = None
     if "secret_name" in block:
         secret_name = _as_str(block["secret_name"], f"{where}.secret_name")
@@ -606,11 +524,9 @@ def _kubernetes_config(raw: dict[str, object]) -> KubernetesConfig | None:
 
 
 def _schema_registry_config(kafka: dict[str, object]) -> SchemaRegistryConfig | None:
-    """The registry block, or ``None`` where the site declares none.
+    """Read the registry block; return ``None`` when absent or empty.
 
-    Absent is the answer for a site whose runs are all raw Avro. A `confluent`
-    run against such a site is refused at staging by name, which is a better
-    error than a registration against an empty URL.
+    Staging rejects Confluent-framed runs if no registry is configured.
     """
     where = "site.kafka.schema_registry"
     block = _block(kafka, "schema_registry", "site.kafka")
@@ -635,9 +551,7 @@ def load_site(path: Path) -> SiteConfig:
     kafka = _as_mapping(_required(raw, "kafka", "site"), "site.kafka")
     _refuse_unknown(kafka, frozenset({"bootstrap_servers", "security", "schema_registry"}), "site.kafka")
     security = {} if "security" not in kafka else _as_string_map(kafka["security"], "site.kafka.security")
-    # The security block reaches a client verbatim, so the keys in it are not
-    # refused by name — with the one exception a client would accept and every
-    # reader here would then read past.
+    # Allow arbitrary client properties, except conflicting harness settings.
     refuse_mechanism_alias(security, "site.kafka.security")
     refuse_compression_props(security, "site.kafka.security")
     catalog = _as_mapping(_required(raw, "catalog", "site"), "site.catalog")
@@ -648,10 +562,8 @@ def load_site(path: Path) -> SiteConfig:
     catalog_props = _as_string_map(_required(catalog, "props", "site.catalog"), "site.catalog.props")
     kubernetes = _kubernetes_config(raw)
     registry = _schema_registry_config(kafka)
-    # Only where there is a cluster. A site with none is the local stack, whose
-    # credentials are a container image's published defaults and stay on the
-    # machine that ran it; a run on a cluster renders these into a ConfigMap
-    # and uploads them to the bucket, which a literal must not survive.
+    # Cluster properties are rendered into ConfigMaps and uploaded to storage,
+    # so require credential references. Local sites may use literal defaults.
     if kubernetes is not None:
         refuse_literal_secrets(security, "site.kafka.security")
         refuse_literal_secrets(catalog_props, "site.catalog.props")

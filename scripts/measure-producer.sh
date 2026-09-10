@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# One producer process against the local Kafka: MB/s of encoded bytes and
-# rows/s. `--epoch` names an hour in the past at `--speed 1000`, so every
-# batch is already due the instant the producer starts — nothing about the
-# corpus's own pacing can throttle it, and the wall clock measures the
-# producer alone rather than the corpus's schedule.
-#
-# Local only: the broker is a single container sharing this machine's cores
-# with everything else in the stack, so the figure is a per-process ceiling,
-# not a cluster's. See "Sizing the offer" in docs/corpus.md, which is where the
-# figure it prints is turned into a shard count.
+# Measure one producer process against local Kafka in encoded MB/s and rows/s. A past
+# epoch and speed 1000 make every batch immediately due, removing pacing delays.
+# The result includes contention from the shared local stack. Measure on the target
+# hardware before sizing a cluster run; see docs/corpus.md.
 set -euo pipefail
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"
@@ -57,19 +51,14 @@ compose up -d kafka minio minio-init
 log "generating the corpus"
 GEN_OUT="$(harness "gen-corpus --preset smoke --set duration_s=60 --set offered_bytes_per_s=50MB --set partition_count=64 --out s3://corpus --seed 1")"
 log "$GEN_OUT"
-# The generator's own report names the corpus directory it wrote, so nothing
-# here has to rediscover it by listing the bucket.
+# Use the generator's reported URI instead of listing the bucket.
 WROTE_LINE="$(printf '%s\n' "$GEN_OUT" | grep '^wrote ')"
 [[ -n $WROTE_LINE ]] || die "gen-corpus printed no 'wrote' line; see the output above"
 CORPUS_URI="${WROTE_LINE#wrote }"
 CORPUS_URI="${CORPUS_URI%%: *}"
 
-# corpus.json is the one place row_count and encoded_bytes are guaranteed to
-# agree with what the corpus actually holds, rather than with what the preset
-# asked for — a batch is filled in whole row blocks and can overshoot its
-# byte budget slightly. Single-quoting the -c argument means the two literal
-# strings it embeds need no escaping of their own; `sh -c` (the harness
-# image's entrypoint) never sees a quote character it has to reinterpret.
+# Read measured row and byte counts from corpus.json; whole-row batching can exceed the
+# preset's byte budget. Quote the Python command for the image's shell entrypoint.
 META_LINE="$(harness "python -c 'from ingest_bench import uri; import json; meta = json.loads(uri.read_text(uri.join(\"$CORPUS_URI\", \"corpus.json\"))); print(\"ROW_COUNT=%d ENCODED_BYTES=%d\" % (meta[\"row_count\"], meta[\"encoded_bytes\"]))'")"
 ROW_COUNT="$(printf '%s\n' "$META_LINE" | sed -n 's/.*ROW_COUNT=\([0-9]*\).*/\1/p')"
 ENCODED_BYTES="$(printf '%s\n' "$META_LINE" | sed -n 's/.*ENCODED_BYTES=\([0-9]*\).*/\1/p')"
@@ -77,8 +66,7 @@ ENCODED_BYTES="$(printf '%s\n' "$META_LINE" | sed -n 's/.*ENCODED_BYTES=\([0-9]*
 [[ $ENCODED_BYTES =~ ^[0-9]+$ ]] || die "could not read encoded_bytes from corpus.json; got: $META_LINE"
 log "corpus $CORPUS_URI: $ROW_COUNT rows, $ENCODED_BYTES encoded bytes"
 
-# A topic that already exists holds records from an earlier attempt at this
-# same measurement; drop it first rather than append to it silently.
+# Recreate the topic to exclude records from earlier measurements.
 log "creating the measure topic (8 partitions)"
 harness "python -c 'from ingest_bench import kafka_admin as k; k.delete_topic(\"kafka:9092\", \"measure\", client={}); k.create_topic(\"kafka:9092\", \"measure\", 8, 1, topic_config={}, client={})'"
 

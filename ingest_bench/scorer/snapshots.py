@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A table's shape and its commit history, and which data files each commit added.
+"""Read table schema, commit history, and added data files.
 
-The scorer never asks a writer what it wrote. Freshness is the wall time of a
-commit and exactness is the rows that commit made visible, so both are read out
-of the table's own metadata and manifests — the same surface any reader of the
-table sees. Trusting a writer's report instead would score the engine's
-bookkeeping rather than the table it produced. The column set is read the same
-way and for the same reason.
+Use table metadata and manifests as evidence of visible data, independently
+of the engine writer.
 """
 
 from __future__ import annotations
@@ -27,12 +23,7 @@ from ingest_bench.corpus.metadata import CorpusMetadata
 
 @dataclass(frozen=True)
 class SnapshotInfo:
-    """One commit, reduced to what the score is computed from.
-
-    No row counts: a summary's own are optional by spec and engines differ over
-    which they write, so the tally is built from the manifest entries the commit
-    added instead — which is also the surface any reader of the table sees.
-    """
+    """Commit metadata used by scoring, independent of optional summary row counts."""
 
     snapshot_id: int
     parent_id: int | None
@@ -42,7 +33,7 @@ class SnapshotInfo:
 
 @dataclass(frozen=True)
 class AddedFile:
-    """A data file, as the snapshot that added it describes it."""
+    """Data-file metadata from the snapshot that added it."""
 
     path: str
     file_format: str
@@ -55,38 +46,19 @@ def load_table(props: dict[str, str], table: str) -> Table:
 
 
 def read_metadata(table: Table) -> TableMetadata:
-    """The whole metadata document the catalog pointed at.
+    """Read full metadata through the table's configured IO.
 
-    A catalog may hand back a table object carrying only the current snapshot —
-    the REST protocol has a mode that does exactly that — while the score needs
-    every commit in order to time each batch's arrival. Parsing the document at
-    ``metadata_location`` again yields the full history whatever the catalog
-    chose to hydrate, and going through ``table.io`` keeps that read on the
-    credentials and endpoint the catalog handed out.
+    REST catalogs may hydrate only the current snapshot; scoring needs the
+    complete history in ``metadata_location``.
     """
     return FromInputFile.table_metadata(table.io.new_input(table.metadata_location))
 
 
 def check_table_schema(schema: Schema, meta: CorpusMetadata) -> list[str]:
-    """Every way the table's columns depart from the ones the corpus publishes.
+    """Find missing, renamed, retyped, or nullable corpus columns.
 
-    An engine that creates its own table chooses the column set, and a table
-    that dropped, renamed or retyped a column still carries the ids the tally
-    is built from — so the run would score exact and fresh against a table
-    that is not the one the corpus describes. Extra columns are allowed: the
-    contract is that the corpus's columns survive one to one, not that nothing
-    else may be added.
-
-    A corpus column must also be required, as the corpus's own schema declares
-    it. Nullability is not cosmetic: an optional column is encoded with
-    definition levels and is a candidate for a different page layout, so the
-    file geometry two runs are compared on stops being a fact about their
-    engines. It is also what would let a writer that dropped a value commit
-    anyway, and the loss would read as a null rather than as a fault.
-
-    ``str`` of an Iceberg primitive type is the same name the corpus publishes,
-    which is what lets the comparison stay a string one rather than needing a
-    second copy of the type map that built the table.
+    Allow extra columns, but require each corpus field to retain its name, type,
+    and required status. Compare published type names with Iceberg primitives.
     """
     held = {field.name: field for field in schema.fields}
     mismatches: list[str] = []
@@ -104,24 +76,16 @@ def check_table_schema(schema: Schema, meta: CorpusMetadata) -> list[str]:
 
 
 def _summary(snapshot: Snapshot) -> Summary:
-    """The commit's summary, which the operation and the row counts are read from.
-
-    A summary is optional only in v1 metadata, which no engine under test
-    writes. Refusing one that is missing keeps the operation a fact about the
-    commit: defaulting it would score a rewrite or a delete as an append.
-    """
+    """Read the required snapshot summary without defaulting its operation."""
     if snapshot.summary is None:
         raise ValueError(f"snapshot {snapshot.snapshot_id} carries no summary, so its operation is unknown")
     return snapshot.summary
 
 
 def snapshots_in_order(metadata: TableMetadata) -> list[SnapshotInfo]:
-    """Every snapshot the table holds, in commit order.
+    """Sort snapshots by commit sequence, then timestamp.
 
-    Sequence number leads the sort because the commit assigns it, while the
-    timestamp is stamped by whichever machine wrote the metadata. Two commits
-    landing inside one millisecond, or from clocks that disagree, would
-    otherwise be ordered by wall time rather than by what happened first.
+    Sequence numbers preserve order when writer clocks disagree or timestamps tie.
     """
     ordered = sorted(metadata.snapshots, key=lambda snapshot: (snapshot.sequence_number or 0, snapshot.timestamp_ms))
     infos: list[SnapshotInfo] = []
@@ -146,27 +110,16 @@ def snapshot_by_id(metadata: TableMetadata, snapshot_id: int) -> Snapshot:
 
 
 def added_files(metadata: TableMetadata, snapshot_id: int, io: FileIO) -> list[AddedFile]:
-    """The data files this snapshot added, and none it merely inherited.
+    """Yield data files newly added by this snapshot.
 
-    A manifest stays reachable from every snapshot after the one that wrote it,
-    so a snapshot's manifest list is the whole live table rather than its own
-    contribution. The entry's status and snapshot id are what attribute a file
-    to one commit; taking the manifest list whole would count every earlier file
-    again at each commit, and a table receiving a steady stream would score as
-    one growing quadratically.
-
-    Delete files are skipped: their record counts describe rows being removed,
-    and a position-delete file carries no row ids at all.
+    Filter by entry status and snapshot ID to avoid recounting inherited files.
+    Skip delete files, which do not contain the scored data rows.
     """
     added: list[AddedFile] = []
     for manifest in snapshot_by_id(metadata, snapshot_id).manifests(io):
-        # The entry filter below is the truth; this one is what keeps the score
-        # loop linear. A manifest is immutable, so an ADDED entry can only live
-        # in the manifest the same commit wrote — a manifest rewrite carries
-        # entries forward as EXISTING. Fetching the rest would parse every live
-        # manifest at every commit, and the read cost would grow with the
-        # square of the run. A manifest list old enough to omit the field is
-        # still parsed, since skipping it could drop a file.
+        # Skip manifests from other commits to keep reads linear. Rewritten manifests
+        # carry inherited entries as EXISTING. Parse older lists without this field
+        # to avoid dropping files; the entry filter remains authoritative.
         if manifest.added_snapshot_id is not None and manifest.added_snapshot_id != snapshot_id:
             continue
         for entry in manifest.fetch_manifest_entry(io, discard_deleted=True):

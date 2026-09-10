@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Resolving a rendered document's ``${env:NAME}`` references, inside the image.
+"""Resolve rendered environment references inside the Spark image.
 
-The renderer runs in the harness and the job runs inside the Spark image,
-minutes apart and with nothing else in common, so the one thing they must
-agree on lives here alone. This module imports nothing but the standard
-library: it is copied into the image beside the job, where neither the harness
-nor its dependencies exist.
-
-`engines/flink/script.py` carries the same pattern for the same reason, and
-`ingest_bench/specs/env.py` is the harness's own copy. A test holds the three
-together.
+Keep this module standard-library-only: the image lacks the harness package.
+Tests keep its placeholder syntax aligned with engines.flink.script and
+ingest_bench.specs.env.
 """
 
 from __future__ import annotations
@@ -22,13 +16,7 @@ _ENV_PLACEHOLDER = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def substitute_env(text: str) -> str:
-    """``text`` with every ``${env:NAME}`` replaced by that variable.
-
-    An unset variable is refused rather than substituted empty: an empty
-    password reaches a broker as an authentication failure raised from inside a
-    client library, which names neither the property that was empty nor the
-    file that asked for it.
-    """
+    """Replace environment references, rejecting unset variables by name."""
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -40,5 +28,5 @@ def substitute_env(text: str) -> str:
 
 
 def substitute_env_values(values: Mapping[str, str]) -> dict[str, str]:
-    """``values`` with every reference in them resolved, and nothing written back."""
+    """Return a copy of ``values`` with environment references resolved."""
     return {key: substitute_env(value) for key, value in values.items()}

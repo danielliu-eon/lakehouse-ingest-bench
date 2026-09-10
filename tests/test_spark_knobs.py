@@ -78,13 +78,7 @@ def test_a_spark_interval_is_a_count_and_a_whole_unit(interval: str, meta: metad
 
 @pytest.mark.parametrize("interval", ["10s", "500ms", "1m", "1h", "10 sec", "10seconds", "ten seconds", ""])
 def test_an_interval_spark_cannot_parse_is_refused_before_the_run(interval: str, meta: metadata.CorpusMetadata) -> None:
-    """Spark's interval parser takes no abbreviation, so nor does the knob.
-
-    `Trigger.ProcessingTime` parses the string as a SQL interval, which fails
-    on `10s` and on `10seconds` alike. Accepted here, either would start a run
-    whose query dies at its first micro-batch — with a topic and a table
-    already created.
-    """
+    """Spark parses SQL intervals; neither `10s` nor `10seconds` is accepted."""
     spec = _spec()
     with pytest.raises(ValueError, match="trigger_interval"):
         knobs.validate({**spec.engine_block, "trigger_interval": interval}, spec, meta)
@@ -105,8 +99,7 @@ def test_render_conf(meta: metadata.CorpusMetadata) -> None:
         "spark.sql.catalog.ice.s3.endpoint": "http://minio:9000",
         "spark.sql.catalog.ice.s3.path-style-access": "true",
         "spark.sql.catalog.ice.s3.secret-access-key": "password",
-        # The one property pyiceberg and Iceberg's Java library spell
-        # differently; every other key above carries through untouched.
+        # Translate the region key used by the Java Iceberg client.
         "spark.sql.catalog.ice.client.region": "us-east-1",
         "spark.executor.cores": "2",
         "spark.executor.memory": "2048m",
@@ -114,9 +107,7 @@ def test_render_conf(meta: metadata.CorpusMetadata) -> None:
         "spark.driver.memory": "2048m",
         "spark.sql.shuffle.partitions": "4",
         "spark.app.name": d.run_id,
-        # A site with no cluster is the local stack, whose object store has to
-        # be described a second time for the Hadoop filesystem the checkpoint
-        # path goes through.
+        # Local checkpoints use Hadoop S3A, which needs its own storage settings.
         "spark.hadoop.fs.s3a.endpoint": "http://minio:9000",
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.access.key": "admin",
@@ -130,7 +121,6 @@ def test_render_conf(meta: metadata.CorpusMetadata) -> None:
 
 
 def test_extra_spark_conf_is_applied_last(meta: metadata.CorpusMetadata) -> None:
-    """A run overrides any rendered setting without this module growing a knob."""
     site = _site()
     d = _derived(site, meta)
     override = {"spark.sql.shuffle.partitions": "16", "spark.executor.memoryOverhead": "1024m"}
@@ -141,7 +131,6 @@ def test_extra_spark_conf_is_applied_last(meta: metadata.CorpusMetadata) -> None
 
 
 def test_render_env(meta: metadata.CorpusMetadata) -> None:
-    """The submission line's shape, which is read before a session exists."""
     site = _site()
     files = knobs.render(_spec(), site, _derived(site, meta), meta)
     assert files[knobs.ENV_FILE] == "LOCAL_CORES=4\nDRIVER_MEM_MB=2048\n"
@@ -150,13 +139,8 @@ def test_render_env(meta: metadata.CorpusMetadata) -> None:
 def test_the_reader_schema_is_the_corpus_schema_with_zoneless_timestamps(
     meta: metadata.CorpusMetadata,
 ) -> None:
-    """`from_avro` has to yield the zoneless timestamp the table's column is.
-
-    Avro's `timestamp-millis` and `local-timestamp-millis` annotate the same
-    `long` and encode identically — the annotation is not on the wire — so the
-    rewrite reads the corpus's bytes unchanged while making Spark produce a
-    `TimestampNTZ` rather than a zoned instant, which would land in a
-    `timestamptz` column the table does not have.
+    """Both Avro timestamp annotations encode the same long. The reader annotation
+    must produce TimestampNTZ to match the Iceberg table.
     """
     published = {"type": "long", "logicalType": "timestamp-millis"}
     zoneless = {"type": "long", "logicalType": "local-timestamp-millis"}
@@ -175,8 +159,6 @@ def test_render_job(meta: metadata.CorpusMetadata) -> None:
     assert document == {
         "topic": d.run_id,
         "bootstrap": "kafka:9092",
-        # The run id, so a consumer group an abandoned run left behind names
-        # the run that left it.
         "group_id": d.run_id,
         "value_encoding": "avro",
         "table": f"ice.ingest_bench.t_{d.run_id.replace('-', '_')}",
@@ -198,11 +180,6 @@ def _confluent(spec: model.RunSpec) -> model.RunSpec:
 
 
 def test_the_shipped_confluent_spec_is_the_raw_one_plus_its_encoding() -> None:
-    """The two shipped Spark smokes differ in the framing and in nothing else.
-
-    A knob that drifted between them would make the pair a comparison of two
-    fleets rather than of two wire formats.
-    """
     raw = model.load_run_spec(ROOT / "runs" / "smoke-spark.yaml")
     framed = model.load_run_spec(ROOT / "runs" / "smoke-spark-confluent.yaml")
     assert raw.kafka.value_encoding == model.VALUE_ENCODING_AVRO
@@ -214,12 +191,6 @@ def test_the_shipped_confluent_spec_is_the_raw_one_plus_its_encoding() -> None:
 
 
 def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.CorpusMetadata) -> None:
-    """Spark reads either framing, so the encoding constrains the compute not at all.
-
-    The refusal is for an encoding the spec surface grew without a branch in
-    the job: it would otherwise reach the image and fail there, with a topic
-    and a table already created.
-    """
     spec = _spec()
     knobs.validate(spec.engine_block, spec, meta)
     knobs.validate(spec.engine_block, _confluent(spec), meta)
@@ -231,12 +202,6 @@ def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.C
 def test_the_job_document_carries_the_encoding_and_nothing_else_changes_with_it(
     meta: metadata.CorpusMetadata,
 ) -> None:
-    """The framing is the only difference between the two runs.
-
-    Both are decoded against the same reader schema and committed by the same
-    writer, so a second difference here would be a difference in the run rather
-    than in what the producer put in front of each value.
-    """
     site = _site()
     d = _derived(site, meta)
     raw = json.loads(knobs.render_job(_spec(), site, d, meta))
@@ -245,17 +210,13 @@ def test_the_job_document_carries_the_encoding_and_nothing_else_changes_with_it(
     assert {key: value for key, value in framed.items() if key != "value_encoding"} == {
         key: value for key, value in raw.items() if key != "value_encoding"
     }
-    # And the names are the harness's own, not a second spelling of them.
     assert stream_to_iceberg.VALUE_ENCODING_AVRO == model.VALUE_ENCODING_AVRO
     assert stream_to_iceberg.VALUE_ENCODING_CONFLUENT == model.VALUE_ENCODING_CONFLUENT
 
 
 def test_a_confluent_value_is_decoded_with_its_five_byte_header_dropped() -> None:
-    """The strip is the whole of what the encoding costs the job.
-
-    A Confluent value is a zero magic byte, then the schema's registry id as a
-    four-byte big-endian integer, then the Avro binary a raw run carries. So
-    the sixth byte is where the raw case starts, and `substring` is 1-based.
+    """The header is one magic byte plus a four-byte schema id. Spark substring
+    positions are 1-based, so the Avro record starts at position 6.
     """
     assert stream_to_iceberg.value_expression("avro") == "value"
     assert stream_to_iceberg.value_expression("confluent") == "substring(value, 6, length(value) - 5)"
@@ -271,13 +232,6 @@ def _written(files: dict[str, str], name: str, run_dir: Path) -> Path:
 
 
 def test_the_job_reads_back_what_the_renderer_wrote(meta: metadata.CorpusMetadata, tmp_path: Path) -> None:
-    """The two halves of the run directory's contract, checked against each other.
-
-    The renderer runs in the harness and the job runs inside the Spark image,
-    so nothing at run time would report a disagreement about a filename or a
-    key — the job would start, find no document, and fail with the topic and
-    the table already created.
-    """
     site = _site()
     d = _derived(site, meta)
     files = knobs.render(_spec(), site, d, meta)
@@ -305,7 +259,6 @@ def test_the_job_reads_back_what_the_renderer_wrote(meta: metadata.CorpusMetadat
 
 
 def test_a_limited_micro_batch_reaches_the_source(meta: metadata.CorpusMetadata, tmp_path: Path) -> None:
-    """The knob is an option and not a default, so both branches are checked."""
     site = _site()
     d = _derived(site, meta)
     spec = replace(_spec(), engine_block={**_spec().engine_block, "max_offsets_per_trigger": 5000, "fanout": True})
@@ -319,14 +272,8 @@ def test_a_limited_micro_batch_reaches_the_source(meta: metadata.CorpusMetadata,
 def test_the_checkpoint_location_is_the_querys_own_and_not_a_parent(
     meta: metadata.CorpusMetadata, tmp_path: Path
 ) -> None:
-    """One run has one checkpoint, whatever restarts it.
-
-    Spark's `spark.sql.streaming.checkpointLocation` is a parent path:
-    `createQuery` joins it with the query's name, and an unnamed query gets a
-    fresh random one on every start. The query would then resume from no state
-    after a driver restart, read the topic from `earliest` again, and duplicate
-    every row already committed. The writer's own option is used as it stands,
-    so it is where the location goes.
+    """The session checkpoint setting is a parent directory; an unnamed query gets
+    a new child on restart. Set the writer option directly to reuse the same state.
     """
     site = _site()
     d = _derived(site, meta)
@@ -334,21 +281,19 @@ def test_the_checkpoint_location_is_the_querys_own_and_not_a_parent(
     assert "spark.sql.streaming.checkpointLocation" not in conf
     written = json.loads(knobs.render_job(_spec(), site, d, meta))["write_options"]["checkpointLocation"]
     assert written == knobs.checkpoint_uri(site, d)
-    # And the job hands every write option to the writer, so it arrives there.
     parsed = stream_to_iceberg.read_job(_written(knobs.render(_spec(), site, d, meta), knobs.JOB_FILE, tmp_path))
     assert parsed.write_options["checkpointLocation"] == written
 
 
 def test_the_checkpoint_path_is_the_scheme_spark_reaches_storage_by(meta: metadata.CorpusMetadata) -> None:
-    """`s3://` is a vendor alias a stock Spark leaves unbound; S3A is the one it has."""
+    """Stock Spark uses S3A for checkpoints; the s3 scheme has no bound filesystem."""
     site = _site()
     d = _derived(site, meta)
     assert knobs.checkpoint_uri(site, d) == f"s3a://runs/{d.run_id}/checkpoints"
-    # Any other store keeps its own scheme: there is no second name for it.
+    # Only S3 needs a scheme translation.
     for runs_root, expected in (("gs://bench/runs", "gs://bench/runs"), ("/mnt/runs", "/mnt/runs")):
         elsewhere = replace(site, runs_root=runs_root)
         assert knobs.checkpoint_uri(elsewhere, d) == f"{expected}/{d.run_id}/checkpoints"
-        # And no S3A filesystem to configure for it either.
         conf = knobs.render_conf(_spec(), elsewhere, d)
         assert not [key for key in conf if key.startswith("spark.hadoop.fs.s3a.")]
 
@@ -418,13 +363,6 @@ def _aws_site() -> model.SiteConfig:
 
 
 def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetadata) -> None:
-    """The Java client's IAM properties, from the pseudo-key librdkafka reads.
-
-    The harness signals MSK IAM with `sasl.mechanism: OAUTHBEARER` plus its own
-    `aws.region`, which is what librdkafka needs. Spark's client is the Java
-    one, where the same authentication is a differently named mechanism and a
-    login module — so the signal is translated rather than passed through.
-    """
     site = replace(_aws_site(), kafka_security={**_MSK_SECURITY, "ssl.endpoint.identification.algorithm": "https"})
     d = _derived(site, meta)
     options = json.loads(knobs.render_job(_spec(), site, d, meta))["kafka_options"]
@@ -436,15 +374,12 @@ def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetad
         # A key that is not part of the signal still reaches the client.
         "kafka.ssl.endpoint.identification.algorithm": "https",
     }
-    # The pseudo-key is the harness's own and means nothing to any client; the
-    # region reaches the pod as AWS_REGION instead. OAUTHBEARER is what the
-    # signal said, not what the Java client is told.
+    # Remove the harness-only region key; pod environment supplies the SDK region.
     rendered = json.dumps(options)
     assert "aws.region" not in rendered and "OAUTHBEARER" not in rendered
 
 
 def test_a_site_that_is_not_on_msk_keeps_its_properties() -> None:
-    """Half the signal is not the signal, so nothing is translated."""
     for security in (
         {"security.protocol": "SASL_SSL", "sasl.mechanism": "OAUTHBEARER"},
         {"security.protocol": "SASL_SSL", "sasl.mechanism": "SCRAM-SHA-512", "aws.region": "eu-west-1"},
@@ -455,11 +390,8 @@ def test_a_site_that_is_not_on_msk_keeps_its_properties() -> None:
 
 
 def test_a_glue_catalog_reaches_storage_through_the_sites_warehouse(meta: metadata.CorpusMetadata) -> None:
-    """A catalog whose warehouse is an account id still names a FileIO.
-
-    Glue's REST endpoint takes the account as its warehouse, so the storage
-    implementation cannot be read off that property — the site's own warehouse
-    URI is what carries the scheme.
+    """Glue uses an account id as its catalog warehouse. Derive FileIO from the
+    site storage URI instead.
     """
     site = _aws_site()
     d = _derived(site, meta)
@@ -468,17 +400,14 @@ def test_a_glue_catalog_reaches_storage_through_the_sites_warehouse(meta: metada
     assert conf["spark.sql.catalog.ice.warehouse"] == "123456789012"
     for key in ("rest.sigv4-enabled", "rest.signing-name", "rest.signing-region"):
         assert conf[f"spark.sql.catalog.ice.{key}"] == site.catalog_props[key]
-    # A cluster reaches storage as the pod's own identity, so no static key is
-    # rendered for it however the site declares its catalog.
+    # Cluster storage uses pod identity, without rendered static keys.
     assert not [key for key in conf if key.startswith("spark.hadoop.fs.s3a.")]
-    # A site whose storage is on neither scheme names no implementation, and
-    # the catalog's own warehouse cannot make it look as though it did.
+    # An unsupported storage scheme must not select a FileIO implementation.
     nowhere = replace(site, warehouse="/mnt/warehouse")
     assert "spark.sql.catalog.ice.io-impl" not in knobs.render_conf(_spec(), nowhere, d)
 
 
 def test_render_sparkapplication(meta: metadata.CorpusMetadata) -> None:
-    """The whole document the operator is handed, parsed rather than matched."""
     spec = _spec()
     site = _aws_site()
     d = _derived(site, meta)
@@ -527,12 +456,8 @@ def test_render_sparkapplication(meta: metadata.CorpusMetadata) -> None:
 
 
 def test_both_halves_of_the_fleet_ask_for_as_much_cpu_as_they_cap_at(meta: metadata.CorpusMetadata) -> None:
-    """Guaranteed QoS, which is what makes a measured rate the engine's answer.
-
-    Spark requests `cores` and limits at `coreLimit`, and a pod whose CPU
-    request and limit differ is Burstable — cores the node may reclaim under
-    pressure. It sets the memory limit equal to the request itself, so the
-    core numbers are the whole of what this document decides.
+    """The operator sets equal memory requests and limits. Matching CPU requests
+    and limits completes the requirements for Guaranteed QoS.
     """
     site = _aws_site()
     d = _derived(site, meta)
@@ -543,14 +468,7 @@ def test_both_halves_of_the_fleet_ask_for_as_much_cpu_as_they_cap_at(meta: metad
 
 
 def test_the_executors_are_given_the_region_the_driver_is(meta: metadata.CorpusMetadata) -> None:
-    """An executor reaches the broker and the table itself, so it needs one too.
-
-    The Kafka client signs an MSK IAM token per connection and the table's data
-    files are written through Iceberg's own S3 client, both inside the
-    executors — and an SDK with no region resolves S3's global endpoint, which
-    is refused for a bucket that lives anywhere else. A cluster off AWS has no
-    region to name, and then neither half carries the variable.
-    """
+    """Executors create Kafka and S3 clients themselves, so they also need a region."""
     site = _aws_site()
     d = _derived(site, meta)
     elsewhere = replace(site, kubernetes=replace(_cluster(), aws_region=None))
@@ -562,12 +480,7 @@ def test_the_executors_are_given_the_region_the_driver_is(meta: metadata.CorpusM
 
 
 def test_the_documents_repeat_a_shared_value_rather_than_pointing_at_it(meta: metadata.CorpusMetadata) -> None:
-    """No YAML anchors: a manifest is read by people as well as by an API server.
-
-    The mount and the placement are the same values on both halves of the
-    fleet, and `yaml.safe_dump` renders one object reached twice as an anchor
-    and an alias.
-    """
+    """Shared Python objects can render as YAML anchors; repeat values for readability."""
     rendered = knobs.render_sparkapplication(_spec(), _aws_site(), _derived(_aws_site(), meta), meta, image_tag="t")
     assert "&id" not in rendered and "*id" not in rendered
 
@@ -578,13 +491,6 @@ def test_kubernetes_name_lowercases_a_run_id() -> None:
 
 
 def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> None:
-    """A run id reaches the two documents as itself everywhere it is not a name.
-
-    An RFC 1123 name is lowercase and a run id's stamp is not. The settings
-    carrying the id are not names Kubernetes reads, and lowercasing one of them
-    would point a run's checkpoints or its consumer group at something no other
-    reader of the run addresses.
-    """
     site = _aws_site()
     d = _derived(site, meta)
     conf = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))["spec"]["sparkConf"]
@@ -595,7 +501,6 @@ def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> 
 
 
 def test_render_job_configmap(meta: metadata.CorpusMetadata) -> None:
-    """Every file the run rendered, as the pods read them off a mount."""
     spec = _spec()
     site = _aws_site()
     d = _derived(site, meta)
@@ -620,8 +525,7 @@ def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.Corpu
         knobs.SPARKAPPLICATION_FILE,
         knobs.CONFIGMAP_FILE,
     }
-    # The tag names the image a run is submitted as, so a cluster run without
-    # one has no engine to start.
+    # Cluster rendering requires an image tag.
     with pytest.raises(ValueError, match="image_tag"):
         knobs.render(spec, site, d, meta)
     # No cluster, no Kubernetes documents — and nothing to refuse either.
@@ -639,12 +543,6 @@ def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.Corpu
 
 
 def test_the_pinned_spark_is_the_one_the_image_carries(meta: metadata.CorpusMetadata) -> None:
-    """Two pins drift, and the one nobody rereads is the one a cluster runs.
-
-    `sparkVersion` is a required field of a SparkApplication and the job's path
-    is inside the image, so both are statements about the Dockerfile — held to
-    it here rather than reread by whoever next edits one of the two files.
-    """
     dockerfile = (ROOT / "engines" / "spark" / "Dockerfile").read_text()
     assert f"FROM apache/spark:{knobs.SPARK_VERSION}-" in dockerfile
     site = _aws_site()
@@ -654,9 +552,7 @@ def test_the_pinned_spark_is_the_one_the_image_carries(meta: metadata.CorpusMeta
 
 
 def test_fleet(meta: metadata.CorpusMetadata) -> None:
-    # The word every engine reports for a spec that named no machine type, and
-    # the one `collect.validate` refuses: a published result discloses the
-    # machine behind its cost column or it is not publishable.
+    # An unspecified machine type is allowed for probes but rejected for publication.
     assert fleet.fleet(_spec()) == (
         model.FleetRole("driver", 1, 1.0, 2.0, model.MACHINE_TYPE_UNSPECIFIED),
         model.FleetRole("executor", 2, 2.0, 2.0, model.MACHINE_TYPE_UNSPECIFIED),
@@ -674,13 +570,6 @@ def test_fleet(meta: metadata.CorpusMetadata) -> None:
 def test_the_fleet_reads_the_secret_the_site_names_and_the_job_document_keeps_the_reference(
     meta: metadata.CorpusMetadata, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Kafka credential reaches the job through its own container's environment.
-
-    `job.json` travels: it is a ConfigMap both halves of the fleet mount and a
-    file in the run's prefix in the bucket. So it names the variable, both
-    halves are given the Secret that holds it, and the job resolves the one
-    against the other as it opens the source.
-    """
     security = {**_MSK_SECURITY, "sasl.password": "${env:IB_KAFKA_PASSWORD}"}
     site = replace(_aws_site(), kafka_security=security, kubernetes=replace(_cluster(), secret_name="bench-env"))
     d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -701,7 +590,6 @@ def test_the_fleet_reads_the_secret_the_site_names_and_the_job_document_keeps_th
 
 
 def test_a_cluster_that_names_no_secret_gives_neither_half_an_env_from(meta: metadata.CorpusMetadata) -> None:
-    """Nothing referenced, nothing to mount: the key is absent rather than empty."""
     site = _aws_site()
     d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     document = yaml.safe_load(knobs.render_sparkapplication(_spec(), site, d, meta, image_tag="t"))
@@ -711,13 +599,7 @@ def test_a_cluster_that_names_no_secret_gives_neither_half_an_env_from(meta: met
 def test_a_reference_spark_cannot_resolve_is_refused_rather_than_rendered(
     meta: metadata.CorpusMetadata,
 ) -> None:
-    """A Spark setting is read by the framework, and nothing substitutes one.
-
-    So a catalog credential written as a reference would reach the catalog as
-    the literal characters `${env:`. The resolvable half is the Kafka source's
-    options, which travel in `job.json` and which the job itself reads — and
-    the refusal says so.
-    """
+    """Only the Kafka source resolves environment references; Spark settings do not."""
     props = {**_aws_site().catalog_props, "rest.token": "${env:IB_CATALOG_TOKEN}"}
     site = replace(_aws_site(), catalog_props=props)
     d = derive.derive(_spec(), site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")

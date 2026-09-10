@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Send a corpus's batches into Kafka, each at the moment it is due.
+"""Publish corpus batches to Kafka on their recorded schedule.
 
-The producer is the offered side of the benchmark, so its only job is to be
-uninteresting: it sends exactly the bytes the corpus published, at the times
-the corpus published, and records when the broker acknowledged them. It
-decodes nothing — a batch file is already a sequence of message values — so
-what an engine reads is what the manifest is scored against.
-
-A delivery error ends the run. There is no resume: a batch half in the topic
-cannot be re-sent without either duplicating rows the engine already read or
-leaving a hole, and both would be scored as the engine's exactness rather than
-the producer's.
+Send encoded corpus values without decoding and record broker acknowledgements.
+Abort on delivery errors: retrying a partially delivered batch could duplicate
+rows or leave gaps that the scorer would attribute to the engine.
 """
 
 from __future__ import annotations
@@ -33,18 +26,15 @@ UPLOAD_INTERVAL_MS = 5_000
 # the send queue, so a long batch has to yield to it before the queue fills.
 POLL_EVERY_ROWS = 4096
 
-# The producer waits at most this long for the queue to drain, matching
-# `message.timeout.ms`: a frame that has not been acknowledged by then has
-# permanently failed, and waiting longer only delays saying so.
+# Match the configured message timeout when draining the queue.
 FLUSH_TIMEOUT_S = 120.0
 
 
 class FrameProducer(Protocol):
-    """The part of a Kafka producer this module uses, so a fake can stand in.
+    """Producer interface used for publishing and test doubles.
 
-    The delivery callback is keyword-only because a real producer's fourth
-    positional argument is the partition: passed positionally, the callback
-    would be taken for one and never be called.
+    Keep ``on_delivery`` keyword-only: librdkafka's fourth positional argument
+    is the partition.
     """
 
     def produce(
@@ -81,11 +71,7 @@ class ProduceArgs:
     shards: int
     seconds: int | None
     key_column: str | None
-    # Prepended to every value, and empty for the corpus's own raw Avro. The
-    # header rather than the encoding's name because the loop has nothing else
-    # to decide: which five bytes a `confluent` run carries is settled once, by
-    # the caller that knows the schema id, and a run with no header is the same
-    # loop with nothing to prepend.
+    # Prebuilt value header; empty for raw Avro.
     value_prefix: bytes
     publish_log_path: Path
     behind_max_ms: int
@@ -93,23 +79,15 @@ class ProduceArgs:
     # The codec the batches are compressed with, which the run's spec chose and
     # its `facts.json` published: a consumer is configured against it.
     compression: str
-    # librdkafka client properties from the site, with any environment
-    # indirection already resolved. Applied over the defaults below and then
-    # built through `kafka_auth`, so a site that needs authentication — MSK's
-    # IAM mechanism included — needs no new knob here.
+    # Resolved site properties, applied over defaults through `kafka_auth`.
     kafka_props: dict[str, str]
 
 
 def default_producer_config(bootstrap: str, compression: str) -> dict[str, object]:
-    """Durable, ordered, idempotent delivery, batched hard enough to saturate a link.
+    """Configure idempotent delivery with full acknowledgements and large buffers.
 
-    `acks=all` with idempotence is what makes an acknowledgement mean the row is
-    in the topic once, which is the claim every offered figure rests on. The
-    queue is sized to hold about a second of the largest offered rate so a brief
-    broker stall shows up as producer lag rather than as a full queue.
-
-    The codec is the caller's because it is the run's: `compression` is one of
-    librdkafka's `compression.type` values and is passed through as it stands.
+    Use the caller's compression codec. Buffering absorbs brief broker stalls;
+    acknowledgement timing records resulting producer delay.
     """
     return {
         "bootstrap.servers": bootstrap,
@@ -133,17 +111,10 @@ def produce_batch(
     queue_full_backoff_s: float = 0.005,
     value_prefix: bytes = b"",
 ) -> BatchOutcome:
-    """Send one batch and wait for every frame in it to be acknowledged.
+    """Send one batch and wait for all delivery reports.
 
-    The batch is not offered until its last acknowledgement arrives, so this
-    blocks on `flush` rather than letting the next batch overlap: an overlapping
-    batch would make the offered timeline the producer's queue depth instead of
-    the corpus's schedule.
-
-    ``value_prefix`` is prepended to each frame and counted in the bytes
-    reported: a frame is already the value's Avro binary, so a header is the
-    only thing between the corpus's bytes and the wire, and what was offered is
-    what the broker was actually sent.
+    Flush before the next batch so acknowledgement boundaries remain distinct.
+    Include ``value_prefix`` in each value and in the reported byte count.
     """
     state = {"acked": 0, "errors": 0, "first": 0, "last": 0}
 

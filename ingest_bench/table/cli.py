@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Command line for creating, inspecting and dropping a run's table.
+"""Commands to create, inspect, and drop run tables.
 
-The two lifecycle commands bracket a run: one creates the table the engine
-writes into and the other removes it, so a run leaves a catalog as it found it.
-`--ddl-only` covers the engines that insist on creating their own table — it
-renders the same schema and scheme as a statement for the engine to run, and
-touches no catalog. `table-metadata` is the third, read-only: it answers where
-the current metadata document is, which is what a teardown copies into a run's
-artifacts before the table is left behind.
+``--ddl-only`` renders a statement for engine-owned tables without contacting
+a catalog. ``table-metadata`` prints the current metadata URI for collection.
 """
 
 from __future__ import annotations
@@ -25,11 +20,9 @@ from ingest_bench.table.create import create_table, drop_table, parse_partition
 
 
 def add_catalog_arguments(parser: argparse.ArgumentParser, *, table_required: bool = True) -> None:
-    """The table and the properties that reach its catalog.
+    """Add table and catalog options.
 
-    ``table_required`` is off for a command that can read a copied metadata
-    document instead, where naming a table and naming a document are the two
-    exclusive ways of saying which table is meant.
+    Make the table optional for commands that also accept a metadata file.
     """
     parser.add_argument("--table", required=table_required, metavar="NAMESPACE.NAME", help="the table to act on")
     parser.add_argument(
@@ -92,10 +85,8 @@ def build_drop_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# `table-metadata` answers "no such table" as a code rather than as a traceback,
-# so a caller can tell a table that is not there from a catalog it could not
-# reach. A teardown has to act differently on those two: the first is the normal
-# end of a run that never created its table, the second is a failure to report.
+# Use a distinct exit code for an absent table so teardown can distinguish
+# it from catalog failures.
 TABLE_ABSENT = 3
 
 
@@ -112,8 +103,7 @@ def create(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     table = str(args.table)
     try:
-        # A malformed --table is an argument error rather than a catalog one, so
-        # it is resolved here instead of surfacing from inside the create.
+        # Validate the identifier before contacting the catalog.
         table_identifier(table)
         partition = parse_partition(str(args.partition))
         properties = parse_key_values([str(prop) for prop in args.table_prop], "--table-prop")
@@ -133,13 +123,7 @@ def create(argv: Sequence[str] | None = None) -> int:
 
 
 def metadata_location(argv: Sequence[str] | None = None) -> int:
-    """Print the table's current metadata document URI, and nothing else.
-
-    The catalog's answer rather than one assembled from the table's location:
-    a table holds every metadata document it has ever had, and only the catalog
-    says which of them is current. A table the catalog does not hold exits
-    ``TABLE_ABSENT``.
-    """
+    """Print the catalog's current metadata URI; exit ``TABLE_ABSENT`` if absent."""
     parser = build_metadata_parser()
     args = parser.parse_args(argv)
     table = str(args.table)

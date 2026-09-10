@@ -70,10 +70,7 @@ def test_iceberg_type_names() -> None:
 
 
 def test_every_schema_names_itself_after_its_file() -> None:
-    # A preset selects a schema by file name and `load_schema` reads only the
-    # columns, so the document's own `name` is never checked against the file
-    # it is in. A disagreement between them misidentifies the document in every
-    # place it is quoted.
+    # The loader selects schemas by filename, so test that the embedded name matches.
     documents = sorted(SCHEMAS.glob("*.json"))
     assert documents, "there are no workload schemas"
     for path in documents:

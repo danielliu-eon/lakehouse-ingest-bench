@@ -1,28 +1,20 @@
-# The local stack: a broker, an object store, an Iceberg catalog, and the
-# harness that drives them. Enough to take a run end to end on one machine,
-# which is what makes a change to the harness checkable without a cluster.
+# Local integration stack: Kafka, MinIO, Iceberg REST, schema registry, and harness.
 #
-# Profiles split what is always up from what a command brings up:
-#   (none)      kafka, minio, minio-init, iceberg-rest, schema-registry — the site
-#   flink       the engine cluster, scaled by `--scale flink-taskmanager=N`
-#   flink-job   the one-shot submitter, needing RUN_DIR
-#   spark       the Spark driver, which is the whole Spark fleet, needing RUN_DIR
-#   tools       the harness, run with `docker compose run --rm harness "<cmd>"`
+# Profiles:
+#   (none)      Kafka, storage, catalog, and registry
+#   flink       engine fleet, scaled with --scale flink-taskmanager=N
+#   flink-job   one-shot submitter; requires RUN_DIR
+#   spark       local Spark driver; requires RUN_DIR
+#   tools       harness commands via docker compose run --rm harness "<cmd>"
 #
-# Nothing here is measured. The Flink image is amd64 (PyFlink ships no Linux
-# aarch64 wheel), so on an arm64 machine it runs emulated; the Spark image is
-# multi-arch and runs natively.
+# Use local runs for correctness checks. Flink uses amd64 emulation on arm64;
+# Spark runs natively on either architecture.
 #
-# RUN_DIR is needed only by the two commands that mount it, the Flink submitter
-# and the Spark driver. Compose interpolates the whole model before it filters by
-# profile, so each engine file gives the variable a default rather than requiring
-# it; that default is a path that cannot hold a run, so only an actual submission
-# without RUN_DIR fails, and it fails by name.
+# Compose interpolates all profiles before filtering, so engine files give
+# RUN_DIR a nonexistent default. Only submissions that mount it require a value.
 name: ingest-bench
 
-# Relative paths inside an included file resolve against that file's own
-# directory, so the engine compose file's `context: ../..` is the repo root
-# whichever stack includes it.
+# Included-file paths are relative to that file, so ../.. remains the repo root.
 include:
   - path: ../../../engines/flink/compose.yaml
   - path: ../../../engines/spark/compose.yaml
@@ -30,11 +22,8 @@ include:
 services:
   kafka:
     image: apache/kafka:3.9.0
-    # Two client listeners, because an in-network client and a host client
-    # cannot be told the same address: PLAINTEXT advertises `kafka:9092` for
-    # containers, EXTERNAL advertises `localhost:29092` for the host. Both are
-    # published so either path works; a host tool must use 29092, since 9092
-    # answers on the host but hands back an address only a container resolves.
+    # Containers use kafka:9092; host clients must use localhost:29092.
+    # Port 9092 advertises an address only the Compose network can resolve.
     ports: ["9092:9092", "29092:29092"]
     environment:
       KAFKA_NODE_ID: 1
@@ -51,8 +40,7 @@ services:
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
       KAFKA_NUM_PARTITIONS: 4
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
-    # The broker answers on its port well before it will serve a metadata
-    # request, so what is probed is an API call rather than the socket.
+    # Probe the Kafka API; an open socket does not mean metadata is ready.
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 5s
@@ -62,16 +50,14 @@ services:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
     ports: ["9000:9000", "9001:9001"]
-    # Not secrets. This stack is local, its data is a throwaway corpus, and
-    # every other service here is configured against these two values.
+    # Shared local fixture credentials, not production secrets.
     environment: {MINIO_ROOT_USER: admin, MINIO_ROOT_PASSWORD: password}
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 5s
       retries: 30
-  # A one-shot bucket create. `service_completed_successfully` on it is what
-  # lets the catalog assume its warehouse bucket exists.
+  # Create buckets before the catalog starts.
   minio-init:
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
@@ -81,11 +67,8 @@ services:
   iceberg-rest:
     image: apache/iceberg-rest-fixture:1.9.2
     ports: ["8181:8181"]
-    # The fixture maps CATALOG_* to Iceberg catalog properties: the prefix
-    # goes, a single underscore becomes a dot and a doubled one becomes a
-    # dash. So CATALOG_S3_ENDPOINT is `s3.endpoint`, CATALOG_IO__IMPL is
-    # `io-impl` and CATALOG_S3_PATH__STYLE__ACCESS is `s3.path-style-access`.
-    # Its S3FileIO reads the credentials from the standard AWS variables.
+    # CATALOG_* strips the prefix, maps _ to . and __ to -.
+    # S3FileIO reads credentials from the standard AWS environment variables.
     environment:
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: admin
@@ -96,20 +79,10 @@ services:
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
     depends_on:
       minio-init: {condition: service_completed_successfully}
-  # A Confluent-API schema registry, for a run whose spec says
-  # `kafka.value_encoding: confluent`. Apicurio because it is Apache-2.0 and
-  # serves that API at `/apis/ccompat/v7`; its default storage is in-memory,
-  # which is what a stack that is torn down after every run wants.
-  #
-  # Up for every local run rather than behind a profile: a run that needs it
-  # needs it at staging, before any engine exists, and one container that
-  # registers nothing costs less than a profile every command has to remember.
-  #
-  # Its port is not published. Nothing on the host talks to it — the harness
-  # registers and the engine reads over the compose network — and 8080 is the
-  # one port a developer's machine is most likely to have taken already, which
-  # would fail `up` for every run rather than only for a `confluent` one.
-  # `docker compose exec schema-registry curl localhost:8080/...` reaches it.
+  # Apicurio serves the Confluent API at /apis/ccompat/v7 with in-memory storage.
+  # Start it before staging, even when no engine profile is active. Its port
+  # is internal to Compose to avoid host conflicts; inspect it with:
+  #   docker compose exec schema-registry curl localhost:8080/...
   schema-registry:
     image: quay.io/apicurio/apicurio-registry:3.0.15
     healthcheck:
@@ -117,10 +90,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
-  # Not a server: one container per command, as
-  # `docker compose run --rm harness "gen-corpus --preset smoke --out s3://corpus"`.
-  # The image's shell entrypoint is what makes that single quoted string a
-  # command line.
+  # One container per command. The shell entrypoint parses the quoted argument:
+  #   docker compose run --rm harness "gen-corpus --preset smoke --out s3://corpus"
   harness:
     profiles: [tools]
     build: {context: ../../.., dockerfile: Dockerfile}
@@ -135,11 +106,7 @@ services:
       - ./site.yaml:/site.yaml:ro
       - ./catalog.props:/catalog.props:ro
       - ../../../runs:/runs
-    # Healthy rather than started, all three: a table create against a catalog
-    # whose port is open but whose handler is not yet serving fails as a
-    # connection error, and the fixture image ships a `/v1/config` healthcheck
-    # that says exactly when that stops being possible. The registry is the
-    # same story — `stage` registers a schema against it before the run exists.
+    # Wait for healthy APIs before staging creates a table or registers a schema.
     depends_on:
       kafka: {condition: service_healthy}
       iceberg-rest: {condition: service_healthy}

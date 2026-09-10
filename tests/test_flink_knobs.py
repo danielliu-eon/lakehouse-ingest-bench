@@ -91,11 +91,6 @@ def _registry(user_info: str | None = None) -> model.SchemaRegistryConfig:
 
 
 def test_the_shipped_confluent_spec_is_the_raw_one_plus_its_encoding() -> None:
-    """The two shipped Flink smokes differ in the framing and in nothing else.
-
-    A knob that drifted between them would make the pair a comparison of two
-    fleets rather than of two wire formats.
-    """
     raw = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     framed = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
     assert raw.kafka.value_encoding == model.VALUE_ENCODING_AVRO
@@ -105,12 +100,6 @@ def test_the_shipped_confluent_spec_is_the_raw_one_plus_its_encoding() -> None:
 
 
 def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.CorpusMetadata) -> None:
-    """Either framing plans, so the encoding constrains the compute not at all.
-
-    The refusal is for an encoding the spec surface grew without a source
-    format to read it: it would otherwise reach the cluster and fail there,
-    with a topic and a table already created.
-    """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     knobs.validate(spec.engine_block, spec, meta)
     knobs.validate(spec.engine_block, _confluent(spec), meta)
@@ -120,28 +109,16 @@ def test_both_encodings_are_readable_and_a_third_one_is_refused(meta: metadata.C
 
 
 def test_every_encoding_the_spec_offers_states_its_format_and_its_options() -> None:
-    """Two tables over the encodings, and neither may be the shorter one.
-
-    The options belong to a format and not to "everything that is not the
-    other one": `avro.timestamp_mapping.legacy` is an `avro` key, and an
-    `avro-confluent` source given it fails validation on the cluster. So an
-    encoding added to the spec surface has to name its format and its options
-    rather than inheriting whichever branch happened to cover it.
+    """Format-specific options cannot be shared blindly: avro-confluent rejects
+    avro.timestamp_mapping.legacy.
     """
     assert set(knobs._SOURCE_FORMATS) == model.VALUE_ENCODINGS
     assert set(knobs._FORMAT_OPTIONS) == model.VALUE_ENCODINGS
 
 
 def test_a_confluent_run_reads_the_registry_format(meta: metadata.CorpusMetadata) -> None:
-    """`avro-confluent` against the site's registry, and the timestamp it plans.
-
-    The format builds its reader schema from the DDL under Flink's legacy Avro
-    timestamp mapping and declares no option to disable it, so the corpus's
-    `TIMESTAMP(3)` column is the widest one it can plan — and Avro resolves the
-    corpus's `timestamp-millis` writer against it as the same `long`.
-
-    The shipped spec rather than a raw one with its encoding replaced, so this
-    is the script an operator running that spec actually submits.
+    """Flink avro-confluent uses legacy timestamp mapping without an override.
+    TIMESTAMP(3) resolves against the corpus timestamp-millis long encoding.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink-confluent.yaml")
     site = _site(_registry())
@@ -159,7 +136,6 @@ def test_a_confluent_run_reads_the_registry_format(meta: metadata.CorpusMetadata
 
 
 def test_a_registry_behind_basic_auth_is_reached_with_the_site_credential(meta: metadata.CorpusMetadata) -> None:
-    """The credentials source has to be stated too, or the user info is ignored."""
     spec = _confluent(model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml"))
     site = _site(_registry("reader:secret"))
     d = derive.derive(spec, site, stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
@@ -169,11 +145,6 @@ def test_a_registry_behind_basic_auth_is_reached_with_the_site_credential(meta: 
 
 
 def test_a_confluent_run_against_a_site_with_no_registry_is_refused(meta: metadata.CorpusMetadata) -> None:
-    """Refused rather than rendered against an empty URL.
-
-    Staging refuses this pairing first, so this is the render's own guard for a
-    caller that reached it another way.
-    """
     spec = _confluent(model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml"))
     d = derive.derive(spec, _site(), stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
     with pytest.raises(ValueError, match="schema_registry"):
@@ -181,7 +152,6 @@ def test_a_confluent_run_against_a_site_with_no_registry_is_refused(meta: metada
 
 
 def test_a_raw_avro_run_names_the_plain_format_alone(meta: metadata.CorpusMetadata) -> None:
-    """The default framing reads without a registry, and says nothing of one."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, _site(), stamp="20260909T000000Z", corpus_dir=meta.name + "-x")
     sql = knobs.render_sql(spec, _site(), d, meta)
@@ -195,13 +165,8 @@ def test_ddl_type_mapping() -> None:
 
 
 def test_writers_spread_wider_than_readers(meta: metadata.CorpusMetadata) -> None:
-    """A fleet larger than the reader count states the writer parallelism itself.
-
-    The pinned Kafka connector takes no source-parallelism option, so the job
-    default holds the readers down and only a sink hint lifts the writers back
-    to the fleet — the one case where the two numbers disagree. Both sides of
-    that branch are checked here, because a hint emitted unconditionally would
-    be indistinguishable from a working one on the shipped spec.
+    """The pinned Kafka connector has no source-parallelism option. Use the job
+    default for readers and a sink hint only when writers need more parallelism.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     override = {"execution.checkpointing.min-pause": "9s"}
@@ -215,8 +180,7 @@ def test_writers_spread_wider_than_readers(meta: metadata.CorpusMetadata) -> Non
     # extra_flink_conf is applied last, so it overrides a setting named above.
     assert conf["execution.checkpointing.min-pause"] == "9s"
 
-    # One taskmanager gives four slots against four readers, so the numbers
-    # coincide and there is nothing for the hint to say.
+    # Equal reader and writer counts need no sink hint.
     level = replace(spec, engine_block={**spec.engine_block, "taskmanagers": 1})
     knobs.validate(level.engine_block, level, meta)
     assert "/*+ OPTIONS('distribution-mode' = 'hash') */" in knobs.render_sql(level, _site(), d, meta)
@@ -240,7 +204,6 @@ def test_render_refuses_a_catalog_flink_cannot_read(meta: metadata.CorpusMetadat
 
 
 def test_quotes_in_a_value_stay_inside_their_literal(meta: metadata.CorpusMetadata) -> None:
-    """A credential holding a quote must not end the literal that carries it."""
     site = replace(_site(), kafka_security={"sasl.password": "pa's's"})
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -248,12 +211,6 @@ def test_quotes_in_a_value_stay_inside_their_literal(meta: metadata.CorpusMetada
 
 
 def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMetadata) -> None:
-    """The two halves of the script contract, checked against each other.
-
-    The renderer runs in the harness and the submitter runs in the Flink
-    image, so nothing at run time would report a disagreement about where one
-    statement ends and the next begins.
-    """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, _site(), stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     statements = job.split_statements(knobs.render_sql(spec, _site(), d, meta))
@@ -268,14 +225,8 @@ def test_the_submitter_splits_what_the_renderer_joined(meta: metadata.CorpusMeta
 
 
 def test_the_external_example_is_what_the_renderer_produces(meta: metadata.CorpusMetadata) -> None:
-    """The walk-through's checked-in engine config has to describe these rows.
-
-    `docs/examples/external-flink/` is the config an operator starts by hand in
-    the external walk-through, so it is this renderer's output for the local
-    stack with the run's names left as placeholders. A column added to the
-    schema would otherwise leave it declaring a source that no longer matches
-    the bytes the producer writes, and the walk-through would fail as an Avro
-    decode error rather than as a document nobody updated.
+    """Keep the manual walkthrough configuration aligned with the corpus schema
+    and renderer, while preserving its run-name placeholders.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = model.load_site(ROOT / "deploy" / "compose" / "local" / "site.yaml")
@@ -367,13 +318,6 @@ def _aws_site() -> model.SiteConfig:
 
 
 def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetadata) -> None:
-    """The Java client's IAM properties, from the pseudo-key librdkafka reads.
-
-    The harness signals MSK IAM with `sasl.mechanism: OAUTHBEARER` plus its own
-    `aws.region`, which is what librdkafka needs. Flink's client is the Java
-    one, where the same authentication is a differently named mechanism and a
-    login module — so the signal is translated rather than passed through.
-    """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = replace(_aws_site(), kafka_security={**_MSK_SECURITY, "ssl.endpoint.identification.algorithm": "https"})
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -385,8 +329,7 @@ def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetad
         "'properties.sasl.client.callback.handler.class' = 'software.amazon.msk.auth.iam.IAMClientCallbackHandler'"
         in sql
     )
-    # The pseudo-key is the harness's own and means nothing to any client; the
-    # region reaches the pod as AWS_REGION instead.
+    # Remove the harness-only region key; pod environment supplies the SDK region.
     assert "aws.region" not in sql
     # OAUTHBEARER is what the signal said, not what the Java client is told.
     assert "OAUTHBEARER" not in sql
@@ -394,14 +337,12 @@ def test_msk_iam_replaces_the_signal_a_file_can_carry(meta: metadata.CorpusMetad
     assert "'properties.ssl.endpoint.identification.algorithm' = 'https'" in sql
     # The login module's own `;` must not end the statement that carries it.
     assert len(job.split_statements(sql)) == 3
-    # A key the translation answers for is not carried from the site as well:
-    # a WITH clause cannot hold the same option twice.
+    # Do not emit duplicate WITH keys after translating properties.
     doubled = replace(_aws_site(), kafka_security={**_MSK_SECURITY, "sasl.jaas.config": "handmade;"})
     assert knobs.render_sql(spec, doubled, d, meta).count("'properties.sasl.jaas.config'") == 1
 
 
 def test_a_site_that_is_not_on_msk_keeps_its_properties(meta: metadata.CorpusMetadata) -> None:
-    """Half the signal is not the signal, so nothing is translated."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     d = derive.derive(spec, _site(), stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
     for security in (
@@ -415,11 +356,8 @@ def test_a_site_that_is_not_on_msk_keeps_its_properties(meta: metadata.CorpusMet
 
 
 def test_a_glue_catalog_reaches_storage_through_the_sites_warehouse(meta: metadata.CorpusMetadata) -> None:
-    """A catalog whose warehouse is an account id still names a FileIO.
-
-    Glue's REST endpoint takes the account as its warehouse, so the storage
-    implementation cannot be read off that property — the site's own warehouse
-    URI is what carries the scheme.
+    """Glue uses an account id as its catalog warehouse. Derive FileIO from the
+    site storage URI instead.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = _aws_site()
@@ -429,14 +367,12 @@ def test_a_glue_catalog_reaches_storage_through_the_sites_warehouse(meta: metada
     assert "'warehouse' = '123456789012'" in sql
     for key in ("rest.sigv4-enabled", "rest.signing-name", "rest.signing-region"):
         assert f"'{key}' = '{site.catalog_props[key]}'" in sql
-    # A site whose storage is on neither scheme names no implementation, and
-    # the catalog's own warehouse cannot make it look as though it did.
+    # An unsupported storage scheme must not select a FileIO implementation.
     nowhere = replace(_aws_site(), warehouse="/mnt/warehouse")
     assert "io-impl" not in knobs.render_sql(spec, nowhere, d, meta)
 
 
 def test_render_flinkdeployment(meta: metadata.CorpusMetadata) -> None:
-    """The whole document the operator is handed, parsed rather than matched."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = _aws_site()
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -505,13 +441,6 @@ def test_kubernetes_name_lowercases_a_run_id() -> None:
 
 
 def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> None:
-    """A run id reaches the two documents as itself everywhere it is not a name.
-
-    An RFC 1123 name is lowercase and a run id's stamp is not, so the objects
-    are named by the lowercased id. The settings carrying the id are not names
-    Kubernetes reads, and lowercasing one of them would point a run's
-    checkpoints at a prefix no other reader of the run addresses.
-    """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = _aws_site()
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -523,12 +452,7 @@ def test_only_the_object_names_are_lowercased(meta: metadata.CorpusMetadata) -> 
 
 
 def test_the_amd64_pin_wins_and_a_cluster_off_aws_names_no_region(meta: metadata.CorpusMetadata) -> None:
-    """PyFlink has no aarch64 wheel, so the pin is not a site's to override.
-
-    The region is the other half: an SDK reads it when nothing else names one,
-    and a cluster on another cloud has none to name — so a pod there carries
-    neither of the two names it would otherwise be rendered under.
-    """
+    """PyFlink lacks an aarch64 wheel, so the site cannot override its amd64 pin."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     cluster = replace(_cluster(), aws_region=None, node_selector={"kubernetes.io/arch": "arm64"}, tolerations=[])
     site = replace(_aws_site(), kubernetes=cluster)
@@ -540,7 +464,6 @@ def test_the_amd64_pin_wins_and_a_cluster_off_aws_names_no_region(meta: metadata
 
 
 def test_a_run_can_still_redirect_its_checkpoints(meta: metadata.CorpusMetadata) -> None:
-    """`extra_flink_conf` is applied last, and the derived path is a default."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     elsewhere = {"state.checkpoints.dir": "s3://bench-bucket/checkpoints"}
     spec = replace(spec, engine_block={**spec.engine_block, "extra_flink_conf": elsewhere})
@@ -551,12 +474,8 @@ def test_a_run_can_still_redirect_its_checkpoints(meta: metadata.CorpusMetadata)
 
 
 def test_the_crd_fields_follow_the_effective_conf(meta: metadata.CorpusMetadata) -> None:
-    """A setting the operator restates as a CRD field is read back out of the conf.
-
-    The operator applies `job.parallelism` and the two `resource.memory`
-    fields over `spec.flinkConfiguration`, so a run whose `extra_flink_conf`
-    moved one of them would be honoured by the job it submitted and overruled
-    by the cluster running it.
+    """The operator overrides flinkConfiguration with job.parallelism and resource
+    memory fields. Those fields must reflect extra_flink_conf overrides.
     """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     override = {
@@ -577,7 +496,6 @@ def test_the_crd_fields_follow_the_effective_conf(meta: metadata.CorpusMetadata)
 
 
 def test_render_job_configmap(meta: metadata.CorpusMetadata) -> None:
-    """The two rendered files, as the pod reads them off a mount."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = _aws_site()
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")
@@ -599,8 +517,7 @@ def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.Corpu
         knobs.FLINKDEPLOYMENT_FILE,
         knobs.CONFIGMAP_FILE,
     }
-    # The tag names the image a run is submitted as, so a cluster run without
-    # one has no engine to start.
+    # Cluster rendering requires an image tag.
     with pytest.raises(ValueError, match="image_tag"):
         knobs.render(spec, site, d, meta)
     # No cluster, no Kubernetes documents — and nothing to refuse either.
@@ -615,13 +532,6 @@ def test_a_cluster_run_is_two_more_files_and_needs_an_image(meta: metadata.Corpu
 def test_the_fleet_reads_the_secret_the_site_names_and_the_script_keeps_the_reference(
     meta: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A registry credential reaches the engine through its container's environment.
-
-    The rendered script travels: it is a ConfigMap the pods mount and a file in
-    the run's prefix in the bucket. So it names the variable, the pod is given
-    the Secret that holds it, and the submitter resolves the one against the
-    other as it submits.
-    """
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     spec = replace(spec, kafka=replace(spec.kafka, value_encoding="confluent"))
     registry = model.SchemaRegistryConfig(url=REGISTRY_URL, basic_auth_user_info="${env:IB_REGISTRY_AUTH}")
@@ -635,15 +545,13 @@ def test_the_fleet_reads_the_secret_the_site_names_and_the_script_keeps_the_refe
     sql = knobs.render_sql(spec, site, d, meta)
     assert "'avro-confluent.basic-auth.user-info' = '${env:IB_REGISTRY_AUTH}'" in sql
     assert "'avro-confluent.basic-auth.credentials-source' = 'USER_INFO'" in sql
-    # The submitter is what turns the reference into the value, and only in the
-    # text it submits: the file it read still names the variable.
+    # Resolve references only in submitted text; keep the on-disk template unchanged.
     monkeypatch.setenv("IB_REGISTRY_AUTH", "svc:hunter2")
     assert "'avro-confluent.basic-auth.user-info' = 'svc:hunter2'" in script.substitute_env(sql)
     assert "svc:hunter2" not in sql
 
 
 def test_a_cluster_that_names_no_secret_gives_its_container_no_env_from(meta: metadata.CorpusMetadata) -> None:
-    """Nothing referenced, nothing to mount: the key is absent rather than empty."""
     spec = model.load_run_spec(ROOT / "runs" / "smoke-flink.yaml")
     site = _aws_site()
     d = derive.derive(spec, site, stamp="20260908T000000Z", corpus_dir=meta.name + "-x")

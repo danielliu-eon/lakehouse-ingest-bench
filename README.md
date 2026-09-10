@@ -1,55 +1,60 @@
 # lakehouse-ingest-bench
 
-Benchmark for streaming ingest from Apache Kafka into Apache Iceberg. It scores
-any engine that consumes a Kafka topic and appends to an Iceberg table on four
-measures: **keep-up**, whether it holds the rate it is offered; **freshness**,
-how long a row waits between being offered and being readable in the table;
-**exactness**, whether every row arrives once and intact; and **file geometry**,
-the size and shape of the files it leaves behind. Apache Flink and Apache Spark
-ship as managed engines; any other engine joins on the external tier, which the
-harness prepares a run for and never touches.
+Benchmark streaming ingest from Apache Kafka into Apache Iceberg. The harness
+scores engines on four measures:
 
-**Status.** Both engines run two ways: on Docker Compose locally, and on AWS
-(EKS, Amazon MSK, one S3 bucket, the Glue Iceberg REST catalog). Three recorded
-smoke runs are under [`docs/examples/`](docs/examples/). Not here yet: any
-published result in [`results/`](results/) — the hour-long 100 MB/s runs fill
-it, and `runs/aws-100mbs-skew-*.yaml` are their specs, sized as a probe ladder's
-start rather than as an answer — the 600 MB/s presets, tuned engine variants,
-and any GCP deployment. The harness reads and writes `gs://` paths, but the
-drivers refuse any root that is not `s3://`.
+- **Keep-up:** whether the engine sustains the offered rate.
+- **Freshness:** time from a row's scheduled offer to its visibility in the table.
+- **Exactness:** whether row counts and ID checksums match the offered corpus.
+- **File geometry:** the sizes and distribution of output files.
 
-## What makes a result fair
+Apache Flink and Apache Spark are included as managed engines. For other
+engines, the external tier prepares the topic and table for you to consume.
 
-The corpus is generated once and frozen, and every figure in its manifest is
-re-derived from the stored bytes by a reader that shares nothing with the
-encoder. The harness writes no source, sink or serializer for any engine, so a
-Flink result is Flink's. The scorer never asks a writer what it wrote: freshness
-and exactness come out of the table's own metadata and manifests, the surface
-any reader of the table sees. And `run_valid: true` is the only field that
-permits publishing a result — true only when the scoring loop reached a verdict
-rather than abandoning the run, and the table held the corpus's columns,
-drained, kept its p95 lag inside the spec's bound, was exact, and the producer
-kept to its schedule. [`docs/methodology.md`](docs/methodology.md) is how each
-of those is defined, and why.
+## Status
+
+Both managed engines support local Docker Compose and Kubernetes runs.
+AWS deployment options include Amazon MSK with the Glue Iceberg REST catalog,
+or Kafka and Lakekeeper inside the cluster. See
+[`deploy/aws/README.md`](deploy/aws/README.md) and
+[`deploy/k8s/stack/README.md`](deploy/k8s/stack/README.md).
+
+Three recorded smoke runs are in [`docs/examples/`](docs/examples/).
+No benchmark results have been published in [`results/`](results/) yet.
+The hour-long `runs/aws-100mbs-skew-*.yaml` specs provide starting fleets for
+capacity testing; their sizing has not been established by a published result.
+The 600 MB/s presets and tuned engine variants also await published results.
+There is no GCP deployment: the harness supports `gs://`, but the shell drivers
+require `s3://` storage roots.
+
+## How results are measured
+
+Each run uses a frozen corpus whose manifest is checked against stored bytes
+by an independent decoder. Engines use their standard connectors and
+serializers. The scorer reads the table's metadata, manifests and data files
+to measure committed rows independently of the writer.
+
+A headline result requires `run_valid: true`: scoring completed, the table
+preserved the required columns and drained, freshness met its p95 and maximum
+lag limits, exactness checks passed, and the producer kept to its schedule.
+[`docs/methodology.md`](docs/methodology.md) defines each measure and its limits.
 
 ## Quickstart
 
-You need Docker with Compose v2, plus `jq`, `yq` (mikefarah v4) and `curl` on
-the host, and `uv` for the tests and the tools outside a container. Give Docker
-16 GB of RAM.
+Install Docker with Compose v2, `jq`, `yq` (mikefarah v4), and `curl`.
+Use `uv` for tests and tools run outside containers. Give Docker 16 GB of RAM.
 
 ```bash
 git clone <this repository> && cd lakehouse-ingest-bench
-uv sync                                 # only for the tests and the tools outside a container
-scripts/smoke.sh                        # about ten minutes
-scripts/smoke.sh --engine spark         # the same run on Spark
+uv sync                                # host tools and tests
+scripts/smoke.sh                        # Flink; about ten minutes
+scripts/smoke.sh --engine spark
 ```
 
-That builds a five-minute 5 MB/s corpus, creates a Kafka topic and an Iceberg
-table, starts stock Flink on them, offers the corpus on its original timeline
-and scores what lands in the table. It ends with the verdict — these are the
-figures of the run recorded in
-[`docs/examples/smoke-flink/`](docs/examples/smoke-flink/):
+The smoke test generates a five-minute, 5 MB/s corpus, creates a Kafka topic
+and an Iceberg table, starts the engine, replays the corpus on its scheduled
+timeline, and scores the table. It prints a verdict like this abridged output
+from the [recorded Flink smoke run](docs/examples/smoke-flink/):
 
 ```json
 {
@@ -66,94 +71,72 @@ figures of the run recorded in
 }
 ```
 
-`run_valid: true` is the whole point: all 5,840,896 offered rows arrived exactly
-once, the table stayed inside that spec's 60-second freshness bound, and the
-producer kept to its schedule. `absorbed_at_offer_end: 0.969` says the engine
-held the offered rate with little standing debt. The block is abridged — the
-tool also prints `reason` and two backlog figures — and every artifact behind it
-stays in `runs/<run_id>/`.
+In this run, all 5,840,896 offered rows were accounted for by the exactness
+checks, freshness met the 60-second bound, and the producer kept to schedule.
+`absorbed_at_offer_end: 0.969` means 96.9% of offered rows were committed when
+the offer ended. Full output also includes `reason` and backlog figures.
+Artifacts remain in `runs/<run_id>/`.
 
-`--set duration_s=30` gives a 30-second corpus and a run in a few minutes, which
-is what CI uses. Two of its verdict fields then read oddly, for reasons
-[`docs/running.md`](docs/running.md) gives: a 30-second corpus is shorter than
-the freshness warmup and than one commit cycle.
+For a shorter check, add `--set duration_s=30`, as CI does. The shortened offer
+is shorter than the freshness warmup and may finish before the first commit;
+see [`docs/running.md`](docs/running.md) for how to interpret its verdict.
 
-**Nothing measured locally is a result.** The harness, the broker, the object
-store and the engine share one machine's cores, and on an arm64 host the engine
-image runs emulated. The smoke proves that the pieces agree about a run, not how
-fast an engine is.
+**Local smoke tests are integration checks, not performance results.**
+The harness, broker, object store and engine share one machine's resources.
+On arm64, images that require amd64 also run under emulation.
 
-## On a cloud
+## Run on a cluster
 
-A measured run needs a cluster, and the cluster is yours: neither deploy script
-creates, deletes or reconfigures it. Once per account,
-[`deploy/aws/README.md`](deploy/aws/README.md) takes an empty account to a
-corpus in a bucket — `setup.sh`, a filled-in `site.yaml`, `push-images.sh`,
-`gen-corpus.sh` — and its §Sizing the cluster counts the nodes a spec needs.
-Once per run, [`docs/running.md`](docs/running.md) is the drivers' order:
-`stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` → `finish.sh` → `purge.sh`,
-of which `scripts/run.sh <spec>` chains all but the last. Amazon MSK bills by
-the hour, idle or not, so tear it down between campaigns.
+You provide and manage the Kubernetes cluster. Follow
+[`deploy/aws/README.md`](deploy/aws/README.md) to configure the AWS services,
+fill in `site.yaml`, push images and generate a corpus. Its cluster-sizing
+section explains the resources a run needs.
 
-## In-cluster broker and catalog
+For each run, [`docs/running.md`](docs/running.md) describes this sequence:
+`stage.sh` → `launch.sh` → `gate.sh` → `teardown.sh` → `finish.sh` → `purge.sh`.
+`scripts/run.sh <spec>` runs all steps except purge. Tear down billable
+services such as Amazon MSK between campaigns.
 
-The broker and the catalog can run inside the cluster instead:
-[`deploy/k8s/stack/README.md`](deploy/k8s/stack/README.md) installs Apache
-Kafka through the Strimzi operator and Lakekeeper with its Postgres, and prints
-a `site.yaml` — copy `site.k8s.example.yaml`. Nothing about a run changes; the
-brokers want a node group of their own, so the engine's figure does not carry
-theirs.
+For an in-cluster deployment, start from `site.k8s.example.yaml` and keep
+brokers on dedicated nodes for measured runs. This separates broker resource
+use from engine measurements.
 
-## Publishing a result
+## Publish a result
 
-`scripts/finish.sh <run_id> --publish results/` writes one redacted JSON
-document under `results/<engine>/` and re-renders `results/RESULTS.md` from
-every document there. What a published result must satisfy is in
-[`results/README.md`](results/README.md); the document's own schema, and the
-five site roots redaction substitutes out of it, are in
-[`docs/results-format.md`](docs/results-format.md).
+`scripts/finish.sh <run_id> --publish results/` writes redacted JSON under
+`results/<engine>/` and regenerates `results/RESULTS.md`.
+[`results/README.md`](results/README.md) lists publication requirements;
+[`docs/results-format.md`](docs/results-format.md) defines the result schema
+and redaction rules.
 
 ## Repository layout
 
-| Path | What is in it |
+| Path | Contents |
 |---|---|
-| `ingest_bench/` | the harness: corpus generator, producer, scorer, table tools, spec loaders, manifest renderer |
-| `engines/<name>/` | everything specific to one managed engine, and the harness has no engine branches outside it |
-| `scripts/` | the local smoke and the cluster drivers |
-| `deploy/compose/local/` | the local stack |
-| `deploy/aws/`, `deploy/k8s/` | the cloud account and its manifests |
-| `workloads/` | the schemas and presets a corpus is built from |
-| `runs/` | `runs/*.yaml` are the shipped run specs, `runs/<run_id>/` one run's artifacts |
-| `results/` | published results, and the table generated from them |
+| `ingest_bench/` | Corpus generator, producer, scorer, table tools, spec loaders and manifest renderer |
+| `engines/<name>/` | Managed-engine implementation and configuration |
+| `scripts/` | Local smoke test and cluster run drivers |
+| `deploy/compose/local/` | Local stack |
+| `deploy/aws/`, `deploy/k8s/` | Cloud setup and Kubernetes manifests |
+| `workloads/` | Corpus schemas and presets |
+| `runs/` | Run specs (`*.yaml`) and per-run artifacts (`<run_id>/`) |
+| `results/` | Published results and their generated comparison table |
 
-## Where to go next
+## Documentation
 
-- [`docs/methodology.md`](docs/methodology.md) — every term, how freshness,
-  exactness, keep-up and geometry are defined, and what the verdict means.
-- [`docs/running.md`](docs/running.md) — the local smoke, CI, the cloud driver
-  sequence, the run directory.
-- [`docs/run-spec.md`](docs/run-spec.md) — every key of a run spec and of a site
-  config, its default and its effect.
-- [`docs/corpus.md`](docs/corpus.md) — the presets, the schema a corpus is
-  declared with, generation and its memory needs, sizing the offer.
-- [`docs/pitfalls.md`](docs/pitfalls.md) — the traps that cost a run, or produce
-  a figure that looks fine.
-- [`docs/adding-an-engine.md`](docs/adding-an-engine.md) — the six-rule contract
-  an engine must honour, the external tier that is the primary way in, a
-  walk-through, and what a managed engine's directory holds.
-- [`docs/results-format.md`](docs/results-format.md) and
-  [`results/README.md`](results/README.md) — the result document, and the rules
-  for publishing one.
-- [`deploy/aws/README.md`](deploy/aws/README.md) — what a run on AWS needs of an
-  account, what `setup.sh` builds, what it costs, and how to remove it.
-- [`engines/flink/README.md`](engines/flink/README.md) and
-  [`engines/spark/README.md`](engines/spark/README.md) — each managed engine:
-  what it runs, its knobs, and its traps.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the checks, and how to add a corpus
-  shape, an engine or a result.
+- [Methodology](docs/methodology.md): terms, measures and verdicts.
+- [Running](docs/running.md): local smoke tests, cluster drivers and artifacts.
+- [Run specs](docs/run-spec.md): run and site configuration reference.
+- [Corpora](docs/corpus.md): schemas, presets, generation and offer sizing.
+- [Pitfalls](docs/pitfalls.md): common run failures and misleading measurements.
+- [Adding an engine](docs/adding-an-engine.md): external and managed contracts.
+- [Result format](docs/results-format.md) and [publishing](results/README.md).
+- [AWS setup](deploy/aws/README.md): infrastructure, sizing and cleanup.
+- [Flink](engines/flink/README.md) and [Spark](engines/spark/README.md): setup,
+  tuning and limitations.
+- [Contributing](CONTRIBUTING.md): checks and extension guidelines.
 
 ## Licence
 
-Apache-2.0 — [`LICENSE`](LICENSE), with the copyright holder in
-[`NOTICE`](NOTICE), since the licence names no licensor of its own. Whoever
-publishes this fills its placeholders and the matching one in `pyproject.toml`.
+[Apache-2.0](LICENSE). Before publishing the project, fill in the copyright
+placeholders in [NOTICE](NOTICE) and the matching metadata in `pyproject.toml`.

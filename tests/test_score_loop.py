@@ -277,11 +277,7 @@ def test_the_freshness_reason_names_the_clause_that_failed() -> None:
 
 
 def _table_of(props: dict[str, str], name: str, fields: list[NestedField]) -> Table:
-    """A table holding exactly these columns, which `create_table` will not build.
-
-    Every shape the schema check exists to catch is one the harness refuses to
-    create, so they are created through the catalog directly.
-    """
+    """A table holding exactly these columns, which `create_table` will not build."""
     catalog = open_catalog(props)
     with suppress(NamespaceAlreadyExistsError):
         catalog.create_namespace("bench", properties={"location": f"{props['warehouse']}/bench"})
@@ -308,8 +304,7 @@ def test_check_table_schema_reads_the_columns_the_table_holds(tmp_path: Path, co
         "column 'event_time' is long in the table and timestamp in the corpus"
     ]
 
-    # An engine free to add a column of its own is still holding the corpus's,
-    # and an extra column is under no obligation to be required.
+    # Extra engine columns may be nullable.
     widened = _table_of(props, "shape4", [*fields, NestedField(900, "ingest_ms", LongType(), required=False)])
     assert snapshots.check_table_schema(widened.schema(), corpus) == []
 
@@ -335,8 +330,7 @@ def test_a_table_missing_a_corpus_column_voids_the_run(tmp_path: Path, corpus: m
     logs = tmp_path / "logs"
     logs.mkdir()
     _finished_producer(logs, records, epoch)
-    # Every row of the offer is in the table, so nothing but the column set can
-    # be what voids this run.
+    # All rows are present; only the schema mismatch should invalidate this run.
     for record in records:
         table.append(_rows_of(record, corpus).drop_columns(["event_type"]))
     args = score.ScoreArgs(
@@ -374,8 +368,7 @@ def test_an_optional_corpus_column_voids_the_run(tmp_path: Path, corpus: metadat
     logs = tmp_path / "logs"
     logs.mkdir()
     _finished_producer(logs, records, epoch)
-    # Every row of the offer is in the table and every value is present, so the
-    # column's nullability is the only thing left to void this run.
+    # All values are present; only declared nullability should invalidate this run.
     for record in records:
         table.append(_rows_of(record, corpus))
     args = score.ScoreArgs(
@@ -404,8 +397,7 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         seen.append(args)
         return 0
 
-    # The CLI reaches the loop through the same module object, so this is the
-    # function it will call.
+    # Patch the module attribute used by the CLI.
     monkeypatch.setattr(score, "run", capture)
     assert (
         cli.score(
@@ -450,12 +442,6 @@ def test_score_cli_maps_its_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_the_score_cli_refuses_a_reader_count_below_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A width below one is refused where it is typed rather than mid-run.
-
-    A pool of no threads raises at the first commit the reader reaches, which
-    is a fleet staged and an offer begun before anything says the argument was
-    what ended the run.
-    """
 
     def unreachable(args: score.ScoreArgs, clock: Clock, log: TextIO) -> int:
         raise AssertionError("the loop must not start on a width it cannot read with")
@@ -562,13 +548,7 @@ def test_a_snapshot_arriving_between_polls_is_tallied_once(tmp_path: Path, corpu
 
 
 def _many_file_commit(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, files: int) -> Table:
-    """A table whose one commit added ``files`` data files, all of one batch.
-
-    That is the shape a wide fleet writing a high-cardinality partition
-    produces, and it is built by writing the files and adding them in a single
-    commit because what matters here is the count of files one snapshot brings,
-    not which writer laid them out.
-    """
+    """A table whose one commit added ``files`` data files, all of one batch."""
     props = _props(tmp_path)
     table = create.create_table(props, f"bench.{name}", corpus, create.parse_partition("unpartitioned"), {})
     rows = _rows_of(metadata.read_manifest(corpus.uri)[0], corpus)
@@ -610,14 +590,6 @@ def _many_file_args(
 def test_a_commit_of_many_files_is_tallied_once_at_any_worker_count(
     tmp_path: Path, corpus: metadata.CorpusMetadata
 ) -> None:
-    """One worker or sixteen, the commit tallies to the same figures.
-
-    A batch is judged on a count of its ids and their sum modulo a prime, and
-    both are commutative — so the order the reads return in cannot change what
-    the tally holds, which is what lets each array be added the moment it
-    arrives. The two counts agreeing is that property asserted, and the batch
-    reading complete is every file applied exactly once.
-    """
     records = metadata.read_manifest(corpus.uri)
     file_count = 64
     figures: list[tuple[int, int, int, int]] = []
@@ -630,8 +602,7 @@ def test_a_commit_of_many_files_is_tallied_once_at_any_worker_count(
         state = score._load_inputs(args, clock, log)
         assert score._poll_once(state, clock, log) is True
         assert state.tally.complete(0), "a file read twice, or not at all"
-        # What the poll reports it read, which at either width is every file of
-        # the commit: the manifest's own count is the line below.
+        # Every file in the commit must be read at either worker count.
         assert f"files={file_count}" in log.getvalue().rsplit("POLL t=", 1)[1], log.getvalue()
         line = json.loads((args.out_dir / score.SNAPSHOTS_FILE).read_text().splitlines()[-1])
         figures.append(
@@ -643,13 +614,7 @@ def test_a_commit_of_many_files_is_tallied_once_at_any_worker_count(
 def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
     tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One unreadable file is one failed poll, whatever else the pool had in flight.
-
-    A file the poll did not apply is re-read by the retry, so the failure has
-    to belong to the poll rather than to the file: a poll that carried on
-    without it would tally the commit short and report the engine as having
-    lost the rows.
-    """
+    """A partial poll must not advance snapshot state; retry the whole commit."""
     _many_file_commit(tmp_path, corpus, "torn", files=64)
     args = _many_file_args(tmp_path, corpus, "torn", read_workers=16)
 
@@ -673,23 +638,13 @@ def test_a_read_that_fails_inside_the_pool_fails_the_poll_once(
 def test_a_read_phase_past_the_poll_interval_says_so(
     tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A poll longer than its own interval is announced, and a quick one is not.
-
-    Every poll carries what its read cost and how many files it read, and a
-    read phase past the interval gets a line of its own — because a reader that
-    cannot finish inside its interval is falling behind the table, and the only
-    other symptom of it is a verdict voided for staleness, which says nothing
-    about which side was slow.
-    """
     table = _many_file_commit(tmp_path, corpus, "slow", files=64)
     args = _many_file_args(tmp_path, corpus, "slow", read_workers=1, poll_interval_s=5.0)
     clock = StepClock(now_ms())
 
     def slowly(document: TableMetadata, snapshot_id: int, io_for_table: FileIO) -> list[snapshots.AddedFile]:
         added = snapshots.added_files(document, snapshot_id, io_for_table)
-        # One reader, so the poll pays for each of these files in turn. The
-        # clock is charged here rather than inside the reader because a
-        # StepClock is not thread-safe and the reads run in the pool.
+        # Charge fake time outside the reader pool because StepClock is not thread-safe.
         clock.sleep(0.1 * len(added))
         return added
 
@@ -747,9 +702,7 @@ def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
         warmup_s=0,
         freshness_bound_s=180.0,
     )
-    # Batch 3 was offered, so the run is still behind: reading the records
-    # before the done state would have declared the three-batch list final and
-    # scored this as a valid drained run.
+    # Read done state before records to avoid treating a stale three-batch list as final.
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["run_valid"] is False and summary["last_batch"] == 3 and summary["prefix"] == 2
@@ -760,12 +713,6 @@ def test_a_shard_finishing_mid_poll_is_not_scored_over_a_partial_offer(
 def test_the_upload_prefix_mirrors_the_artifacts_the_gate_reads(
     tmp_path: Path, corpus: metadata.CorpusMetadata
 ) -> None:
-    """Both files the gate reads are mirrored every poll, and everything at exit.
-
-    The gate runs beside the scorer rather than inside it, so on a cluster it
-    reads these two through the object store — which means a summary written
-    only locally is a run nothing can judge until it ends.
-    """
     props = _props(tmp_path)
     records = metadata.read_manifest(corpus.uri)
     table = create.create_table(props, "bench.mirror", corpus, create.parse_partition("unpartitioned"), {})
@@ -803,12 +750,6 @@ def test_the_upload_prefix_mirrors_the_artifacts_the_gate_reads(
 
 
 def test_a_failed_scorer_still_publishes_what_it_had(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
-    """The summary that says the reader is gone is the one a driver has to read.
-
-    A scorer whose catalog stopped answering is the case the mirror exists for:
-    without it a driver polling the prefix would keep reading the last summary
-    the scorer managed to upload, which said the run was still going.
-    """
     props = _props(tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -842,13 +783,8 @@ def test_a_failed_scorer_still_publishes_what_it_had(tmp_path: Path, corpus: met
 def test_a_table_its_engine_has_not_created_yet_is_an_empty_baseline(
     tmp_path: Path, corpus: metadata.CorpusMetadata
 ) -> None:
-    """An engine that creates its table from its first record has none at the start.
-
-    And the scorer starts first, because its first reading is the run's
-    baseline — so with `managed_by: engine` the load fails on every poll, the
-    launch gives up waiting for that reading, the producer never starts, and the
-    engine never sees a record to create the table from. The baseline for an
-    absent table is the honest one: zero rows, no snapshots, and keep polling.
+    """The scorer starts before production. Treat an engine-owned missing table as
+    empty so the producer can start and trigger its creation.
     """
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -866,8 +802,7 @@ def test_a_table_its_engine_has_not_created_yet_is_an_empty_baseline(
         table_managed_by="engine",
     )
     log = tmp_path / "score.log"
-    # It ends at the idle stop, having never seen a commit — the engine really
-    # did write nothing — but it published a reading on every poll first.
+    # Publish empty baseline readings until the idle timeout.
     assert score.run(args, StepClock(now_ms()), open(log, "w")) == 2
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["committed_rows"] == 0 and summary["snapshots"] == 0 and summary["prefix"] == -1
@@ -885,12 +820,7 @@ def test_a_table_its_engine_has_not_created_yet_is_an_empty_baseline(
 def test_a_harness_managed_table_that_is_absent_is_still_a_failure(
     tmp_path: Path, corpus: metadata.CorpusMetadata
 ) -> None:
-    """Staging created it, so its absence is a fault rather than a phase.
-
-    The bounded retry is what keeps a five-second catalog fault from ending a
-    three-hour run; past that the scorer raises, because a run whose table is
-    gone is not a run that simply stopped receiving commits.
-    """
+    """Staging already created this table. Retry transient catalog faults, then fail."""
     logs = tmp_path / "logs"
     logs.mkdir()
     args = score.ScoreArgs(
@@ -913,12 +843,6 @@ def test_a_harness_managed_table_that_is_absent_is_still_a_failure(
 
 
 def test_the_schema_is_checked_on_the_first_load_that_succeeds(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
-    """The check cannot run before the table exists, and must not be skipped either.
-
-    An engine that creates its own table chooses the column set, which is
-    exactly the case the check exists for — so it runs on the first load that
-    succeeds rather than on the first poll.
-    """
     props = _props(tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -948,12 +872,6 @@ def test_the_schema_is_checked_on_the_first_load_that_succeeds(tmp_path: Path, c
 
 
 def test_a_run_the_loop_abandoned_is_not_publishable(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
-    """`aborted` and `run_valid` cannot both be true, and readers check the second.
-
-    An idle stop with every batch landed reads as exact and fresh — the shape
-    of it is a shard whose `done` trailer never uploaded — so the two fields
-    would contradict each other in the same document.
-    """
     props = _props(tmp_path)
     records = metadata.read_manifest(corpus.uri)
     table = create.create_table(props, "bench.no_trailer", corpus, create.parse_partition("unpartitioned"), {})
@@ -978,8 +896,7 @@ def test_a_run_the_loop_abandoned_is_not_publishable(tmp_path: Path, corpus: met
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["state"] == "idle_stop" and summary["aborted"] is True
-    # Every row landed, so the figures beneath it are clean; the run is still
-    # not one a result may be published from.
+    # Clean row metrics do not make an abandoned run valid.
     exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
     assert exact["exact"] is True
     assert summary["run_valid"] is False

@@ -48,11 +48,7 @@ def _table(props: dict[str, str], name: str, *, partitioned: bool = True) -> Tab
 
 
 def _rows(first_id: int, parts: list[str], rows_per_part: int, payload_repeat: int) -> pa.Table:
-    """One append's rows, sized by its row count and payload width.
-
-    The payload is unique per row so Parquet cannot dictionary-encode it away,
-    which is what makes the files of one commit differ in size from another's.
-    """
+    """One append's rows, sized by its row count and payload width."""
     ids: list[int] = []
     part_values: list[str] = []
     payloads: list[str] = []
@@ -82,13 +78,7 @@ def _appends(table: Table) -> list[int]:
 
 
 def _retimed(metadata: TableMetadata, offsets_s: tuple[int, ...]) -> TableMetadata:
-    """The same table with its commits placed at chosen instants after the epoch.
-
-    An append stamps the wall clock, so four of them land inside a millisecond
-    of each other and no second-granularity ladder could fall between them.
-    Rewriting only the timestamps leaves every manifest list and data file where
-    it was, so the geometry read back is the real table's.
-    """
+    """The same table with its commits placed at chosen instants after the epoch."""
     ordered = sorted(metadata.snapshots, key=lambda snapshot: snapshot.sequence_number or 0)
     assert len(ordered) == len(offsets_s)
     retimed = [
@@ -99,11 +89,7 @@ def _retimed(metadata: TableMetadata, offsets_s: tuple[int, ...]) -> TableMetada
 
 
 def _final_sizes_on_disk(metadata: TableMetadata, io: FileIO) -> list[int]:
-    """Every live file's size at the last commit, as the filesystem reports it.
-
-    An independent reading of the figure the manifests carry, so a report built
-    from them is checked against the files rather than against itself.
-    """
+    """Every live file's size at the last commit, as the filesystem reports it."""
     last = snapshots.snapshots_in_order(metadata)[-1].snapshot_id
     files = geometry.data_files_at(metadata, last, io)
     return sorted(Path(info.path.removeprefix("file://")).stat().st_size for info in files)
@@ -167,13 +153,6 @@ def test_data_files_at_is_the_whole_live_set_not_one_commits_addition(tmp_path: 
 
 
 def test_the_prefix_ends_at_the_commit_a_reader_would_have_seen(tmp_path: Path) -> None:
-    """Each rung of the ladder reports the table as of one instant.
-
-    So the prefix ends at the last commit whose own timestamp is at or before
-    that instant, and never at the next one: answering with a commit a reader
-    could not yet have seen would report the table's geometry ahead of itself,
-    on the strength of a clock that disagrees.
-    """
     props = _props(tmp_path)
     table = _table(props, "prefix")
     _appends(table)

@@ -1,21 +1,17 @@
-# Lakekeeper with the chart's bundled Postgres. Authentication stays off — the
-# chart's default when no provider is named — and the default `allowall`
-# authorization stands: both are reachable only inside the cluster, and the
-# broker beside them is equally open.
+# Lakekeeper with bundled Postgres. Use the chart's unauthenticated, allowall
+# defaults; services are exposed only inside the cluster.
 serviceAccount:
   create: true
-  # Fixed, because a pod identity association is per (namespace, account).
+  # Keep the name stable for its namespace/service-account Pod Identity binding.
   name: ingest-bench-catalog
 
-# The migration Job runs before the catalog can start. At the chart's default
-# it is a post-install hook, which Helm runs only after `--wait` returns — so
-# the catalog would never become ready inside the wait. `true` makes it an
-# ordinary release resource instead.
+# Create migrations as ordinary resources so they can run during Helm's wait.
+# A post-install hook would wait for a catalog that cannot start without it.
 helmWait: true
 
 catalog:
   replicas: 1
-  # The cloud's own switches and environment, from the hook.
+  # Read cloud-specific settings from the hook.
   config: {{ requiredEnv "STACK_CATALOG_CONFIG_JSON" }}
   extraEnv: {{ requiredEnv "STACK_CATALOG_ENV_JSON" }}
   nodeSelector: {{ requiredEnv "CATALOG_NODE_SELECTOR" }}
@@ -25,11 +21,10 @@ catalog:
       cpu: 500m
       memory: 1Gi
   dbMigrations:
-    # A new Job per revision, so a re-run does not accumulate them.
+    # Remove completed migration Jobs after ten minutes.
     ttlSecondsAfterFinished: 600
 
-# The key the catalog encrypts stored secrets with, from a Secret setup.sh
-# makes once and never regenerates: a new key would lose what is already stored.
+# Reuse setup.sh's encryption key so previously stored secrets remain readable.
 secretBackend:
   type: Postgres
   postgres:

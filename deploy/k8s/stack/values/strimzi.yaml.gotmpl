@@ -1,5 +1,4 @@
-# The operator watches the stack's namespace alone, so a second Kafka cluster
-# elsewhere on the cluster is not this operator's.
+# Watch only the stack namespace, leaving other namespaces to their operators.
 watchNamespaces:
   - {{ requiredEnv "NAMESPACE" }}
 resources:

@@ -1,21 +1,9 @@
-# One hour of offer at 100 MB/s over the skewed corpus, on a cluster. The Spark
-# sibling of `aws-100mbs-skew-flink-hash.yaml`: same corpus, same topic, same
-# offer, so the two runs differ only in the engine that read them.
-#
-# The fleet below is where the probe ladder starts, not a result: it is sized
-# from the corpus and the topic, and the run it produces is what says whether it
-# is enough. Raise `executors` and re-run until the gate stops reporting
-# UNDERSIZED, and publish the fleet that passed — a shipped spec's fleet is the
-# one that produced a committed result, so this file's is a starting point until
-# a result stands behind it.
-#
-# Sixteen executor cores against 32 topic partitions, because Spark's Kafka
-# source spreads a topic's partitions over whatever cores it has: a fleet wider
-# than the topic costs idle cores rather than buying a reader. One shuffle
-# partition per core, which `hash` then distributes the writers over.
-#
-# Fifteen four-vCPU nodes, this fleet plus the harness's own pods and the
-# 2-CPU driver among them: see "Sizing the cluster" in deploy/aws/README.md.
+# Spark counterpart to aws-100mbs-skew-flink-hash.yaml, with the same corpus, topic
+# configuration and offer. This fleet is a capacity-testing starting point. Increase
+# executors while the gate reports UNDERSIZED; publish the configuration that passes.
+# Sixteen executor cores read 32 topic partitions. The default shuffle count is one
+# partition per core. See deploy/aws/README.md, Sizing the cluster, for engine and harness
+# resources.
 name: aws-100mbs-skew-spark-hash
 engine: spark
 corpus: events-100mbs-skew

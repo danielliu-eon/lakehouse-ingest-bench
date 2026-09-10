@@ -1,7 +1,6 @@
-# The three releases of the in-cluster stack, read from the environment
-# deploy/k8s/stack/setup.sh builds; run through it, not on its own, because
-# the identities, the storage class and the catalog's bootstrap are not
-# releases. `requiredEnv` refuses a missing name by name.
+# Install the stack's three releases using setup.sh's environment. Run through
+# setup.sh so identities, storage, and catalog bootstrap are also configured.
+# requiredEnv rejects missing values.
 repositories:
   - name: strimzi
     url: quay.io/strimzi-helm
@@ -22,9 +21,8 @@ releases:
     values:
       - values/strimzi.yaml.gotmpl
 
-  # After the operator, and waited on: the Kafka and KafkaNodePool kinds exist
-  # only once the operator's CRDs are installed. Helm's wait knows nothing of
-  # the CR's own readiness; setup.sh waits on that.
+  # Install the operator's CRDs first. setup.sh separately waits for Kafka CR
+  # readiness, which Helm's wait does not track.
   - name: kafka
     namespace: {{ requiredEnv "NAMESPACE" }}
     chart: ./charts/kafka

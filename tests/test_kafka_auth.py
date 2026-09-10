@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The one authentication the harness signs rather than passes through.
-
-Every assertion here runs without an AWS account: the token provider is
-injected, and the two tests of the real import path bind the signer in
-`sys.modules` themselves. That is deliberate — a suite that needed a cloud to
-check the arithmetic of an expiry would not be run.
-
-The admin client's token priming is tested here too, against a fake client that
-serves the callback from `poll` as librdkafka does. `tests/test_kafka_admin.py`
-holds the half of that behaviour a real broker is needed for.
-"""
+"""Test MSK token signing and admin-client priming with injected providers."""
 
 from __future__ import annotations
 
@@ -115,13 +105,6 @@ def test_another_mechanism_is_passed_through() -> None:
 
 
 def test_the_plural_spelling_of_the_mechanism_is_refused() -> None:
-    """librdkafka takes both names, and everything here reads one of them.
-
-    The plural is librdkafka's own and the singular its alias, so a site that
-    wrote the plural would connect — and quietly lose the MSK IAM translation
-    with it, since that is keyed on the name this harness reads. The refusal
-    names the spelling to write instead.
-    """
     plural = {"security.protocol": "SASL_SSL", "sasl.mechanisms": "OAUTHBEARER", "aws.region": REGION}
     with pytest.raises(ValueError, match="'sasl.mechanism'"):
         kafka_auth.librdkafka_config(plural, token_provider=token_provider([]))
@@ -132,7 +115,6 @@ def test_no_security_at_all_is_an_empty_configuration() -> None:
 
 
 def test_non_string_properties_survive_the_pass_through() -> None:
-    """A producer's own defaults are numbers and booleans, and go through this too."""
     assert kafka_auth.librdkafka_config({"linger.ms": 5, "enable.idempotence": True}) == {
         "linger.ms": 5,
         "enable.idempotence": True,
@@ -162,12 +144,7 @@ class FakeMetadata:
 
 
 class FakeAdminClient:
-    """An admin client that serves the token callback from `poll`, as librdkafka does.
-
-    It refuses a metadata request before the callback has run, which is what an
-    unauthenticated client does after waiting out its timeout, and it serves the
-    callback on the second poll so a caller that polled once would not pass.
-    """
+    """An admin client that serves the token callback from `poll`, as librdkafka does."""
 
     def __init__(self, config: dict[str, object]) -> None:
         self.config = config

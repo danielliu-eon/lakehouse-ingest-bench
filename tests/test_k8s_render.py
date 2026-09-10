@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The manifests a driver applies have to render, and to render into what a Job needs.
-
-Nothing here reaches a cluster: rendering is string substitution, and the whole
-of what can go wrong before `kubectl` sees a document is a marker nobody gave a
-value for, a value nobody's marker asked for, and a rendered document that is
-not the Job the driver meant. Each of those costs an operator a failed apply
-minutes into a run, and each is checkable with no cluster at all.
-
-Every template's markers are enumerated here by name rather than discovered, so
-a template that gains one is a failure in this file instead of an unrendered
-`__NAME__` reaching the API server.
+"""Validate manifest substitution and rendered Job structure without a cluster.
+Enumerate expected markers so new template inputs require an explicit test update.
 """
 
 from __future__ import annotations
@@ -25,9 +16,7 @@ from ingest_bench.k8s.render import MARKER_RE, main, render_template
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "deploy" / "k8s"
 
-# One value per marker, shaped like the real ones: a command carrying the shell
-# variable the indexed Jobs expand, and placement values as the JSON flow style
-# the drivers render maps and lists in.
+# Use realistic command and JSON placement values for every marker.
 SAMPLE = {
     "NAME": "a-job",
     "NAMESPACE": "a-namespace",
@@ -70,21 +59,14 @@ _ONE_OFF = frozenset(
     }
 )
 _INDEXED = _ONE_OFF | {"COUNT"}
-# The two Jobs whose peak memory follows the preset's batch bytes rather than
-# the pod count: the generator holds a whole batch while it encodes one, and a
-# producer shard reads one whole batch object and decompresses it whole.
+# Generator and producer memory scale with batch size, not shard count.
 _BATCH_SIZED = _INDEXED | {"MEMORY"}
 _MOUNTED = _ONE_OFF | {"SPEC_CONFIGMAP", "SITE_CONFIGMAP"}
 
-# The one shipped template that is not a harness Job: a Deployment and a
-# Service, applied by deploy/aws/setup.sh rather than by a run driver, and
-# checked in tests/test_scripts.py beside the script that applies it.
+# The registry is a Deployment and Service; test it with setup.sh in test_scripts.py.
 NOT_A_JOB = frozenset({"schema-registry.yaml.tmpl"})
 
-# The Jobs nothing deletes, which expire on their own. The two `gen-corpus.sh`
-# creates: it removes the previous Job of a name on its way in rather than the
-# one it just finished, so without this a namespace accumulates one generation
-# and one merge. Every other Job here is deleted by the driver that made it.
+# Generation and merge Jobs need TTLs because their driver does not delete them on exit.
 EXPIRING = frozenset({"corpus-gen-job.yaml.tmpl", "harness-job.yaml.tmpl"})
 EXPIRY_S = 3600
 
@@ -137,12 +119,6 @@ def test_a_marker_with_no_value_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_variable_that_matched_nothing_is_refused(tmp_path: Path) -> None:
-    """A misspelled `--set` is a value that silently did not reach the manifest.
-
-    Left unchecked it renders a Job with the template's own default for
-    whatever it was meant to set, which is the class of mistake that puts a
-    pod on the wrong nodes or under the wrong identity.
-    """
     template = tmp_path / "t.yaml.tmpl"
     template.write_text("name: __NAME__\n")
     with pytest.raises(ValueError, match="NAMESPACE"):
@@ -150,12 +126,7 @@ def test_a_variable_that_matched_nothing_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_value_holding_a_marker_is_not_rendered_again(tmp_path: Path) -> None:
-    """Substitution is one pass, so a value is data and never a template.
-
-    A command line or a node-selector key may legitimately hold the marker
-    syntax, and a second pass over the rendered document would either refuse
-    it or replace part of a value the caller meant literally.
-    """
+    """Substitute once so marker-like text in a value remains literal data."""
     template = tmp_path / "t.yaml.tmpl"
     template.write_text("args: __COMMAND__\n")
     assert render_template(template, {"COMMAND": "echo __NAME__"}) == "args: echo __NAME__\n"
@@ -192,9 +163,7 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
     assert metadata["name"] == "a-job" and metadata["namespace"] == "a-namespace"
 
     spec = _mapping(document["spec"])
-    # Zero retries: a Job that reran a producer shard would offer its batches a
-    # second time, and the scorer would read the repeat as the engine
-    # duplicating rows.
+    # Retrying a producer Job would replay batches and appear as engine duplication.
     assert spec["backoffLimit"] == 0
     if filename in EXPIRING:
         assert spec["ttlSecondsAfterFinished"] == EXPIRY_S
@@ -239,13 +208,6 @@ def test_a_shipped_template_renders_to_the_job_the_driver_meant(filename: str) -
 
 
 def test_the_stage_job_mounts_the_spec_and_the_site_read_only() -> None:
-    """Staging reads two files, and both reach it as ConfigMaps the driver made.
-
-    The mount paths are half of the command line `stage.sh` renders — `--spec
-    /runs/<name>` and `--site /site/site.yaml` — so a path changed in one place
-    and not the other is a Job that cannot find its own spec. Read-only because
-    nothing in the pod may edit the record of what was asked for.
-    """
     template = TEMPLATES / "stage-job.yaml.tmpl"
     values = {key: SAMPLE[key] for key in EXPECTATIONS["stage-job.yaml.tmpl"].markers}
     document = _mapping(yaml.safe_load(render_template(template, values)))
@@ -264,13 +226,6 @@ def test_the_stage_job_mounts_the_spec_and_the_site_read_only() -> None:
 
 @pytest.mark.parametrize("filename", sorted(EXPECTATIONS))
 def test_a_site_naming_no_placement_renders_a_job_the_scheduler_still_takes(filename: str) -> None:
-    """A site that names no nodes and no taints renders an empty map and list.
-
-    That is the common case — a cluster whose one node pool needs neither —
-    and the values reach the manifest as the JSON the drivers render a map and
-    a list in, so `{}` and `[]` have to parse in the position they land in
-    rather than leaving a Job the API server reads as malformed.
-    """
     expectation = EXPECTATIONS[filename]
     values = {key: SAMPLE[key] for key in expectation.markers} | {"NODE_SELECTOR": "{}", "TOLERATIONS": "[]"}
     pod = _pod_spec(_mapping(yaml.safe_load(render_template(TEMPLATES / filename, values))))
@@ -278,13 +233,6 @@ def test_a_site_naming_no_placement_renders_a_job_the_scheduler_still_takes(file
 
 
 def test_a_site_naming_no_region_renders_an_empty_env() -> None:
-    """A cluster off AWS names no region, and the env list is then empty.
-
-    An `AWS_REGION` rendered empty would reach an SDK as a region it cannot
-    resolve, which surfaces as a signing failure far from the site config. A
-    site naming no Secret is the same shape: an empty `envFrom` rather than one
-    naming nothing, which the API server would refuse at apply time.
-    """
     markers = EXPECTATIONS["harness-job.yaml.tmpl"].markers
     values = {key: SAMPLE[key] for key in markers} | {"ENV": "[]", "ENV_FROM": "[]"}
     document = _mapping(yaml.safe_load(render_template(TEMPLATES / "harness-job.yaml.tmpl", values)))

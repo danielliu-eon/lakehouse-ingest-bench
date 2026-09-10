@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The topic a run owns: created and dropped, and dropped from inside the VPC.
-
-The lifecycle tests need a broker and are marked accordingly. `drop-topic` is
-not one of them: what it has to get right is that it exits 0 whether or not the
-topic was there — teardown runs it against runs that failed before staging
-created anything — and that is checkable against a fake admin client, in the
-same shape `tests/test_kafka_auth.py` fakes one for the token priming.
-"""
+"""Test topic lifecycle against a broker and deletion behavior with a fake admin."""
 
 from __future__ import annotations
 
@@ -48,12 +41,6 @@ def test_topic_lifecycle() -> None:
     "ambient credentials reach a cluster with IAM authentication",
 )
 def test_topic_lifecycle_with_iam_authentication() -> None:
-    """The same lifecycle against a cluster whose token is signed per connection.
-
-    `broker_count` runs first because it is the first call staging makes, and
-    the one that fails on a client whose token was never served: a metadata
-    request does not poll, so nothing else would have asked for the token.
-    """
     assert BOOTSTRAP is not None and MSK_IAM_REGION is not None
     client = {"security.protocol": "SASL_SSL", "sasl.mechanism": "OAUTHBEARER", "aws.region": MSK_IAM_REGION}
     name = "ingest-bench-test-topic-iam"
@@ -78,11 +65,7 @@ def test_topic_lifecycle_with_iam_authentication() -> None:
 
 
 def unknown_topic_error() -> KafkaException:
-    """What librdkafka raises for a topic the cluster does not hold.
-
-    Built rather than provoked: the code is read off `err.args[0].code()`, and
-    a broker is the only other way to obtain one.
-    """
+    """What librdkafka raises for a topic the cluster does not hold."""
     return KafkaException(SimpleNamespace(code=lambda: KafkaError.UNKNOWN_TOPIC_OR_PART))
 
 
@@ -96,12 +79,7 @@ class FakeFuture:
 
 
 class FakeAdminClient:
-    """An admin client over one mutable set of topic names.
-
-    A delete removes the name, so the metadata served afterwards is the
-    metadata `delete_topic` waits for: a fake that kept the name would have
-    that wait time out rather than return.
-    """
+    """An admin client over one mutable set of topic names."""
 
     def __init__(self, config: dict[str, object], topics: set[str], deleted: list[str]) -> None:
         self.config = config
@@ -155,7 +133,6 @@ def test_dropping_a_topic_that_exists(monkeypatch: pytest.MonkeyPatch, capsys: p
 def test_dropping_a_topic_that_does_not_exist_still_succeeds(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Teardown drops a run's topic without knowing whether staging got that far."""
     _, deleted = fake_admin(monkeypatch, set())
     assert kafka_admin.main(["--bootstrap", "b:9092", "--topic", "a-run"]) == 0
     assert deleted == ["a-run"]
@@ -163,11 +140,6 @@ def test_dropping_a_topic_that_does_not_exist_still_succeeds(
 
 
 def test_the_client_properties_reach_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--kafka-prop` carries the site's security block, indirection and all.
-
-    The region is the harness's own key and is stripped before the properties
-    reach librdkafka, which refuses a property it does not recognise.
-    """
     monkeypatch.setenv("IB_TEST_DROP_PASSWORD", "s3cret")
     built, _ = fake_admin(monkeypatch, {"a-run"})
 

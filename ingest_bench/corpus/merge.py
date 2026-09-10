@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Merge shard corpora into one corpus: metadata beside the per-shard data.
+"""Merge shard metadata and validate the complete corpus.
 
-Generating a large corpus is split across machines, and a shard sees only the
-batches it owns — so it can publish neither a corpus-wide figure nor the gates
-that decide whether the corpus may exist. This is where the whole is assembled
-and judged: the merged `corpus.json` is written only if the whole passes what a
-single-pass corpus has to pass, so a run can never be scored against a corpus
-that only looked right one shard at a time.
-
-The batch files stay where they were written. Copying them would double the
-bytes of the largest artifact the benchmark produces to no end, so the merged
-manifest addresses each batch in the shard that wrote it.
+Apply corpus-wide gates before publishing ``corpus.json``. Keep batch files
+in their shard directories and reference them from the merged manifest.
 """
 
 from __future__ import annotations
@@ -30,10 +22,7 @@ from ingest_bench.corpus.generate import (
 from ingest_bench.corpus.preset import Preset, corpus_dir_name, corpus_hash, preset_from_effective
 from ingest_bench.corpus.stats import ColumnStats
 
-# What every shard of one corpus must agree on: the workload, the value stream
-# that filled it, and the encoding of the bytes on disk. A disagreement here
-# means the shards were generated from different runs and their batches do not
-# belong to one corpus, whatever their indices say.
+# Require identical workload, seed, and disk encoding across shards.
 AGREED_KEYS = ("corpus_hash", "seed", "generator_version", "payload_width", "row_block", "zstd_level")
 
 TRUTH_FIELDS = ("rows", "sum_mod", "encoded_bytes")
@@ -52,11 +41,10 @@ def _read_partition_truth(shard_uri: str) -> dict[str, dict[str, int]]:
 
 
 def _sum_partition_truth(shard_uris: list[str], preset: Preset) -> dict[str, dict[str, int]]:
-    """The corpus's partition truth, over the key space the preset declares.
+    """Sum partition truth over the preset's declared labels.
 
-    Summing over the declared labels rather than over the labels a shard
-    happens to publish is what makes a shard generated for a different key
-    space fail here instead of contributing a partial column of the truth.
+    A shard with a different key space must fail instead of contributing partial
+    truth.
     """
     labels = [v.partition_label(key) for key in range(preset.partition_count)]
     truth = {label: {"rows": 0, "sum_mod": 0, "encoded_bytes": 0} for label in labels}
@@ -68,20 +56,13 @@ def _sum_partition_truth(shard_uris: list[str], preset: Preset) -> dict[str, dic
             total, entry = truth[label], shard_truth[label]
             total["rows"] += entry["rows"]
             total["encoded_bytes"] += entry["encoded_bytes"]
-            # The residues are what make the identity sum splittable at all:
-            # they add across shards the way they add across batches.
+            # Checksums add modulo P across batches and shards.
             total["sum_mod"] = (total["sum_mod"] + entry["sum_mod"]) % c.P
     return truth
 
 
 def _merge_column_stats(shard_uris: list[str], preset: Preset) -> dict[str, ColumnStats]:
-    """The corpus's sampled column statistics, unioned over the shards.
-
-    The sampler strides over corpus-wide row positions, so a shard samples the
-    rows the unsharded corpus would have sampled from the batches it owns —
-    which is what makes this union the whole corpus's sample rather than an
-    approximation of it.
-    """
+    """Union shard samples selected on the shared corpus-wide row stride."""
     merged = {column.name: ColumnStats(column.name) for column in preset.columns}
     for shard_uri in shard_uris:
         shard_stats = load_column_stats(uri.read_text(uri.join(shard_uri, "column_stats.json")))

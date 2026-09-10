@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Command line for building a corpus and for merging the shards of one.
-
-A corpus is built once and read by every run that is scored against it, so the
-two commands here are the only way one is created: the preset and the seed name
-the corpus, and `corpus.json` inside it is the record of what was built.
-"""
+"""Commands for generating corpora and merging generated shards."""
 
 from __future__ import annotations
 
@@ -22,21 +17,13 @@ from ingest_bench.corpus.preset import Preset, corpus_dir_name, corpus_dir_name_
 
 WORKLOADS_ENV = "INGEST_BENCH_WORKLOADS"
 
-# A plan cannot know what the corpus will compress to, and the figure is worth
-# printing anyway: it is what decides whether the corpus fits the bucket and the
-# machine it is staged on. Zstd returns about this on a corpus whose payload is
-# incompressible by construction; `corpus.json` publishes what it actually stored.
+# Storage estimates assume this compression ratio; `corpus.json` records
+# the actual stored size.
 ASSUMED_COMPRESSION_RATIO = 4
 
 
 def workloads_dir(explicit: str | None) -> Path:
-    """Where presets and schemas are read from.
-
-    The default is the directory shipped beside the package, which is right for
-    a checkout and wrong for an installed wheel or a container that mounts its
-    workloads elsewhere — hence the environment variable, so a runner sets it
-    once instead of passing it to every command.
-    """
+    """Resolve the workloads directory from an argument, environment, or checkout."""
     if explicit:
         return Path(explicit)
     from_env = os.environ.get(WORKLOADS_ENV)
@@ -46,12 +33,9 @@ def workloads_dir(explicit: str | None) -> Path:
 
 
 def print_plan(preset: Preset, seed: int) -> None:
-    """What generating this preset would cost, without writing a byte.
+    """Print calibrated generation estimates without writing a corpus.
 
-    The row figures come from the same calibration the generator runs, so the
-    plan is the generator's own estimate rather than a second model of it. They
-    are lower bounds: a batch is filled in whole row blocks and stops on the
-    first block that crosses its byte budget, so it overshoots slightly.
+    Byte budgets are lower bounds because generation fills whole row blocks.
     """
     payload_width = v.calibrate_payload_width(seed, preset.target_row_bytes, preset.columns)
     mean_row = v.realized_encoded_row_size(seed, payload_width, preset.columns)

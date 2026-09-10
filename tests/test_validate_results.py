@@ -17,12 +17,7 @@ def _run(results_dir: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _rerender(results: Path) -> None:
-    """Regenerate `RESULTS.md` from whatever `.json` files `results` holds now.
-
-    Called after every mutation but the one testing staleness itself, so each
-    other test fails on exactly the one rule it is checking and not also on a
-    table that no longer matches the document it mutated.
-    """
+    """Regenerate `RESULTS.md` from whatever `.json` files `results` holds now."""
     documents = [(path, json.loads(path.read_text())) for path in sorted(results.glob("**/*.json"))]
     (results / "RESULTS.md").write_text(render_results_table(documents))
 
@@ -75,9 +70,8 @@ def test_validate_results_fails_on_a_twelve_digit_number_in_a_string(tmp_path: P
 
 
 def test_validate_results_passes_on_a_twelve_digit_numeric_byte_total(tmp_path: Path) -> None:
-    """A JSON *number* landing on twelve digits — an hour at 100 MB/s is close
-    to 3.6e11 bytes — is not an account id and must not be flagged; only a
-    twelve-digit run inside a JSON string is a credential-shaped leak.
+    """Large numeric byte totals can have twelve digits. Account-id checks apply
+    to strings, not JSON numbers.
     """
 
     def mutate(document: dict[str, object]) -> None:
@@ -159,15 +153,6 @@ def test_validate_results_fails_on_a_null_derived_keepup(tmp_path: Path) -> None
 
 
 def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_path: Path) -> None:
-    """Three spellings of the same non-disclosure.
-
-    `results/README.md` states that a published result discloses the machine
-    types behind its cost column, and a fleet can decline to say in three ways:
-    an empty string, the sentinel word an engine whose knobs named no machine
-    type reports, and the placeholder a shipped external spec leaves for its
-    operator to replace. All three are the same non-disclosure, so the rule has
-    to refuse all three.
-    """
     for index, absent in enumerate(("", MACHINE_TYPE_UNSPECIFIED, f"{PLACEHOLDER}MACHINE_TYPE")):
 
         def mutate(document: dict[str, object], absent: str = absent) -> None:
@@ -185,11 +170,6 @@ def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_pa
 
 
 def test_validate_results_accepts_a_spec_that_states_the_whole_corpus_explicitly(tmp_path: Path) -> None:
-    """`seconds: null` is how a spec says the offer is not shortened.
-
-    It is the form the design's own example shows, so the check reads whether
-    the key is there and not what it holds.
-    """
 
     def mutate(document: dict[str, object]) -> None:
         run = document["run"]
@@ -205,11 +185,6 @@ def test_validate_results_accepts_a_spec_that_states_the_whole_corpus_explicitly
 
 
 def test_validate_results_fails_when_two_results_measured_the_same_table(tmp_path: Path) -> None:
-    """Each result measured a fresh table and a fresh topic, and that is a rule across files.
-
-    A re-run staged under an earlier run's id publishes a second result about
-    the same rows, and the two disagree for a reason neither document records.
-    """
     results, first = _valid_results_dir(tmp_path)
     second = first.with_name("2026-09-21-flink-smoke-hash.json")
     second.write_text(first.read_text())
@@ -221,11 +196,6 @@ def test_validate_results_fails_when_two_results_measured_the_same_table(tmp_pat
 
 
 def test_validate_results_fails_on_a_cost_column_with_no_price_behind_it(tmp_path: Path) -> None:
-    """Present is not disclosed: the shipped site examples price a run at zero.
-
-    `RESULTS.md` renders that honestly as `n/a`, so the rule is that a cost
-    column names the prices behind it rather than that the field is there.
-    """
     for field in ("vcpu_hour_usd", "gib_hour_usd"):
 
         def mutate(document: dict[str, object], field: str = field) -> None:

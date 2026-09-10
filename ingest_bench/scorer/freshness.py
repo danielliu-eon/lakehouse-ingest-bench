@@ -1,20 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""How stale the table is, sampled over time rather than at each commit.
+"""Measure table lag on a fixed time grid.
 
-Freshness is one number about a whole run, and the honest one is a quantile of
-the lag a reader would have seen at an arbitrary instant. That is not the same
-as a quantile over commits: a fleet that commits ten times in one second and
-then stalls for five minutes looks excellent per commit and terrible to a
-reader. Sampling the lag on a fixed grid weights every second of the run
-equally, which is what makes the p95 mean what the bound claims.
+Time-based sampling weights stalls fairly; per-commit quantiles would
+overweight bursts of frequent commits. Lag uses the emit time of the newest
+fully covered batch in the tally prefix.
 
-The lag at time ``t`` is measured from the emit time of the newest batch whose
-rows are all present — the tally's prefix — so a batch that is half in the
-table has not arrived. Both clocks a run can be judged on are supported: the
-table's own commit timestamps, and the wall time at which the scorer first saw
-each commit. The first is what a reader of the table sees and is the default;
-the second is immune to a writer whose clock disagrees with the producer's,
-which is the fault ``clock_skew_suspected`` exists to name.
+Support both table commit timestamps and first-observed wall times. The
+latter avoids relying on the writer clock; report suspected clock skew.
 """
 
 from __future__ import annotations
@@ -29,10 +21,9 @@ FIRST_SEEN_CLOCK = "first_seen_ms"
 
 @dataclass(frozen=True)
 class Observation:
-    """The completeness watermark at one commit, on both clocks.
+    """Coverage watermark at a commit, with commit and observation timestamps.
 
-    ``prefix`` is the tally's prefix as of this commit: the largest batch whose
-    rows, and every earlier batch's rows, are in the table.
+    ``prefix`` is the largest batch for which every batch through it is covered.
     """
 
     timestamp_ms: int
@@ -48,21 +39,10 @@ def lag_series(
     grid_ms: int,
     clock: str,
 ) -> list[dict[str, int | float | None]]:
-    """L(t) sampled on a fixed grid.
+    """Sample lag on a fixed grid using the latest visible coverage watermark.
 
-    S(t) is a right-continuous step function that only changes when a snapshot
-    becomes visible, so sampling the steps on a uniform grid — rather than
-    recording one sample per commit — is what makes the p95 time-weighted: a
-    prefix that sits stalled for five minutes must dominate the quantile over
-    one that advanced ten times in a second.
-
-    Before any batch is complete the lag is measured from t0: an engine that
-    has committed nothing has been late since the offer began.
-
-    A prefix whose emit time is absent from the publish log yields
-    lag_s = None instead of raising: the gap is a coverage failure the caller
-    records (see missing_emit_prefixes), and a raise here would happen after
-    hours of measurement but before any artifact is written.
+    Before any batch is covered, measure lag from ``t0_ms``. A missing publish-log
+    emit time produces ``lag_s=None`` so callers can report the coverage gap.
     """
     if clock not in (TIMESTAMP_CLOCK, FIRST_SEEN_CLOCK):
         raise ValueError(f"unknown observation clock: {clock}")
@@ -93,8 +73,7 @@ def lag_series(
 
 
 def missing_emit_prefixes(series: list[dict[str, int | float | None]]) -> list[int]:
-    """Prefixes sampled without an emit time — publish-log coverage gaps as
-    seen from the table side. Non-empty means the run cannot be scored."""
+    """Return sampled batch prefixes whose emit times are missing."""
     gaps = {int(row["prefix"]) for row in series if row["lag_s"] is None and row["prefix"] is not None}
     return sorted(gaps)
 
@@ -107,9 +86,7 @@ def lag_quantiles(series: list[dict[str, int | float | None]]) -> dict[str, floa
     lags: list[float] = []
     for row in series:
         lag = row["lag_s"]
-        # One unlaggable sample voids the quantiles: computing them over the
-        # remaining samples would report a flattering number for a run whose
-        # coverage failure already makes it unscorable.
+        # A missing emit time invalidates all quantiles; do not omit the missing sample.
         if lag is None:
             return _no_quantiles()
         lags.append(float(lag))
@@ -125,16 +102,9 @@ def lag_quantiles(series: list[dict[str, int | float | None]]) -> dict[str, floa
 
 
 def _observation_lags_s(observations: list[Observation], emit_ms: dict[int, int]) -> list[float]:
-    """The lag at each commit that advanced the prefix, on the table's clock.
+    """Return per-observation lag on the table clock, skipping missing emit times.
 
-    This is one lag per commit rather than one per grid instant, so it is not
-    what the bound is judged on. What it is for is the smallest value in it:
-    the closest a batch came to being queryable before the producer had
-    finished acking it.
-
-    A commit whose prefix has no emit time is skipped rather than raising. The
-    gap is a coverage failure the caller already records, and it must not turn
-    a scored run into an exception hours in.
+    Use these values for clock diagnostics, not time-weighted quantiles.
     """
     return [
         (obs.timestamp_ms - emit_ms[obs.prefix]) / 1000
@@ -144,43 +114,27 @@ def _observation_lags_s(observations: list[Observation], emit_ms: dict[int, int]
 
 
 def min_observation_lag_s(observations: list[Observation], emit_ms: dict[int, int]) -> float | None:
-    """The smallest per-commit lag, or None when no commit advanced the prefix.
+    """Return minimum per-observation lag, or ``None`` without a usable prefix.
 
-    Negative is the tell: a batch cannot be queryable before it was acked in
-    any single frame of reference, so a negative minimum means the table's
-    clock and the producer's disagree, and every figure drawn from those
-    timestamps is suspect. ``clock_skew_suspected`` is exactly this figure
-    being negative, so the two cannot contradict each other.
+    A negative value indicates suspected disagreement between commit and producer
+    clocks.
     """
     lags = _observation_lags_s(observations, emit_ms)
     return min(lags) if lags else None
 
 
 def clock_skew_suspected(observations: list[Observation], emit_ms: dict[int, int]) -> bool:
-    """Whether a batch was queryable before the producer finished acking it.
-
-    Only the table's own commit timestamps can disagree with the producer's
-    clock; ``first_seen_ms`` is the scorer's own reading and cannot. So the
-    test is against ``timestamp_ms`` whichever clock a run is scored on.
-    """
+    """Flag negative commit-time lag, regardless of the selected scoring clock."""
     minimum = min_observation_lag_s(observations, emit_ms)
     return minimum is not None and minimum < 0
 
 
 @dataclass
 class FreshnessResult:
-    """The freshness verdict, and every figure it was drawn from.
+    """Freshness verdict, window and full-run metrics, and clock diagnostics.
 
-    Both the windowed and the full-run quantiles are published. The window is
-    what the bound is judged on, and the full run is what says how much of the
-    lag the warmup hid — a run whose window passes only because its warmup
-    swallowed a ten-minute cold start is a different result from one that was
-    fresh throughout, and the artifact should not have to be re-derived to
-    tell them apart.
-
-    ``min_lag_s`` is the per-commit minimum, not a quantile of the grid: it is
-    the skew figure, and it is negative exactly when
-    ``clock_skew_suspected`` is true.
+    The bound applies to the post-warmup window. Full-run metrics retain startup
+    lag. ``min_lag_s`` is the per-observation minimum used to flag clock skew.
     """
 
     window: dict[str, float | None]
@@ -215,20 +169,13 @@ def freshness_result(
     grid_ms: int = 1000,
     clock: str = TIMESTAMP_CLOCK,
 ) -> FreshnessResult:
-    """Score one run's freshness over the measurement window.
+    """Evaluate post-warmup lag bounds and require the table to drain.
 
-    The window starts a warmup after the epoch because a fleet that has just
-    been handed its first rows is provisioning, not lagging, and the bound is a
-    claim about steady state. Draining is a separate condition rather than a
-    lag sample: a run that ends with rows still outside the table has no lag to
-    measure for them, and quantiles over the samples that do exist would score
-    it as though those rows were never offered.
+    Publish full-run quantiles alongside the measurement window.
     """
     series = lag_series(observations, emit_ms, epoch_ms, end_ms, grid_ms, clock)
     window_start = epoch_ms + warmup_s * 1000
-    # A warmup longer than the run itself leaves the window empty; the last
-    # grid point stands in so the verdict is drawn from the run's final state
-    # rather than from no samples at all.
+    # If warmup exceeds the run, evaluate the final grid point.
     window = [row for row in series if _at_ms(row) >= window_start] or series[-1:]
     missing = missing_emit_prefixes(series)
     window_quantiles, full_quantiles = lag_quantiles(window), lag_quantiles(series)

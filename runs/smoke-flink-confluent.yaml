@@ -1,10 +1,5 @@
-# `smoke-flink.yaml` with every value behind the five-byte Confluent header,
-# which proves a Confluent-framed run is readable end to end by stock Flink.
-#
-# The source reads it with `avro-confluent`, which fetches the writer schema
-# from the registry by the id in each header. The site has to declare
-# `kafka.schema_registry`; staging refuses this spec before it touches the
-# cluster otherwise.
+# Flink smoke with Confluent framing. The avro-confluent source resolves writer schemas by
+# header ID. Set kafka.schema_registry in the site before staging.
 name: smoke-flink-confluent
 engine: flink
 corpus: smoke

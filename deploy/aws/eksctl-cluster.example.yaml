@@ -1,12 +1,11 @@
-# A minimal EKS cluster for lakehouse-ingest-bench: one amd64 managed node
-# group (the Flink image is amd64-only), the Pod Identity agent, and nothing
-# else. eksctl creates the VPC (three AZs, private subnets behind one NAT
-# gateway), which is also where setup.sh places the MSK cluster.
+# Minimal EKS cluster with an amd64 node group and Pod Identity agent.
+# eksctl creates a three-zone VPC with private subnets and one NAT gateway;
+# setup.sh places MSK in the same VPC.
 #
 #   eksctl create cluster -f eksctl-cluster.example.yaml     # ~20 minutes
 #   eksctl delete cluster -f eksctl-cluster.example.yaml
 #
-# The harness never runs either command; the cluster is the operator's.
+# Run these commands yourself; the harness does not manage the EKS cluster.
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:
@@ -21,11 +20,9 @@ addons:
   - name: eks-pod-identity-agent
 managedNodeGroups:
   - name: amd64
-    # 4 vCPU / 16 GiB each, and a node of that shape takes one 2-CPU pod: four
-    # are what a smoke spec's peak needs — two taskmanagers or executors, the
-    # scorer and one producer shard, with the 1-CPU jobmanager or driver beside
-    # one of them. The hour-long specs need far more; "Sizing the cluster" in
-    # README.md counts both.
+    # Each 4-vCPU / 16-GiB node fits one 2-CPU pod. Four nodes support smoke
+    # runs: two workers, a scorer, and a producer, with room for the 1-CPU
+    # coordinator. See README.md for larger-run sizing.
     instanceType: m6i.xlarge
     amiFamily: AmazonLinux2023
     desiredCapacity: 4

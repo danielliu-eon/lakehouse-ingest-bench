@@ -1,10 +1,6 @@
-# One producer shard per pod. The shards of a run share the corpus, the topic
-# and the epoch and differ only in their index, which indexed completion gives
-# them: `$JOB_COMPLETION_INDEX` reaches the command line through the image's
-# shell entrypoint.
-#
-# The publish log is written to an `emptyDir` and uploaded to the run's prefix
-# as it goes, because it is the scorer's input and the scorer is another pod.
+# One producer pod per shard, selected by $JOB_COMPLETION_INDEX. All shards
+# share the corpus, topic, and epoch. Upload each local publish log as the
+# run proceeds so the scorer can read it from another pod.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,16 +28,9 @@ spec:
           args: ["__COMMAND__"]
           env: __ENV__
           envFrom: __ENV_FROM__
-          # Sized by the preset's batch bytes and not by the pod count; the
-          # driver's PRODUCER_MEMORY is what raises it.
-          #
-          # Two cores, because a shard at full offer is two busy threads and
-          # not one: the Python process encoding and pacing batches, and
-          # librdkafka's sender compressing and writing them. Requested rather
-          # than limited, so a shard that briefly needs more takes it from an
-          # idle node instead of being throttled into falling behind its own
-          # schedule — which the scorer would then read as a producer-bound
-          # run.
+          # Size memory for batch bytes via PRODUCER_MEMORY. Request two cores for
+          # Python encoding/pacing and librdkafka compression/sending. Leave CPU
+          # unlimited so brief bursts can use idle capacity without falling behind.
           resources:
             requests:
               cpu: "2"

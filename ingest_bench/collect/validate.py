@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The publication rules `results/` is held to, checked in one
-pass so a contributor and CI run the identical check `scripts/validate-results.py`
-merely invokes.
+"""Validate publication requirements for every result under ``results/``.
 
-`collect` already redacts a run directory into a publishable document; this
-does not trust that it did. A document that leaked a bucket name, or that was
-collected from a corpus nobody shipped, is a mistake in `collect` or in the
-spec that produced it — the kind of mistake this has to catch independently of
-the code that could have made it, not by re-deriving what `collect` derived
-but by re-checking the same public-repo promises from the outside.
+Check for leaked identifiers, unsupported corpora, missing disclosures,
+reused resources, and a stale results table independently of collection.
 """
 
 from __future__ import annotations
@@ -29,15 +23,10 @@ from ingest_bench.specs.model import MACHINE_TYPE_UNSPECIFIED, PLACEHOLDER
 
 RESULTS_MD = "RESULTS.md"
 
-# Twelve digits with no digit on either side: an AWS account id. Only strings
-# are scanned (see `_account_id_failures`), because a byte total or a
-# millisecond epoch can land on twelve digits too.
+# Scan only strings; numeric byte counts and timestamps can have 12 digits.
 _TWELVE_DIGIT = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
-# A path `collect`'s redaction left alone because it sat under none of the
-# site's roots. That is documented behaviour for a path collect never saw
-# reason to touch, and exactly the leak this check exists to catch before the
-# path reaches a public repository.
+# Catch storage URIs outside the configured roots that collection could not redact.
 _CLOUD_URI = re.compile(r'(?:s3|gs)://[^\s"]+')
 
 
@@ -49,14 +38,9 @@ def _uri_failures(path: Path, text: str) -> list[str]:
 
 
 def _account_id_failures(path: Path, value: object) -> list[str]:
-    """Every 12-digit number inside a JSON *string* of the parsed document —
-    a key or a value, never a number.
+    """Find 12-digit identifiers in JSON string values and keys.
 
-    An account id can only leak inside a string: an ARN, a bucket name, a
-    path. A byte total or a millisecond timestamp is a JSON number that can
-    just as easily land on twelve digits by coincidence — an hour at
-    100 MB/s is close to 3.6·10^11 bytes — and scanning the raw file text
-    cannot tell the two apart. Walking the parsed value can.
+    Skip numeric values: byte counts and timestamps can also have 12 digits.
     """
     if isinstance(value, str):
         return [
@@ -83,11 +67,7 @@ def _fleet_failures(fleet: list[dict[str, object]]) -> list[str]:
     failures = []
     for role in fleet:
         name = role["role"]
-        # Three spellings of the same non-disclosure: the empty string, the
-        # sentinel word an engine whose knobs named no machine type reports,
-        # and the placeholder a shipped external spec leaves for its operator
-        # to replace. A rule reading only falsiness would wave the last two
-        # through while failing the engine that reported "".
+        # Reject empty, unspecified, and unreplaced example machine types.
         machine_type = str(role["machine_type"])
         if not machine_type or machine_type == MACHINE_TYPE_UNSPECIFIED or machine_type.startswith(PLACEHOLDER):
             failures.append(f"fleet: role {name!r} has no machine_type ({machine_type!r})")
@@ -122,9 +102,7 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
     failures: list[str] = []
 
     producer = cast(dict[str, object], spec["producer"]) if "producer" in spec else {}
-    # The value and not the key: `seconds: null` is how a spec says the whole
-    # corpus is offered, which is the form the design's own example shows, and
-    # a key-based test reads that as a shortened offer.
+    # A null `seconds` value denotes a full offer, even when the key is present.
     if "seconds" in producer and producer["seconds"] is not None:
         failures.append(
             f"producer.seconds: spec.producer.seconds is set ({producer['seconds']!r}) — a shortened offer "
@@ -149,9 +127,7 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
     if not isinstance(site_pricing, dict) or "vcpu_hour_usd" not in site_pricing or "gib_hour_usd" not in site_pricing:
         failures.append("site_pricing: run.site_pricing is missing or incomplete")
     else:
-        # Present is not disclosed: the example site configs ship zeros, and a
-        # result costed at zero renders as `n/a` in the table while the rules
-        # say the prices behind the cost column are stated.
+        # Example zero prices are placeholders, not a valid cost disclosure.
         for field in ("vcpu_hour_usd", "gib_hour_usd"):
             price = site_pricing[field]
             if not (isinstance(price, int | float) and not isinstance(price, bool) and price > 0):
@@ -161,13 +137,7 @@ def _document_failures(document: dict[str, object], shipped_presets: set[str], w
 
 
 def _freshness_failures(documents: list[tuple[Path, dict[str, object]]]) -> list[str]:
-    """Every table and topic reused across the published results.
-
-    The rule is that each result measured a fresh table and a fresh topic, and
-    it is a cross-document one: a re-run staged under the run id of an earlier
-    one would otherwise publish a second result about the same rows, and the
-    two would disagree for a reason neither document records.
-    """
+    """Find table and topic names reused across published results."""
     failures: list[str] = []
     for field in ("table", "topic"):
         seen: dict[str, Path] = {}
@@ -185,11 +155,9 @@ def _freshness_failures(documents: list[tuple[Path, dict[str, object]]]) -> list
 
 
 def validate(results_dir: Path, *, workloads: Path) -> list[str]:
-    """Every failure found under `results_dir`, as `<path>: <rule>: <detail>` lines.
+    """Return failures as ``<path>: <rule>: <detail>`` lines.
 
-    An empty `results/` — nothing but `RESULTS.md` and `README.md` — has no
-    JSON to check and a two-line table to compare, so it is valid by having
-    nothing to fail.
+    An empty results directory is valid if its generated table is current.
     """
     shipped_presets = {preset_path.stem for preset_path in (workloads / "presets").glob("*.yaml")}
     failures: list[str] = []
@@ -214,10 +182,8 @@ def validate(results_dir: Path, *, workloads: Path) -> list[str]:
         documents.append((path, document))
         failures.extend(f"{path}: {failure}" for failure in _document_failures(document, shipped_presets, workloads))
 
-    # A directory holding a document that failed even to parse as schema
-    # version 2 cannot be rendered at all, so the freshness check below would
-    # compare against a table `results-table` could never actually produce —
-    # that failure is reported above instead.
+    # Skip table comparison if a document cannot be rendered; its parse failure
+    # is already reported above.
     failures.extend(_freshness_failures(documents))
 
     if all_schema_version_2:

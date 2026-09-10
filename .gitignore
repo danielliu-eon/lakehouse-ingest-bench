@@ -4,10 +4,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-# The operator's own site config, which lives at the root beside
-# site.example.yaml. Anchored, because unanchored it also swallowed the local
-# stack's checked-in deploy/compose/local/site.yaml — whose addresses are
-# compose service names and whose credentials are MinIO's defaults.
+# Ignore only the root site config; keep the local Compose fixture tracked.
 /site.yaml
 runs/*/
 !runs/*.yaml

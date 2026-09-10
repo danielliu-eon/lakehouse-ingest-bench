@@ -1,50 +1,41 @@
 # Running the benchmark on AWS
 
-`setup.sh` builds everything on an AWS account that a run needs and no run
-creates for itself. `teardown.sh` removes it again. Both are idempotent: every
-step describes before it creates or deletes, so a re-run after a timeout or a
-revoked token converges instead of failing.
-
-Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
+`setup.sh` provisions the shared AWS resources needed by benchmark runs.
+`teardown.sh` removes them. Both check existing resources so an interrupted
+operation can be rerun. Manage the EKS cluster separately; neither script
+creates, reconfigures, or deletes it.
 
 ## Prerequisites
 
-- **An EKS cluster**, with at least one **amd64** node to run Flink on. The
-  Flink image is amd64-only, because PyFlink publishes no aarch64 wheel, and
-  the preflight warns about a cluster without one rather than refusing it — a
-  Spark-only campaign needs no amd64 node. If you have no cluster,
-  `eksctl-cluster.example.yaml` makes a minimal one — see the last section.
-- **Host tools**, on the machine you run all of this from. Every script here and
-  every cluster driver under `scripts/` refuses up front on a missing one, and
-  points at this list. `run.sh` chains five of those drivers, so it refuses on
-  any tool one of them needs:
+- **EKS cluster.** Flink requires an amd64 node. Setup warns if none exists,
+  allowing Spark-only campaigns on arm64. For a new cluster, use the example
+  at the end of this guide.
+- **Host tools.** Scripts check required tools before proceeding. `run.sh`
+  checks the tools needed by all five drivers it invokes.
 
   | Tool | Needed by |
   |---|---|
   | `aws` CLI v2 | these two scripts, and every driver that reads the bucket or the registry — all of them but `launch.sh` |
-  | `kubectl` | these two scripts, and every driver that applies or reads a Kubernetes object. `gate.sh` and `finish.sh` read only the bucket, so they need none |
+  | `kubectl` | setup, teardown, and run drivers that access Kubernetes; `finish.sh` also requires it for catalog tunnels |
   | `helm` | `setup.sh` / `teardown.sh`, for the two operators |
   | `envsubst` (GNU gettext) | `setup.sh`, for the IAM and namespace templates |
   | `yq` (mikefarah v4) | every driver, to read the site and the copied spec |
   | `jq` | every driver that reads a run's facts or an object's status |
   | `git` | every driver that names an image, since the tag is a commit |
-  | `curl` | `stage.sh`, to read a running engine through a port-forward |
+  | `curl` | `stage.sh` for engine verification; catalog tunnels also probe readiness with it |
   | `docker` | `push-images.sh` |
   | `gzip` | `teardown.sh` and `purge.sh`, since a table may write its metadata document compressed |
-- **Credentials** for the account the cluster is in, with permission to create
-  S3 buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
-  add-ons and pod identity associations. Every script here and every driver
-  under `scripts/` uses the AWS CLI's ambient credentials and passes no profile
-  of its own, so export `AWS_PROFILE` — or sign in with `aws sso login --profile
-  <name>` or `aws login` — in each shell you run one from, and check it with
-  `aws sts get-caller-identity` first. These two scripts refuse up front on a
-  credential they cannot use; the drivers do not, and a missing one surfaces as
-  `Unable to locate credentials` from the first driver that reads the bucket.
+- **AWS credentials.** Use an identity in the cluster's account with permission
+  to manage S3, ECR, MSK, security groups, IAM roles, EKS add-ons, and Pod Identity
+  associations. Scripts use the AWS CLI's ambient credentials without setting
+  a profile. Export `AWS_PROFILE` or sign in with
+  `aws sso login --profile <name>` or `aws login`, then verify the identity with
+  `aws sts get-caller-identity` in each shell. Setup and teardown check credentials
+  immediately; other drivers report credential failures on their first AWS call.
 
 ## Sizing the cluster
 
-A run's pods are scheduled on their CPU requests, and most of them ask for two
-cores. What each asks for:
+Kubernetes schedules pods by resource requests. Budget for these requests:
 
 | Pod | How many | CPU | Memory |
 |---|---|---|---|
@@ -58,206 +49,169 @@ cores. What each asks for:
 | Spark driver | one | `driver_cores` (`1`) | `driver_mem_mb` |
 | Spark executor | `executors` | `executor_cores` | `executor_mem_mb` |
 
-The first five are the templates under `deploy/k8s/`; the engines' four are
-knobs their spec sets, rendered into a `FlinkDeployment` by
-[`engines/flink/knobs.py`](../../engines/flink/knobs.py) and a
-`SparkApplication` by [`engines/spark/knobs.py`](../../engines/spark/knobs.py).
 
-A node takes `floor((allocatable − daemonsets) / 2)` of the 2-CPU pods among
-them, and on a 4-vCPU node that is one: allocatable is already under 4 CPU
-before a daemonset has asked for anything, so no two of them fit however little
-the rest holds. CPU is what runs out first at these sizes — the largest memory
-request any shipped spec makes is `executor_mem_mb: 8192`, on a node with 16
-GiB. What ignoring the rule costs a run is
-[`docs/pitfalls.md`](../../docs/pitfalls.md) §One 2-CPU pod per small node.
+Harness requests come from `deploy/k8s/` templates. Engine requests come from
+run knobs, rendered by [Flink](../../engines/flink/knobs.py) and
+[Spark](../../engines/spark/knobs.py).
 
-Count the pods that are up together, which is the engine's fleet, the scorer and
-the shards: a corpus is generated before a run, and the stage Job has finished
-before `stage.sh` applies the engine's documents.
+A node fits `floor((allocatable CPU − DaemonSet requests) / 2)` two-CPU pods.
+A four-vCPU node has less than four allocatable cores, so it fits only one.
+At the shipped sizes, CPU generally limits placement before memory. See
+[pitfalls](../../docs/pitfalls.md) for the scheduling consequences.
 
-- `aws-smoke-flink.yaml` — two taskmanagers at `tm_cpu: 2`, one shard and the
-  scorer are four 2-CPU pods, so **four nodes**, with the 1-CPU jobmanager
-  beside one of them. `aws-smoke-spark.yaml` counts the same way, its driver
-  defaulting to one core.
-- `aws-100mbs-skew-flink-hash.yaml` — eight taskmanagers, five shards and the
-  scorer: **14 nodes**, the jobmanager again beside a taskmanager.
-  `aws-100mbs-skew-spark-hash.yaml` sets `driver_cores: 2`, which is a node of
-  its own: **15**.
+Count the engine fleet, scorer, and producer shards together. Corpus generation
+and the staging Job finish before that peak. For four-vCPU nodes:
 
-Grow a node group by raising its maximum along with its size, since the maximum
-is what caps it:
+- `aws-smoke-flink.yaml` needs **four nodes**: two TaskManagers, one producer,
+  and one scorer, with the one-CPU JobManager sharing a node.
+  `aws-smoke-spark.yaml` has the same requirement.
+- `aws-100mbs-skew-flink-hash.yaml` needs **14 nodes**: eight TaskManagers,
+  five producers, and one scorer. Its JobManager can share a node.
+- `aws-100mbs-skew-spark-hash.yaml` needs **15 nodes** because its two-CPU
+  driver also needs a node.
+
+Raise the node group's maximum as well as its desired size:
 
 ```bash
 eksctl scale nodegroup --cluster <name> --name amd64 --nodes 14 --nodes-max 14
 ```
 
-`launch.sh` counts the nodes with 2 CPU free before it applies anything and
-warns when there are fewer than the scorer and the shards need — the fleet is
-already running by then, so it is not in that count. It warns and never refuses:
-on an autoscaled cluster, the Pending pod is what buys the node.
+`launch.sh` warns if too few nodes have two free CPUs for the scorer and
+producers. The engine fleet is already running at this point. The warning does
+not block launch because Pending pods can trigger a cluster autoscaler.
 
-## Environment
+## Configure the environment
 
-Everything site-specific reaches the scripts through the environment; nothing in
-this repository names an account, a region, a cluster or a bucket.
+Pass site-specific values through environment variables:
 
 | Variable | Default | What it is |
 |---|---|---|
 | `AWS_REGION` | *required* | The region the EKS cluster is in |
 | `CLUSTER_NAME` | *required* | The EKS cluster's name |
 | `KUBE_CONTEXT` | `$CLUSTER_NAME` | The kubeconfig context. Written with `aws eks update-kubeconfig --alias` if it is missing |
-| `BUCKET` | `lakehouse-ingest-bench-<account id>` | The one bucket, with prefixes `corpus/`, `runs/` and `warehouse/`. Bucket names are global, hence the account id in the default |
+| `BUCKET` | `lakehouse-ingest-bench-<account id>` | Bucket for `corpus/`, `runs/`, and `warehouse/`; the account ID helps avoid global name collisions |
 | `MSK_NAME` | `lakehouse-ingest-bench` | The MSK cluster's name; its security group is `<name>-msk` |
 | `MSK_BROKER_TYPE` | `kafka.m5.large` | Broker instance type |
-| `MSK_BROKERS` | `2` | Broker count. One broker per availability zone, so the VPC needs a private subnet in this many zones |
+| `MSK_BROKERS` | `2` | Broker count; requires this many availability zones with private subnets |
 | `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version, printed either way |
-| `MSK_VOLUME_GIB` | `100` | EBS GiB per broker. An offer sits on the brokers for as long as the engine is behind, so an hour run needs more than a smoke does. Raised on an existing cluster with `update-broker-storage`; never lowered, because a broker volume cannot shrink |
-| `FLINK_OPERATOR_VERSION` | `1.15.0` | The operator chart installed when the CRD is absent, from `archive.apache.org` — it keeps every release, where the download mirror serves only current ones |
-| `SPARK_OPERATOR_VERSION` | `2.5.2` | The Kubeflow spark-operator chart installed when the `sparkapplications` CRD is absent, from `https://kubeflow.github.io/spark-operator`. Installed with `spark.jobNamespaces={$NAMESPACE}` so the controller watches this namespace, and with its own spark ServiceAccount and RBAC off — a run's driver runs as `ingest-bench-spark`, which is the name Pod Identity is bound to |
-| `NAMESPACE` | `ingest-bench` | The Kubernetes namespace the harness Jobs and both engines' runs live in |
-| `WITH_SCHEMA_REGISTRY` | `false` | `true` also applies `deploy/k8s/schema-registry.yaml.tmpl` — one Apicurio Deployment and Service in the namespace, at `http://schema-registry.<namespace>.svc:8080/apis/ccompat/v7`. Only a run whose spec says `kafka.value_encoding: confluent` needs one; the namespace delete in `teardown.sh` removes it |
-| `NODE_SELECTOR` / `TOLERATIONS` | `{}` / `[]` | One-line JSON placing the registry Deployment, for a cluster whose nodes are labelled or tainted. The harness Jobs read the same two values out of `site.yaml` instead |
+| `MSK_VOLUME_GIB` | `100` | EBS GiB per broker. Increase for longer offers or larger backlogs. Existing volumes can grow with `update-broker-storage`, but cannot shrink |
+| `FLINK_OPERATOR_VERSION` | `1.15.0` | Flink operator chart installed from `archive.apache.org` when its CRD is absent |
+| `SPARK_OPERATOR_VERSION` | `2.5.2` | Kubeflow operator chart installed when its CRD is absent; configured to watch `$NAMESPACE` and use the benchmark's Spark identity |
+| `NAMESPACE` | `ingest-bench` | Namespace shared by harness Jobs and engine runs |
+| `WITH_SCHEMA_REGISTRY` | `false` | Create an in-memory Apicurio registry for Confluent runs at `http://schema-registry.<namespace>.svc:8080/apis/ccompat/v7`; removed with the namespace |
+| `NODE_SELECTOR` / `TOLERATIONS` | `{}` / `[]` | One-line JSON for registry placement. Harness Jobs read placement from `site.yaml` |
 | `MSK_ACTIVE_WAIT_S` | `3600` | How long `setup.sh` waits for MSK to reach `ACTIVE` |
 | `MSK_DELETED_WAIT_S` | `1800` | How long `teardown.sh` waits for MSK to disappear before deleting its security group |
 
-## What `setup.sh` creates
 
-Preflight first, and each refusal names its fix: the caller's identity, the
-cluster, `kubectl` reaching it, an amd64 node (a warning, not a refusal), the
-`eks-pod-identity-agent` add-on (installed and waited for if absent) and the
-`flinkdeployments.flink.apache.org` CRD (the operator is installed with
-`webhook.create=false` if absent, so no cert-manager is needed, and its chart
-version is printed either way). Then:
+## Provision shared resources
 
-- **S3** — the bucket, with public access blocked, the `lakehouse-ingest-bench`
-  tag, and versioning **suspended if it was on** — a corpus is regenerated
-  rather than restored, and every deleted object of a hundred-gigabyte corpus
-  would otherwise keep being billed. Neither call is additive, so a bucket that
-  already exists and carries no tag of ours is refused rather than
-  reconfigured: name one of your own with `BUCKET`, or tag that one
-  `lakehouse-ingest-bench=true` if it is meant to be this benchmark's.
-- **ECR** — `lakehouse-ingest-bench/harness`, `lakehouse-ingest-bench/flink` and
-  `lakehouse-ingest-bench/spark`.
-- **MSK** — a provisioned cluster, IAM its only client authentication and no
-  unauthenticated listener, TLS in transit, `MSK_VOLUME_GIB` per broker, brokers in the
-  EKS cluster's own private subnets one per availability zone. Its security
-  group opens 9098 to every CIDR the VPC has: IAM decides who may connect, the
-  group only scopes the network, and a CIDR rule reaches every node in the VPC
-  where one naming the cluster's own group reaches only those carrying it.
-- **IAM** — one role, `lakehouse-ingest-bench-harness`, trusted by
-  `pods.eks.amazonaws.com` for `sts:AssumeRole` and `sts:TagSession`, with an
-  inline policy over the bucket's three prefixes, the `ingest_bench` Glue
-  database, and this MSK cluster's topics and consumer groups. Pod identity
-  associations bind it to all three ServiceAccounts.
-- **Kubernetes** — the namespace, the `ingest-bench-harness`,
-  `ingest-bench-flink` and `ingest-bench-spark` ServiceAccounts, and the Role
-  and RoleBinding each engine needs to raise its own fleet: a JobManager
-  creates its TaskManagers, and a Spark driver creates its executors. Then the
-  **Kubeflow spark-operator**, installed when its CRD is absent — after the
-  namespace, because its chart grants the controller a Role in each namespace
-  named by `spark.jobNamespaces`, which is what makes this one eligible. It is
-  installed with `webhook.enable=true`, because the webhook is what grafts a
-  run's ConfigMap volume onto the driver and executor pods — a `SparkApplication`
-  carries the volume and the CRD alone does not apply it, so a driver on an
-  install without it starts with no `/opt/bench/run` and dies opening the run's
-  job document. A cluster that already had the operator installed *without* the
-  webhook is the one shape this preflight cannot fix for you.
-  With `WITH_SCHEMA_REGISTRY=true`, also a `schema-registry`
-  Deployment and Service (Apicurio, in-memory storage), waited on until its
-  rollout completes.
+Setup first checks credentials, cluster access, and node architectures. It
+installs the Pod Identity agent if absent and waits for it to become active.
+It also installs the Flink operator when its CRD is absent, disabling its
+validating webhook so cert-manager is not required.
 
-It ends by printing the values `site.yaml` needs, the IAM bootstrap string
-among them. `--write-site PATH` also writes them, as a complete `site.yaml` at
-`PATH` — every key `site.aws.example.yaml` has, with `pricing` left at the zeros
-to fill in. It refuses rather than overwrite a file already there, and refuses
-before it creates anything rather than after the wait for MSK.
+Setup then provisions:
 
-## Once per account
+- **S3:** a bucket with public access blocked and the benchmark ownership tag.
+  It suspends enabled versioning to avoid retaining billable deleted corpus
+  data. Existing buckets must carry `lakehouse-ingest-bench=true`; setup will
+  not overwrite tags or change versioning on an unrelated bucket.
+- **ECR:** the `lakehouse-ingest-bench/harness`, `lakehouse-ingest-bench/flink`,
+  and `lakehouse-ingest-bench/spark` repositories.
+- **MSK:** a provisioned cluster in the EKS VPC's private subnets, with one
+  broker per availability zone, IAM authentication, and TLS. Its security
+  group allows port 9098 from all VPC CIDRs, covering node and pod ranges;
+  IAM controls client authorization.
+- **IAM:** the `lakehouse-ingest-bench-harness` role, trusted by
+  `pods.eks.amazonaws.com` for `sts:AssumeRole` and `sts:TagSession`. Its inline
+  policy covers the bucket's three prefixes, the `ingest_bench` Glue database,
+  and this MSK cluster's topics and consumer groups. Pod Identity associations
+  bind all three benchmark service accounts to the role.
+- **Kubernetes:** the namespace, harness/Flink/Spark service accounts, and
+  engine RBAC. The Spark operator is installed after the namespace because its
+  chart creates a Role there. It watches `spark.jobNamespaces={$NAMESPACE}`
+  and uses the benchmark Spark identity. Its webhook must be enabled to mount
+  run ConfigMaps in driver and executor pods. Setup does not repair an existing
+  Spark operator installation whose webhook is disabled.
+- **Optional registry:** with `WITH_SCHEMA_REGISTRY=true`, an in-memory
+  Apicurio Deployment and Service, followed by a rollout wait.
+
+Setup prints the values needed for `site.yaml`. `--write-site PATH` writes a
+complete configuration matching `site.aws.example.yaml`, with pricing left at
+zero for you to fill in. It rejects an existing path before creating resources.
 
 ```bash
 export AWS_REGION=... CLUSTER_NAME=...
-deploy/aws/setup.sh --write-site site.yaml # bucket, ECR, MSK, IAM, namespace, operators, and the site config
-scripts/push-images.sh                     # harness and both engine images, tagged with this commit
-scripts/gen-corpus.sh smoke --shards 4     # a corpus in the bucket, as a Job
+deploy/aws/setup.sh --write-site site.yaml # shared infrastructure and site configuration
+scripts/push-images.sh                    # harness and engine images, tagged with this commit
+scripts/gen-corpus.sh smoke --shards 4     # generate a corpus in the bucket
 ```
 
-Fill in `site.yaml`'s `pricing` before publishing a result from it: it is the
-one value the account cannot be asked for, and a result published at the zeros
-is refused. Without `--write-site`, `setup.sh` only prints the values and
-`cp site.aws.example.yaml site.yaml` is the copy to fill in by hand.
+Fill in `site.yaml` pricing before publishing results; validation rejects zero
+prices. Without `--write-site`, copy `site.aws.example.yaml` to `site.yaml` and
+fill it using the printed values.
 
 `push-images.sh` builds the harness and Spark images for `linux/amd64` by
-default; `--platform linux/arm64`, or two comma-separated platforms for a
-manifest list, builds for something else. The Flink image is amd64 whatever is
-passed. It refuses an uncommitted tree, because the tag is the commit and would
-then name something that is not in the image — `--allow-dirty` overrides that.
+default. Use `--platform linux/arm64` or a comma-separated platform list to
+change this. Flink remains amd64. Image tags identify commits, so the script
+rejects uncommitted changes unless `--allow-dirty` is set.
 
-`gen-corpus.sh <preset> --shards N` generates in N pods and merges them; see
-[`../../docs/corpus.md`](../../docs/corpus.md) for choosing a preset and a shard
-count. Then run a benchmark: [`../../docs/running.md`](../../docs/running.md) is
-the per-run driver sequence.
+Choose corpus presets and shard counts using the [corpus guide](../../docs/corpus.md),
+then follow the [per-run workflow](../../docs/running.md).
 
-> **MSK bills by the hour whether or not a run is using it,** and reaching
-> `ACTIVE` takes 15 to 30 minutes. The default two `kafka.m5.large` brokers with
-> 100 GiB each cost a few dollars a day — check the current MSK price for your
-> region before a long campaign. Tear it down between campaigns; `setup.sh`
-> recreates it, and a re-run against an existing cluster changes nothing.
+MSK continues billing while idle and can take 15–30 minutes to become active.
+Check regional pricing before a campaign and tear it down between campaigns.
+Rerunning setup reuses the cluster and can grow broker storage when requested.
 
-## `teardown.sh`
+## Remove shared resources
 
 ```bash
-deploy/aws/teardown.sh          # the namespace, every association, the role, MSK and its security group
-deploy/aws/teardown.sh --all    # also the ECR repositories, both operators and the bucket
-deploy/aws/teardown.sh --all --yes   # the same, unattended
+deploy/aws/teardown.sh              # namespace, identity, MSK, and security group
+deploy/aws/teardown.sh --all        # also ECR, both operators, and the bucket
+deploy/aws/teardown.sh --all --yes  # same cleanup without the bucket prompt
 ```
 
-In that order, because each deletion needs the one before it: the namespace
-goes first so no pod is still using MSK or the role, and the security group last
-because MSK's network interfaces hold it for a few minutes after the cluster
-goes. Without `--all` the bucket, the images and the operators stay — a corpus
-is expensive to rebuild, images are slow to push, and an operator may be
-shared.
+Cleanup follows dependency order: stop workloads, remove their identity,
+delete MSK, then remove its security group after network interfaces release it.
+Without `--all`, the bucket, images, and operators remain available for another
+campaign or other workloads.
 
-Under `--all` the bucket goes **last, and only after it is asked about**: it is
-every corpus, every run's artifacts and the warehouse, so it is matched on the
-tag the way the security group is — a bucket of that name this benchmark did not
-create is refused — and named before it is emptied. `--yes` answers the prompt
-for a teardown run from a script. A refusal there leaves the images and the
-operators already gone rather than a teardown to run again.
-The `eks-pod-identity-agent` add-on is always left installed: it is free, and it
-is a property of the cluster rather than of this benchmark.
+With `--all`, bucket deletion happens last and requires the benchmark ownership
+tag plus confirmation. It removes every corpus, run artifact, and warehouse
+object. `--yes` supplies confirmation for unattended use. Declining the prompt
+leaves the images and operators already removed.
 
-## Templating
+The EKS cluster and `eks-pod-identity-agent` add-on remain installed.
 
-Two conventions, on purpose. Files here — the IAM documents under `iam/` and
-`k8s/namespace.yaml.tmpl` — use `${NAME}` and are rendered by these bash scripts
-with `envsubst`. The Kubernetes templates the harness renders in Python use
-`__NAME__` instead, so a manifest carrying shell or Helm syntax of its own is
-never touched by the wrong renderer.
+## Template conventions
 
-## If you have no cluster
+AWS IAM documents and `k8s/namespace.yaml.tmpl` use `${NAME}` placeholders,
+rendered by Bash with `envsubst`. Harness Kubernetes templates use `__NAME__`
+markers, rendered in Python. Separate delimiters keep embedded shell or Helm
+syntax intact.
 
-`eksctl-cluster.example.yaml` creates a minimal one: four `m6i.xlarge` amd64
-nodes in private subnets — a smoke spec's peak, by the count above — the Pod
-Identity agent, and its own VPC across three zones, where `setup.sh` also puts
-the MSK brokers. Replace both placeholders.
+## Create an EKS cluster
+
+`eksctl-cluster.example.yaml` creates four `m6i.xlarge` amd64 nodes in private
+subnets, the Pod Identity agent, and a VPC across three availability zones.
+This fits the smoke workload described above. Replace both placeholders first.
 
 ```bash
 eksctl create cluster -f deploy/aws/eksctl-cluster.example.yaml   # about 20 minutes
 eksctl delete cluster -f deploy/aws/eksctl-cluster.example.yaml
 ```
 
-Neither script above runs `eksctl`, and neither deletes what it made.
+Run these commands yourself; setup and teardown do not invoke `eksctl`.
 
-## The in-cluster stack's half
+## In-cluster AWS resources
 
-`deploy/k8s/stack/setup.sh` runs the broker and the catalog inside the cluster
-instead of on MSK and Glue. What it needs of the account it takes from
-`_stack_hooks.sh` here, sourced with `CLOUD=aws`: a role,
-`lakehouse-ingest-bench-stack`, over the bucket's three prefixes and nothing
-else, bound through Pod Identity to the three run identities and the
-catalog's; a gp3 `StorageClass` from `k8s/kafka-storageclass.yaml.tmpl`; and
-the EBS CSI driver, which it refuses without. `eksctl-kafka-nodegroup.example.yaml`
-makes the brokers' node group. The bucket and the registry come from
-`setup.sh` above, which also makes an MSK cluster this shape never uses — tear
-that down when the stack is what you run.
+The [in-cluster stack](../k8s/stack/README.md) uses Kafka and Lakekeeper in
+place of MSK and Glue. With `CLOUD=aws`, `_stack_hooks.sh` provisions the
+`lakehouse-ingest-bench-stack` role for the bucket's three prefixes and binds
+it through Pod Identity to the run and catalog accounts. It also creates a gp3
+StorageClass and requires the EBS CSI driver.
+
+Use `eksctl-kafka-nodegroup.example.yaml` for dedicated broker nodes. The AWS
+setup above supplies the bucket and image registry, but also creates an MSK
+cluster that this deployment does not use. Remove that unused MSK cluster.
