@@ -162,9 +162,9 @@ def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_pa
     """The empty string and the sentinel are the same non-disclosure.
 
     `results/README.md` states that a published result discloses the machine
-    types behind its cost column, and the two engines had disagreed about what
-    "not stated" is — one an empty string, which the rule caught, the other a
-    word, which it waved through.
+    types behind its cost column, and a fleet can decline to say in two ways:
+    an empty string, or the sentinel word. Both are the same non-disclosure, so
+    the rule has to refuse both.
     """
     for absent in ("", MACHINE_TYPE_UNSPECIFIED):
 
@@ -185,8 +185,8 @@ def test_validate_results_fails_on_a_fleet_that_discloses_no_machine_type(tmp_pa
 def test_validate_results_accepts_a_spec_that_states_the_whole_corpus_explicitly(tmp_path: Path) -> None:
     """`seconds: null` is how a spec says the offer is not shortened.
 
-    It is the form the design's own example shows, and reading the key rather
-    than its value refused exactly that.
+    It is the form the design's own example shows, so the check reads whether
+    the key is there and not what it holds.
     """
 
     def mutate(document: dict[str, object]) -> None:
@@ -221,8 +221,8 @@ def test_validate_results_fails_when_two_results_measured_the_same_table(tmp_pat
 def test_validate_results_fails_on_a_cost_column_with_no_price_behind_it(tmp_path: Path) -> None:
     """Present is not disclosed: the shipped site examples price a run at zero.
 
-    `RESULTS.md` renders that honestly as `n/a`, so the consequence was a rule
-    stated more widely than the code enforced it.
+    `RESULTS.md` renders that honestly as `n/a`, so the rule is that a cost
+    column names the prices behind it rather than that the field is there.
     """
     for field in ("vcpu_hour_usd", "gib_hour_usd"):
 

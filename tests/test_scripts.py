@@ -476,7 +476,7 @@ def test_the_kafka_version_choice_reaches_its_refusal(offered: str, chosen: str 
     account — so the block is lifted out of the script and run on its own. It is
     worth running rather than reading because the filter is a pipeline inside an
     assignment: under `pipefail` an unguarded one aborts the script the moment
-    `grep` matches nothing, which silently skipped the refusal below it.
+    `grep` matches nothing, taking the refusal below it with it.
     """
     harness = f"""
         set -euo pipefail
@@ -774,10 +774,9 @@ def test_the_spark_operator_is_installed_once_from_the_kubeflow_chart_at_the_pin
     the chart's own spark identity is off because a run's driver runs as the
     account Pod Identity is bound to.
 
-    Counted rather than matched as substrings: this block was once pasted twice
-    into the script, which every `in` assertion passed while the second copy
-    printed its log lines into the middle of the values an operator copies —
-    and two copies of an install are two things to keep in step.
+    Counted rather than matched as substrings: a second copy of the install
+    satisfies every `in` assertion while printing its own log lines into the
+    values an operator copies, and two copies are two things to keep in step.
     """
     setup = AWS_SETUP.read_text()
     assert setup.count("get crd sparkapplications.sparkoperator.k8s.io") == 1
@@ -1290,10 +1289,10 @@ def test_a_root_these_drivers_cannot_reach_is_refused_by_name(tmp_path: Path, pa
 def test_the_shell_calls_the_harness_with_arguments_it_takes() -> None:
     """An inline `python -c` is a call site neither mypy nor a test would see.
 
-    `measure-producer.sh` reaches into `kafka_admin` directly, so when those
-    functions gained the client properties every call takes, that script kept
-    passing the old arity — and nothing short of running it could say so. Every
-    call whose arguments are literals is bound against the real signature here.
+    `measure-producer.sh` reaches into `kafka_admin` directly, so a change to
+    one of those signatures leaves that script passing an arity nothing checks,
+    and nothing short of running it can say so. Every call whose arguments are
+    literals is bound against the real signature here.
     """
     checked = 0
     for script in _shell_entrypoints():
@@ -2207,7 +2206,8 @@ def test_launch_starts_the_producer_for_a_table_its_engine_will_create(tmp_path:
         assert "--table-managed-by" not in scorer, scorer
     else:
         assert f"--table-managed-by {managed_by}" in scorer, scorer
-    # And the producer is applied, which is the thing the deadlock stopped.
+    # And the producer is applied, which is what the ordering above exists to
+    # reach.
     assert _job_command(_named_job(run, f"producer-{RUN_OBJECT}")).startswith("produce ")
 
 
@@ -2218,8 +2218,8 @@ def test_a_batch_sized_pod_can_be_given_the_memory_its_preset_needs(tmp_path: Pa
     A generator holds a whole batch while it encodes one and a producer shard
     reads one whole batch object and decompresses it whole, so a 600 MB/s
     preset's batch needs gigabytes where the smoke one's needs hundreds of
-    megabytes. Both requests were fixed in a tracked file, so the only way to
-    raise either was to edit the repository.
+    megabytes. Both requests come from the driver's own variable, so raising
+    either is an environment variable and not an edit to this repository.
     """
     run_dir = tmp_path / "work" / "runs" / RUN_ID
     run_dir.mkdir(parents=True)
@@ -2564,8 +2564,8 @@ def test_a_teardown_waits_for_the_verdict_to_repeat(tmp_path: Path, required: in
     through a cold start, a checkpoint that took a moment, or a poll that read
     a stale prefix each produce a single breaching tick that the next one
     contradicts. Requiring the verdict to repeat is what separates those from
-    a fleet that will never catch up. `--breaches 1` is the old behaviour, for
-    a caller that wants it.
+    a fleet that will never catch up. `--breaches 1` acts on the first
+    breaching tick, for a caller that wants it.
     """
     gate_calls = tmp_path / "gate-calls.log"
     gate_calls.touch()
@@ -3278,8 +3278,8 @@ def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(
     stored = run_dir / "table-metadata.final.json"
     assert json.loads(stored.read_text()) == document, "the stored copy is the JSON, not the gzip"
 
-    # The reader that broke: purge parses this file for the location it removes,
-    # and against a gzip body it exited on a syntax error with the table intact.
+    # purge parses this file for the location it removes, so a gzip body would
+    # end it on a syntax error with the table intact.
     purged = _run_driver(PURGE, [RUN_ID, "--yes"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
     assert purged.result.returncode == 0, purged.result.stderr
     assert f"s3 rm --recursive {TABLE_LOCATION}" in purged.aws_calls

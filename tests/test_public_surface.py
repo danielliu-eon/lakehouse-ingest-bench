@@ -5,12 +5,11 @@ The first is that each script and module says which licence it is offered
 under. A file copied out of the repository loses its `LICENSE` neighbour, so a
 per-file SPDX line is what keeps the terms attached to the code.
 
-The second is that nothing in the tree names where the benchmark came from. It
-was extracted from a private tree, and it is run by strangers against their own
-accounts: a company name, an internal codename, a real bucket or a real account
-id is both a leak and a step nobody else can reproduce. Every one of those has a
-shape, and the shapes are cheap to check, which is what makes this a test rather
-than a review habit.
+The second is that nothing in the tree names a company, a product, a campaign,
+a real bucket or a real account id. It is run by strangers against their own
+accounts, so any of those is both a leak and a step nobody else can reproduce.
+Every one of those has a shape, and the shapes are cheap to check, which is
+what makes this a test rather than a review habit.
 """
 
 from __future__ import annotations
@@ -32,11 +31,11 @@ SELF = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 SPDX_LINE = "# SPDX-License-Identifier: Apache-2.0"
 LICENSED_SUFFIXES = (".py", ".sh")
 
-# Words from the private tree: the company, its domain, its products and the
-# internal campaigns whose workload shapes this benchmark reproduces. `rise` is
-# also an ordinary English word, so prose has to reach for "increase" instead —
-# a whole-word match keeps `sunrise` and `peony` out of it, but not a sentence
-# that genuinely wants the verb.
+# The names that must never reach a published artifact: a company, its domain,
+# its products and its internal campaigns. `rise` is also an ordinary English
+# word, so prose has to reach for "increase" instead — a whole-word match keeps
+# `sunrise` and `peony` out of it, but not a sentence that genuinely wants the
+# verb.
 INTERNAL_VOCABULARY = ("adevents", "eon", "maelstrom", "rise")
 
 # The account id AWS reserves for its own documentation, and so the one 12-digit
