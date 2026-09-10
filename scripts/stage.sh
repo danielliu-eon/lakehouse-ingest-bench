@@ -10,7 +10,6 @@
 #
 # It prints the run id, and nothing else, on stdout.
 set -euo pipefail
-# The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

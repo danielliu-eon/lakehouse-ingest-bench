@@ -9,7 +9,6 @@
 # uncommitted tree refuses — the tag would name a commit that is not what is
 # in the image.
 set -euo pipefail
-# The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

@@ -72,10 +72,6 @@ def zigzag_lengths(values: np.ndarray) -> np.ndarray:
 # Avro cell encoding
 # ---------------------------------------------------------------------------
 
-# A record is the concatenation of its fields' encodings and carries no framing
-# of its own, which is what lets a block of rows be assembled from per-column
-# byte runs instead of from a row-at-a-time encoder.
-
 
 def avro_long(value: int) -> bytes:
     magnitude = zigzag(value) & _UINT64_MASK
@@ -157,7 +153,6 @@ def fixed_segment(payload: np.ndarray, rows: int, width: int) -> Segment:
 
 
 def joined_segment(encoded: np.ndarray, lengths: np.ndarray) -> Segment:
-    """Pre-encoded cells taken by rank and concatenated."""
     return Segment(np.frombuffer(b"".join(cast(list[bytes], encoded.tolist())), dtype=np.uint8), lengths)
 
 
@@ -304,7 +299,6 @@ def value_for_rank(column: ColumnDistribution, rank: int) -> object | None:
 
 
 def blob_byte_width(column: ColumnDistribution, payload_width: int) -> int:
-    """The payload column carries the calibrated remainder; any other blob its declared width."""
     return payload_width if column.role == ROLE_PAYLOAD else column.width
 
 

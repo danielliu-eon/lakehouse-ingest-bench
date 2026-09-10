@@ -170,12 +170,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Drop one topic, from wherever the cluster is reachable.
-
-    A separate command rather than part of teardown because a managed broker
-    is often reachable only from inside its own network, so this runs as a Job
-    on the cluster while the teardown script runs on an operator's machine.
-    """
     parsed = build_parser().parse_args(argv)
     bootstrap, topic = str(parsed.bootstrap), str(parsed.topic)
     client = resolve_env_placeholders(parse_key_values([str(prop) for prop in parsed.kafka_prop], "--kafka-prop"))

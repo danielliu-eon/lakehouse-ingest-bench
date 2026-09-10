@@ -14,7 +14,6 @@
 # through a cold start, a checkpoint that took a moment or a poll that read a
 # stale prefix each produce one breaching tick the next one contradicts.
 set -euo pipefail
-# The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

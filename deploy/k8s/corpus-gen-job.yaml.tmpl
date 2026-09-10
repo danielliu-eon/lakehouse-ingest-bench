@@ -1,11 +1,6 @@
 # The corpus generator, one pod per shard. Indexed completion is what gives each
 # pod its shard number: `$JOB_COMPLETION_INDEX` reaches the command line through
 # the image's shell entrypoint, so one rendered command serves every shard.
-#
-# Every shard writes under its own `--out` prefix. The generator names a corpus
-# directory after its preset and hash, so shards pointed at one prefix would
-# write their batches into the same directory and each would publish metadata
-# describing only its own — which is what `merge-corpus` exists to combine.
 apiVersion: batch/v1
 kind: Job
 metadata:

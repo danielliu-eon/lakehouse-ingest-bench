@@ -12,7 +12,6 @@
 # It never creates, deletes or reconfigures the EKS cluster. That is the
 # operator's; deploy/aws/eksctl-cluster.example.yaml makes a minimal one.
 set -euo pipefail
-# The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
 AWS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/_lib.sh

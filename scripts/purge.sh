@@ -14,7 +14,6 @@
 # its warehouse, and a prefix guessed from the name is a prefix that may belong
 # to something else.
 set -euo pipefail
-# The tools a missing prerequisite points at.
 PREREQ_DOC="deploy/aws/README.md"
 # shellcheck source=scripts/_lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/_lib.sh"

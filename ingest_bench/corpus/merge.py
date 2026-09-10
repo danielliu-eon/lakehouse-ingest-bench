@@ -123,8 +123,6 @@ def merge(shard_uris: list[str], out_uri: str) -> dict[str, object]:
 
     truth = _sum_partition_truth(shard_uris, preset)
     column_stats = _merge_column_stats(shard_uris, preset)
-    # The gates run before anything is written, so a corpus that failed one
-    # never exists to be picked up by a run.
     meta = finalize_corpus_json(
         preset,
         _as_int_value(first["seed"]),
