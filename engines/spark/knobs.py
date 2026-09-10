@@ -28,7 +28,7 @@ from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
 from ingest_bench.specs.env import PLACEHOLDER_FORM, has_placeholder
-from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
+from ingest_bench.specs.kubernetes import NAME, EngineKubernetes, object_name
 from ingest_bench.specs.model import KubernetesConfig, RunSpec, SiteConfig
 
 # The catalog the job's table is addressed through. Nothing outside the
@@ -614,14 +614,8 @@ def _cluster(site: SiteConfig) -> KubernetesConfig:
 
 
 def kubernetes_name(run_id: str) -> str:
-    """The run id as a Kubernetes object name.
-
-    An RFC 1123 subdomain is lowercase, and a run id's stamp is not: the `T`
-    and the `Z` in it are refused by the API server. Only the names are
-    lowercased — the run id itself is the identifier the topic, the table and
-    the run directory are addressed by, and it stays as it is.
-    """
-    return run_id.lower()
+    """The run id as a Kubernetes object name; the rule is `specs.kubernetes`'s."""
+    return object_name(run_id)
 
 
 def configmap_name(derived: Derived) -> str:

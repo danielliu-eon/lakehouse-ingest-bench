@@ -857,6 +857,85 @@ def test_stage_on_a_cluster_renders_its_documents_and_uploads_the_run_directory(
     assert ":abc1234" in (staged.run_dir / "flinkdeployment.yaml").read_text()
 
 
+def _named_engine_owned_spec(tmp_path: Path, engine: str, name: str) -> Path:
+    """The shipped spec for ``engine``, renamed, with the table left to the engine.
+
+    The name is the whole of what these cases vary. Leaving the table to the
+    engine is what lets staging reach the renderers with no catalog to create
+    one in, as `_engine_owned_flink_spec` does for the case above.
+    """
+    spec = yaml.safe_load((ROOT / "runs" / f"smoke-{engine}.yaml").read_text())
+    spec["name"] = name
+    spec["table"] = {**spec["table"], "managed_by": "engine"}
+    path = tmp_path / f"{name}.yaml"
+    path.write_text(yaml.safe_dump(spec))
+    return path
+
+
+def test_stage_refuses_a_name_its_engines_operator_would_reject(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """The Flink operator refuses a FlinkDeployment named over 45 characters.
+
+    A run's object name is the spec's name plus a 17-character stamp, so the
+    check is against the derived name and not against the spec's own. It is
+    raised before the topic is created because the operator's own rejection
+    lands after the topic and the table exist, and leaves a driver waiting out
+    its whole timeout on a document that will never run.
+    """
+    corpus_root, _ = corpus
+    over = "flink-run-with-a-29-char-name"
+    assert len(over) == 29
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="45"):
+        stage.stage(
+            _named_engine_owned_spec(tmp_path, "flink", over),
+            _rest_cluster_site(tmp_path, corpus_root),
+            tmp_path / "runs",
+            admin,
+            stamp="20260908T193000Z",
+            image_tag="abc1234",
+        )
+    assert admin.created == [] and admin.deleted == []
+
+
+def test_stage_takes_the_longest_name_its_engines_operator_accepts(tmp_path: Path, corpus: tuple[str, str]) -> None:
+    """One character shorter derives the longest object name the limit allows."""
+    corpus_root, _ = corpus
+    within = "flink-run-with-a-28char-name"
+    assert len(within) == 28
+    staged = stage.stage(
+        _named_engine_owned_spec(tmp_path, "flink", within),
+        _rest_cluster_site(tmp_path, corpus_root),
+        tmp_path / "runs",
+        FakeAdmin(),
+        stamp="20260908T193100Z",
+        image_tag="abc1234",
+    )
+    assert len(staged.derived.run_id) == 45
+
+
+def test_stage_takes_any_legal_name_for_an_engine_that_declares_no_limit(
+    tmp_path: Path, corpus: tuple[str, str]
+) -> None:
+    """No declared limit is no check, not a limit of zero.
+
+    The spark-operator publishes no name length of its own, and `spec.name`'s
+    own pattern already keeps every object name derived from it inside the 63
+    characters a Kubernetes label value takes.
+    """
+    corpus_root, _ = corpus
+    longest = "spark-run-with-the-longest-name-yet"
+    assert len(longest) == 35, "the longest name spec.name's own pattern accepts"
+    staged = stage.stage(
+        _named_engine_owned_spec(tmp_path, "spark", longest),
+        _rest_cluster_site(tmp_path, corpus_root),
+        tmp_path / "runs",
+        FakeAdmin(),
+        stamp="20260908T193200Z",
+        image_tag="abc1234",
+    )
+    assert staged.derived.run_id == f"{longest}-20260908T193200Z"
+
+
 def test_replication_factor_follows_the_broker_count(tmp_path: Path, corpus: tuple[str, str]) -> None:
     corpus_root, _ = corpus
     site_path = _site_file(tmp_path, corpus_root)

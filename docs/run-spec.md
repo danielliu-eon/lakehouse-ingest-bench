@@ -15,7 +15,7 @@ Terms below are defined in [`methodology.md`](methodology.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `name` | *required* | the run's base name. It becomes a topic, a table and a Kubernetes object, so it must match `^[a-z0-9][a-z0-9-]{2,34}$` — 35 characters is what survives a run id's stamp and a driver's longest prefix inside the 63-character label a Job stamps on its pods |
+| `name` | *required* | the run's base name. It becomes a topic, a table and a Kubernetes object, so it must match `^[a-z0-9][a-z0-9-]{2,34}$` — 35 characters is what survives a run id's stamp and a driver's longest prefix inside the 63-character label a Job stamps on its pods. An engine whose operator caps the object name shortens that further, and staging refuses one past it by name: Flink's takes 45 characters, so **28** of name |
 | `engine` | *required* | `external`, or a managed engine — `flink` or `spark` |
 | `corpus` | *required* | a shipped preset name, or a path to a preset file. See [`corpus.md`](corpus.md) |
 | `<engine>:` | *required* for a managed engine | that engine's knobs; see `engines/<name>/README.md`. Refused for `engine: external` |

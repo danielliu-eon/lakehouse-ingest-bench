@@ -194,7 +194,7 @@ missing verdict or a missing cost:
 
 For a run on a cluster `knobs.py` owes one more thing: `KUBERNETES`, an
 `EngineKubernetes` naming the kind of object a run is, where its state sits in
-the status, what running is called there, the Service that carries its HTTP API
-and the labels its pods carry. The cluster drivers read those through
-`engine-k8s`, and `smoke.sh` reads the local shape through `compose.sh` — so a
-third engine adds no line to `scripts/`, bar the default `--engine` name.
+the status, what running is called there, which Service carries its HTTP API,
+the labels its pods carry and the longest object name its operator takes. The
+drivers read all but that length through `engine-k8s` and staging checks it, so
+a third engine adds no line to `scripts/` bar the default `--engine` name.

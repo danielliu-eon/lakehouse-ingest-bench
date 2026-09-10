@@ -24,7 +24,7 @@ from ingest_bench.catalog import table_identifier
 from ingest_bench.corpus.metadata import CorpusMetadata
 from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
 from ingest_bench.specs.derive import Derived
-from ingest_bench.specs.kubernetes import NAME, EngineKubernetes
+from ingest_bench.specs.kubernetes import NAME, EngineKubernetes, object_name
 from ingest_bench.specs.model import (
     VALUE_ENCODING_AVRO,
     VALUE_ENCODING_CONFLUENT,
@@ -106,6 +106,11 @@ KUBERNETES = EngineKubernetes(
     pods_selector="",
     document_file=FLINKDEPLOYMENT_FILE,
     configmap_file=CONFIGMAP_FILE,
+    # The operator publishes the JobManager's REST endpoint as a Service named
+    # by the FlinkDeployment itself, so the deployment's name has to be a legal
+    # DNS-1035 label for that Service — which the operator validates at 45
+    # characters and refuses beyond, before it creates anything.
+    max_object_name_length=45,
 )
 
 # The type each knob is declared as. This is also the accepted surface: a key
@@ -652,14 +657,8 @@ def _cluster(site: SiteConfig) -> KubernetesConfig:
 
 
 def kubernetes_name(run_id: str) -> str:
-    """The run id as a Kubernetes object name.
-
-    An RFC 1123 subdomain is lowercase, and a run id's stamp is not: the `T`
-    and the `Z` in it are refused by the API server. Only the names are
-    lowercased — the run id itself is the identifier the topic, the table and
-    the run directory are addressed by, and it stays as it is.
-    """
-    return run_id.lower()
+    """The run id as a Kubernetes object name; the rule is `specs.kubernetes`'s."""
+    return object_name(run_id)
 
 
 def configmap_name(derived: Derived) -> str:

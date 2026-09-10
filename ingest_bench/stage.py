@@ -30,8 +30,9 @@ from ingest_bench.schema_registry import register_schema, subject_for
 from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
 from ingest_bench.specs.derive import Derived
-from ingest_bench.specs.engines import knobs_for
+from ingest_bench.specs.engines import knobs_for, kubernetes_for
 from ingest_bench.specs.env import resolve_env_placeholders
+from ingest_bench.specs.kubernetes import object_name
 from ingest_bench.table.create import create_table, parse_partition
 from ingest_bench.table.ddl import spark_sql_ddl
 
@@ -229,6 +230,28 @@ def _facts(
     }
 
 
+def _refuse_an_unaddressable_name(spec: model.RunSpec, derived: Derived) -> None:
+    """Refuse a run whose object name is longer than its engine's operator takes.
+
+    A run's Kubernetes object name is its run id, so it is the spec's name plus
+    a stamp — and the operator that refuses the name refuses the document the
+    render produces, by which point the topic and the table exist and the
+    driver is waiting on a resource that will never run. An engine whose
+    operator publishes no bound declares none, and nothing is checked.
+    """
+    limit = kubernetes_for(spec.engine).max_object_name_length
+    if limit is None:
+        return
+    name = object_name(derived.run_id)
+    if len(name) <= limit:
+        return
+    raise ValueError(
+        f"spec.name {spec.name!r} is {len(spec.name)} characters, and a {spec.engine!r} run's object name is that "
+        f"plus the run's stamp — {len(name)} characters, past the {limit} its operator accepts. "
+        f"Name this run in at most {limit - (len(name) - len(spec.name))} characters"
+    )
+
+
 def _registry_for(spec: model.RunSpec, site: model.SiteConfig) -> model.SchemaRegistryConfig | None:
     """The registry this run registers with, or ``None`` for a raw-Avro run.
 
@@ -315,6 +338,7 @@ def stage(
     if not spec.is_external():
         knobs = knobs_for(spec.engine)
         knobs.validate(spec.engine_block, spec, meta)
+        _refuse_an_unaddressable_name(spec, derived)
         # Refused here rather than at the render that needs it: by then the
         # topic exists and the table with it, so a forgotten flag would cost a
         # rollback instead of an error message.

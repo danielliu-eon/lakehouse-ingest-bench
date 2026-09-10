@@ -31,6 +31,11 @@ class EngineKubernetes:
     wherever the run's object name belongs. ``pods_selector`` is empty for an
     engine whose check reads nothing off the pods, and its check is then not
     given a pod list at all.
+
+    ``max_object_name_length`` is the longest object name the engine's operator
+    accepts, and ``None`` for one that publishes no bound of its own. Staging
+    checks the derived name against it, so it is the one field below that no
+    driver reads.
     """
 
     kind: str
@@ -44,6 +49,7 @@ class EngineKubernetes:
     pods_selector: str
     document_file: str
     configmap_file: str
+    max_object_name_length: int | None = None
 
     def texts(self) -> dict[str, str]:
         """Every field as the one line of text a shell driver reads it as.
@@ -68,12 +74,31 @@ class EngineKubernetes:
         }
 
 
-# The field names, in declaration order, which is the order `engine-k8s` prints
-# them in. Read off the dataclass so that a field added without a line in
-# `texts` is a failure rather than a field no driver can ask for.
-FIELDS: tuple[str, ...] = tuple(field.name for field in fields(EngineKubernetes))
+# The fields no shell driver reads. A length is not a name a driver addresses:
+# it is checked in Python, before the run has an object to address. Named here
+# rather than quietly left out of `texts`, so that FIELDS below still makes a
+# field added without a line there a failure and not a field no driver can ask
+# for.
+_UNPRINTED = frozenset({"max_object_name_length"})
+
+# The field names a driver reads, in declaration order, which is the order
+# `engine-k8s` prints them in.
+FIELDS: tuple[str, ...] = tuple(field.name for field in fields(EngineKubernetes) if field.name not in _UNPRINTED)
 
 
 def for_name(text: str, name: str) -> str:
     """``text`` with `NAME` replaced by a run's object name."""
     return text.replace(NAME, name)
+
+
+def object_name(run_id: str) -> str:
+    """``run_id`` as a Kubernetes object name.
+
+    An RFC 1123 name is lowercase and a run id's stamp is not: the `T` and the
+    `Z` in it are refused by the API server. Only the object names are
+    lowercased — the run id itself is the identifier the topic, the table and
+    the run directory are addressed by, and it stays as it is. The shell says
+    the same thing in `k8s_object_name`, because the drivers address the
+    objects the renderers named.
+    """
+    return run_id.lower()

@@ -61,6 +61,10 @@ def test_the_spark_descriptor_names_what_the_operator_named() -> None:
     # A query that ended — cleanly or not — leaves no fleet, and at staging
     # time the topic is empty, so any of the five means the run cannot start.
     assert descriptor.failed_states == ("FAILED", "SUBMISSION_FAILED", "FAILING", "COMPLETED", "SUCCEEDING")
+    # The spark-operator publishes no name length of its own, so none is
+    # declared: `spec.name`'s own pattern already keeps every object name
+    # derived from it inside the 63 characters a label value takes.
+    assert descriptor.max_object_name_length is None
 
 
 def test_the_flink_descriptor_names_what_the_operator_named() -> None:
@@ -83,6 +87,9 @@ def test_the_flink_descriptor_names_what_the_operator_named() -> None:
     assert descriptor.pods_selector == ""
     assert descriptor.document_file == "flinkdeployment.yaml"
     assert descriptor.configmap_file == "flink-job-configmap.yaml"
+    # The operator validates the deployment's own name at 45 characters,
+    # because the Service carrying the REST endpoint is named by it.
+    assert descriptor.max_object_name_length == 45
 
 
 def test_a_job_that_ended_before_the_run_started_is_a_failure_state() -> None:
@@ -124,6 +131,17 @@ def test_a_field_that_does_not_exist_is_refused_rather_than_answered_empty() -> 
     """A driver that read an empty answer would address the cluster with no name."""
     with pytest.raises(ValueError, match="no such field"):
         render("flink", ["rest_service"])
+
+
+def test_the_name_length_a_run_is_refused_by_is_not_a_field_a_driver_can_ask_for() -> None:
+    """It is checked in Python, before the run has an object for a driver to address.
+
+    A driver that read it would be reading a number it has nothing to do with:
+    by the time one runs, staging has already refused every name past it.
+    """
+    assert "max_object_name_length" not in render("flink", [])
+    with pytest.raises(ValueError, match="no such field"):
+        render("flink", ["max_object_name_length"])
 
 
 def test_the_console_script_prints_a_field_and_refuses_the_rest(capsys: pytest.CaptureFixture[str]) -> None:
