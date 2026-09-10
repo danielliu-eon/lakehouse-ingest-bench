@@ -254,6 +254,13 @@ class WaitedJob:
     calls: str
 
 
+# The Job's one pod, and what the scheduler said about it. A pod that never
+# scheduled has no log, so this line is the whole of what a timed-out wait has
+# to explain itself with.
+POD = "a-job-2xk4t"
+SCHEDULER_REFUSAL = "Warning FailedScheduling 0/3 nodes are available: Insufficient cpu"
+
+
 def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
     """`_k8s.sh`'s own wait, against a `kubectl` answering one reading at a time.
 
@@ -276,6 +283,10 @@ def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
             kubectl() {{
                 printf 'kubectl %s\\n' "$*" >>'{calls}'
                 case "$*" in
+                # Before the conditions arm below, which its own read would
+                # otherwise match: a pod name is read with a jsonpath too.
+                *"get pods"*) printf '{POD}\\n' ;;
+                *"get events"*) printf '{SCHEDULER_REFUSAL}\\n' ;;
                 *jsonpath*)
                     head -n 1 '{conditions}'
                     tail -n +2 '{conditions}' >'{conditions}.rest'
@@ -284,6 +295,7 @@ def _waited_job(answers: list[str], timeout_s: int = 1) -> WaitedJob:
                 *logs*) printf 'the job said this\\n' ;;
                 esac
             }}
+{_shell_function(K8S_LIB, "k8s_job_pod_events")}
 {_shell_function(K8S_LIB, "k8s_job_tail")}
 {_shell_function(K8S_LIB, "k8s_wait_job")}
             k8s_wait_job a-job {timeout_s}
@@ -315,9 +327,130 @@ def test_a_job_is_waited_for_until_it_reaches_one_of_its_two_ends(
     # Its own log, and only where the end was not the good one.
     assert ("logs job/a-job --tail=40" in waited.calls) is tailed, waited.calls
     assert ("the job said this" in waited.result.stderr) is tailed, waited.result.stderr
+    # And its pods' events beside it: a pod that never scheduled has an empty
+    # log, and the scheduler's refusal is only ever in the events.
+    assert (f"get events --field-selector involvedObject.name={POD}" in waited.calls) is tailed, waited.calls
+    assert (SCHEDULER_REFUSAL in waited.result.stderr) is tailed, waited.result.stderr
     # Only the conditions the API says are true, so a `Failed: False` cannot be
     # read as a failure.
     assert '{range .status.conditions[?(@.status=="True")]}' in waited.calls, waited.calls
+
+
+# What an m6i.xlarge reports allocatable — four vCPU less the kubelet's own
+# reservation — which is the node the shipped eksctl example builds.
+NODE_ALLOCATABLE = "3920m"
+
+
+def _node(name: str, taint: str | None = None) -> dict[str, object]:
+    spec: dict[str, object] = {} if taint is None else {"taints": [{"key": "a-pool", "effect": taint}]}
+    return {"metadata": {"name": name}, "spec": spec, "status": {"allocatable": {"cpu": NODE_ALLOCATABLE}}}
+
+
+def _pod(node: str | None, *requests: str | None, phase: str = "Running") -> dict[str, object]:
+    """One pod of ``requests``, a container each, with None for a container that asks for nothing."""
+    containers = [{} if cpu is None else {"resources": {"requests": {"cpu": cpu}}} for cpu in requests]
+    spec: dict[str, object] = {"containers": containers}
+    if node is not None:
+        spec["nodeName"] = node
+    return {"spec": spec, "status": {"phase": phase}}
+
+
+def _nodes_with_free_cpu(
+    tmp_path: Path,
+    nodes: list[dict[str, object]],
+    pods: list[dict[str, object]],
+    millicores: int,
+    tolerations: str,
+) -> subprocess.CompletedProcess[str]:
+    """`_k8s.sh`'s own count, lifted out and run against two files.
+
+    It takes files rather than reading the cluster precisely so this is
+    runnable, and it is worth running rather than reading because the
+    arithmetic is a jq program: a CPU quantity is `"2"`, `"500m"` or `"1.5"`
+    depending on who wrote the manifest, and the answer decides whether an
+    operator is warned that their run will not schedule.
+    """
+    (tmp_path / "nodes.json").write_text(json.dumps({"items": nodes}))
+    (tmp_path / "pods.json").write_text(json.dumps({"items": pods}))
+    harness = f"""
+        set -euo pipefail
+        log() {{ printf 'log %s\\n' "$*"; }}
+        die() {{ printf 'die %s\\n' "$*"; exit 3; }}
+        TOLERATIONS='{tolerations}'
+{_shell_function(K8S_LIB, "k8s_nodes_with_free_cpu")}
+        k8s_nodes_with_free_cpu {millicores} '{tmp_path / "nodes.json"}' '{tmp_path / "pods.json"}'
+    """
+    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+
+
+@needs_shell_tools
+@pytest.mark.parametrize(
+    ("nodes", "pods", "millicores", "tolerations", "counted"),
+    [
+        # Requested and not used: a node whose cores are idle but asked for is
+        # a node the scheduler fits nothing more onto. One 2-CPU pod and the
+        # daemonsets leave an m6i.xlarge short of a second.
+        (
+            [_node("node-a"), _node("node-b")],
+            [_pod("node-a", "2"), _pod("node-a", "250m", "100m"), _pod("node-b", "350m")],
+            2000,
+            "[]",
+            1,
+        ),
+        # A pod that has reached an end has released its request, and one no
+        # node is carrying yet was never holding a node's.
+        (
+            [_node("node-a"), _node("node-b")],
+            [_pod("node-a", "2", phase="Succeeded"), _pod("node-b", "2", phase="Failed"), _pod(None, "2")],
+            2000,
+            "[]",
+            2,
+        ),
+        # Both other spellings of a quantity, on the one node: 1500 + 500 is
+        # 2000, which leaves it short. A `1.5` read as 1.5 millicores would
+        # leave it the roomiest node on the cluster.
+        ([_node("node-a"), _node("node-b")], [_pod("node-a", "1.5", "500m"), _pod("node-b", "1")], 2000, "[]", 1),
+        # A container stating no request holds nothing.
+        ([_node("node-a")], [_pod("node-a", None)], 2000, "[]", 1),
+        # A NoSchedule taint keeps a pod off the node unless the site declares
+        # a toleration; PreferNoSchedule keeps it off nothing.
+        ([_node("node-a", "NoSchedule"), _node("node-b", "PreferNoSchedule")], [], 2000, "[]", 1),
+        ([_node("node-a", "NoSchedule"), _node("node-b", "PreferNoSchedule")], [], 2000, '[{"operator":"Exists"}]', 2),
+    ],
+    ids=["requests-not-usage", "ended-and-unbound-pods", "quantity-spellings", "no-request", "taints", "tolerated"],
+)
+def test_a_nodes_free_cpu_is_its_allocatable_less_what_its_pods_request(
+    tmp_path: Path,
+    nodes: list[dict[str, object]],
+    pods: list[dict[str, object]],
+    millicores: int,
+    tolerations: str,
+    counted: int,
+) -> None:
+    out = _nodes_with_free_cpu(tmp_path, nodes, pods, millicores, tolerations)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert out.stdout.strip() == str(counted), out.stdout + out.stderr
+
+
+@needs_shell_tools
+def test_a_cluster_that_could_not_be_read_is_not_a_cluster_with_no_room(tmp_path: Path) -> None:
+    """An unreadable answer must not count as zero free nodes.
+
+    The count is advisory, and the two reads behind it are a `kubectl` an
+    operator's kubeconfig may not be allowed to make. A document with no
+    `items` answered as `0` would warn every launch from a namespace-scoped
+    context that the run will not schedule.
+    """
+    (tmp_path / "nodes.json").write_text("")
+    (tmp_path / "pods.json").write_text("")
+    harness = f"""
+        set -euo pipefail
+        TOLERATIONS='[]'
+{_shell_function(K8S_LIB, "k8s_nodes_with_free_cpu")}
+        k8s_nodes_with_free_cpu 2000 '{tmp_path / "nodes.json"}' '{tmp_path / "pods.json"}'
+    """
+    out = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert out.stdout.strip() == "", out.stdout
 
 
 def test_both_workflows_install_the_same_checked_yq() -> None:
@@ -1496,6 +1629,11 @@ case "$*" in
 # and is answered by what each of them wrote rather than by one text twice.
 *"logs job/corpus-merge"*) cat "${STUB_MERGE_LOG:-$STUB_JOB_LOG}" ;;
 *"logs job/"*) cat "$STUB_JOB_LOG" ;;
+# The cluster's shape, for the check a launch makes before it applies a pod
+# no node may have room for. Unset answers nothing, which is the cluster a
+# driver could not read — and a driver that read none must warn about none.
+*"get nodes -o json"*) cat "${STUB_NODES:-/dev/null}" ;;
+*"get pods --all-namespaces -o json"*) cat "${STUB_CLUSTER_PODS:-/dev/null}" ;;
 *"get pods -l"*) printf '%s\\n' "${STUB_PODS:-}" ;;
 # The run object's error field, told apart from its state by the name of the
 # field: both engines put their operator's rejection under one named for it.
@@ -2175,6 +2313,68 @@ def test_launch_dates_the_epoch_ahead_of_itself_and_records_it(tmp_path: Path, l
     assert "--kafka-prop 'aws.region=eu-west-1'" in producer
 
     assert _mapping(run.applied[1]["spec"])["completions"] == 1
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("nodes", [2, 6], ids=["too-few", "enough"])
+def test_launch_says_when_the_cluster_has_no_room_for_its_own_pods(tmp_path: Path, nodes: int) -> None:
+    """A pod nothing schedules has an empty log, so the wait for it explains nothing.
+
+    The scorer and every producer shard ask for a whole node's worth of CPU on
+    the node size the shipped cluster builds, and a cluster already holding an
+    engine fleet may have room for none of them. Warned and not refused: a
+    cluster with an autoscaler is one where the Pending pod is what buys the
+    node, so the launch has to go on to apply them.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps(FACTS))
+    spec = yaml.safe_load((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    spec["producer"] = {**spec["producer"], "shards": 3}
+    (run_dir / "spec.yaml").write_text(yaml.safe_dump(spec))
+    (run_dir / "timeline.log").write_text("2026-09-08T12:00:00Z staged\n")
+
+    # One node already carries a pod of this size and the rest are empty, so
+    # `nodes - 1` of them have room for one more.
+    (tmp_path / "nodes.json").write_text(json.dumps({"items": [_node(f"node-{index}") for index in range(nodes)]}))
+    (tmp_path / "pods.json").write_text(json.dumps({"items": [_pod("node-0", "2")]}))
+
+    run = _run_driver(
+        LAUNCH,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {"STUB_NODES": str(tmp_path / "nodes.json"), "STUB_CLUSTER_PODS": str(tmp_path / "pods.json")},
+    )
+
+    assert run.result.returncode == 0, run.result.stderr
+    # Either way both Jobs are applied: the count is advice, not a gate.
+    assert [str(_mapping(document["metadata"])["name"]) for document in run.applied] == [
+        f"scorer-{RUN_OBJECT}",
+        f"producer-{RUN_OBJECT}",
+    ]
+    if nodes == 2:
+        # The scorer plus its three shards, against the nodes with room for one.
+        warning = f"{nodes - 1} of this cluster's nodes have 2000m of CPU free, and this run needs 4"
+        assert warning in run.result.stderr, run.result.stderr
+        assert f"see {AWS_DEPLOY.relative_to(REPO_ROOT).as_posix()}/README.md §Sizing the cluster" in run.result.stderr
+    else:
+        assert "of CPU free" not in run.result.stderr, run.result.stderr
+
+
+def test_the_cpu_a_launch_counts_against_is_what_its_pods_request() -> None:
+    """The driver's figure and the two manifests' requests are one number.
+
+    A template raised to three cores with the driver still counting nodes that
+    have two free would warn about a run that fits and say nothing about one
+    that does not.
+    """
+    stated = re.search(r"^POD_CPU_MILLICORES=(\d+)$", LAUNCH.read_text(), re.M)
+    assert stated is not None, "launch.sh no longer states what the pods it applies request"
+    for name in ("scorer-job.yaml.tmpl", "producer-job.yaml.tmpl"):
+        template = _mapping(yaml.safe_load((REPO_ROOT / "deploy" / "k8s" / name).read_text()))
+        container = _mapping(_sequence(_pod_spec(template)["containers"])[0])
+        requests = _mapping(_mapping(container["resources"])["requests"])
+        assert requests["cpu"] == str(int(stated.group(1)) // 1000), name
 
 
 @needs_shell_tools

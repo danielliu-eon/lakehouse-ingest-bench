@@ -10,10 +10,10 @@
 # rather than re-reading the file per call is what keeps a driver from applying
 # a manifest to one cluster and waiting on another.
 #
-# Nothing here writes to stdout except `k8s_job_logs`, `harness_local` and the
-# `site_*` readers, whose output is their answer. A driver's stdout is its
-# result — a corpus URI, a run id — and `kubectl`'s own narration would be read
-# as part of it.
+# Nothing here writes to stdout except `k8s_job_logs`, `k8s_nodes_with_free_cpu`,
+# `harness_local` and the `site_*` readers, whose output is their answer. A
+# driver's stdout is its result — a corpus URI, a run id — and `kubectl`'s own
+# narration would be read as part of it.
 
 # Where the site config is. A driver's `--site` overwrites this before the first
 # call, and every reader below takes it at call time rather than at source time.
@@ -402,6 +402,30 @@ k8s_configmap_from_file() {
 k8s_job_tail() {
 	log "--- last 40 lines of job/$1 ---"
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" logs "job/$1" --tail=40 >&2 || true
+	k8s_job_pod_events "$1"
+}
+
+# k8s_job_pod_events <job name> — the Job's pods and their events, on stderr.
+#
+# Called from the tail above, so every wait that reports a Job's own log reports
+# this too. A pod that never scheduled has no log at all, and the scheduler's
+# refusal — `FailedScheduling ... Insufficient cpu` — is only in its events: a
+# tail alone would hand the operator an empty log and no reason for it.
+#
+# Every read is best-effort. This runs on the way to a refusal that is already
+# decided, so a `kubectl` that could not answer costs the operator the evidence
+# and not the exit code.
+k8s_job_pod_events() {
+	log "--- pods of job/$1 and their events ---"
+	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pods -l "job-name=$1" -o wide >&2 || true
+	local names="" pod=""
+	names="$(kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pods -l "job-name=$1" \
+		-o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)" || return 0
+	while IFS= read -r pod; do
+		[[ -n $pod ]] || continue
+		kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get events \
+			--field-selector "involvedObject.name=$pod" >&2 || true
+	done <<<"$names"
 }
 
 # Wait for a Job to reach one of its two ends, and print its own log unless it
@@ -423,7 +447,7 @@ k8s_wait_job() {
 		case "$conditions" in
 		*Failed*)
 			k8s_job_tail "$name"
-			die "job/$name failed; the lines above are its own log"
+			die "job/$name failed; its log and its pods' events are above"
 			;;
 		*Complete*)
 			log "job/$name completed"
@@ -435,7 +459,7 @@ k8s_wait_job() {
 		waited=$((waited + K8S_JOB_POLL_S))
 	done
 	k8s_job_tail "$name"
-	die "job/$name did not complete within ${timeout_s}s; the lines above are its own log"
+	die "job/$name did not complete within ${timeout_s}s; its log and its pods' events are above"
 }
 
 # One Job's log, on stdout, because a driver parses it: the harness commands
@@ -554,6 +578,44 @@ k8s_engine_field() {
 k8s_write_pods() {
 	kubectl --context "$KUBE_CONTEXT" --namespace "$SITE_NAMESPACE" get pods -l "$2" -o json >"$1" ||
 		die "could not read the pods matching '$2' in $SITE_NAMESPACE; try: kubectl get pods -l '$2'"
+}
+
+# k8s_nodes_with_free_cpu <millicores> <nodes.json> <pods.json> — how many nodes
+# could take one more pod of that size, on stdout.
+#
+# A node's free CPU is its allocatable minus what the pods bound to it request,
+# because that difference is what the scheduler fits a pod into: a node whose
+# cores are idle but requested is a node nothing more schedules onto. Pods that
+# have reached an end release their requests, so only the ones still going are
+# counted. Init containers are left out — theirs are not held alongside the
+# app containers' — as are pods no node is carrying yet.
+#
+# Two files rather than a `kubectl` of its own, so the arithmetic is exercisable
+# without a cluster. `.spec.tolerations` on the pod would be the exact question
+# about a tainted node; what is asked instead is whether the site declares any
+# toleration at all, which counts a node whose taint those tolerations do not
+# actually answer.
+k8s_nodes_with_free_cpu() {
+	local millicores=$1 nodes=$2 pods=$3 tolerated=false
+	[[ -z $TOLERATIONS || $TOLERATIONS == "[]" ]] || tolerated=true
+	jq --argjson want "$millicores" --argjson tolerated "$tolerated" --slurpfile pods "$pods" '
+		def millicores:
+			if . == null then 0
+			elif type == "string" and endswith("m") then (.[:-1] | tonumber)
+			else (tonumber * 1000)
+			end;
+		def requested: [.spec.containers[]?.resources.requests.cpu | millicores] | add // 0;
+		([$pods[0].items[]
+			| select(.spec.nodeName != null)
+			| select(.status.phase != "Succeeded" and .status.phase != "Failed")
+			| {node: .spec.nodeName, cpu: requested}]
+			| group_by(.node)
+			| map({key: .[0].node, value: (map(.cpu) | add)})
+			| from_entries) as $used
+		| [.items[]
+			| select($tolerated or ([.spec.taints[]? | select(.effect == "NoSchedule")] | length == 0))
+			| select((.status.allocatable.cpu | millicores) - ($used[.metadata.name] // 0) >= $want)]
+		| length' "$nodes"
 }
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,25 @@ heap is what decodes and buffers Parquet. Both shipped cloud specs double the
 memory their local siblings ask for, for that reason. Under `--master local[N]`
 the figure is not spent at all — see [`engines/spark/README.md`](../engines/spark/README.md).
 
+## One 2-CPU pod per small node
+
+The scorer requests 2 CPU, so does every producer shard, and so does each engine
+worker at both shipped cloud specs' `tm_cpu: 2` / `executor_cores: 2`. A 4-vCPU
+node — the `m6i.xlarge` the example `eksctl` config builds — reports under 4 CPU
+allocatable once the kubelet's reservation is taken, and the cluster's own
+daemonsets hold part of the rest, so each of these pods takes a node of its own.
+The shipped hour-long runs place the scorer, five shards and a whole engine
+fleet at once.
+
+Nothing fails loudly when they do not fit: a pod nothing can schedule stays
+Pending with no log, so `launch.sh` waits out `FIRST_POLL_WAIT_S` (300 s) and
+reports a scorer that published no reading, over an empty log. The scheduler's own
+`FailedScheduling ... Insufficient cpu` is in the pod's events, which the drivers
+print beside that log, and `launch.sh` counts the nodes with room before it
+applies anything. It warns rather than refuses — with an autoscaler, a Pending
+pod is what buys the node. Without one, size the cluster first: see
+[`../deploy/aws/README.md`](../deploy/aws/README.md) §Sizing the cluster.
+
 ## The measurement outlives the run, so expiry can still destroy it
 
 Rule 6 of the [tier 1 contract](adding-an-engine.md) says why snapshot expiry is

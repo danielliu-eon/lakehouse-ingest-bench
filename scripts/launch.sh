@@ -133,6 +133,42 @@ COMPRESSION="$(yq '.producer.compression' "$SPEC")"
 EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
 
 # ---------------------------------------------------------------------------
+# Whether this cluster has room for the run's own pods
+# ---------------------------------------------------------------------------
+
+# What the scorer and each producer shard request, as the two manifests below
+# ask for it. A test holds this to the templates.
+POD_CPU_MILLICORES=2000
+
+# A pod no node has room for never starts, and a pod that never started has an
+# empty log — so the first-reading wait below would report a scorer that
+# published nothing, over a log that says nothing about why. The events
+# `k8s_job_tail` prints carry the scheduler's own answer; this says it before
+# the wait rather than after it.
+#
+# A warning and never a refusal: a cluster with an autoscaler provisions the
+# node a Pending pod asks for, which is a normal way for a run of this size to
+# start. Every read is best-effort for the same reason — a kubeconfig scoped to
+# one namespace cannot list nodes, and that is not a launch to stop.
+warn_if_the_pods_will_not_fit() {
+	local scratch="" nodes="" pods="" free="" needed=$((1 + SHARDS))
+	scratch="$(mktemp -d "${TMPDIR:-/tmp}/ingest-bench-launch.XXXXXX")" || return 0
+	nodes="$scratch/nodes.json"
+	pods="$scratch/pods.json"
+	if kubectl --context "$KUBE_CONTEXT" get nodes -o json >"$nodes" 2>/dev/null &&
+		kubectl --context "$KUBE_CONTEXT" get pods --all-namespaces -o json >"$pods" 2>/dev/null; then
+		free="$(k8s_nodes_with_free_cpu "$POD_CPU_MILLICORES" "$nodes" "$pods")" || free=""
+	fi
+	rm -rf "$scratch"
+	[[ -n $free ]] || return 0
+	((free < needed)) || return 0
+	log "$free of this cluster's nodes have ${POD_CPU_MILLICORES}m of CPU free, and this run needs $needed: the scorer and $SHARDS producer shard(s)"
+	log "each of these pods requests ${POD_CPU_MILLICORES}m, so a node fits one unless it has twice that free; a pod nothing can schedule stays Pending with no log of its own — see $PREREQ_DOC §Sizing the cluster"
+}
+
+warn_if_the_pods_will_not_fit
+
+# ---------------------------------------------------------------------------
 # The scorer
 # ---------------------------------------------------------------------------
 
@@ -190,7 +226,7 @@ while :; do
 	fi
 	if ((waited >= FIRST_POLL_WAIT_S)); then
 		k8s_job_tail "$SCORER_JOB"
-		die "job/$SCORER_JOB published no reading within ${FIRST_POLL_WAIT_S}s; the lines above are its own log"
+		die "job/$SCORER_JOB published no reading within ${FIRST_POLL_WAIT_S}s; its log and its pods' events are above"
 	fi
 	sleep "$FIRST_POLL_S"
 	waited=$((waited + FIRST_POLL_S))
