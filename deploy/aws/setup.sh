@@ -127,11 +127,14 @@ if ! NODES_JSON="$(kubectl --context "$KUBE_CONTEXT" get nodes -o json 2>&1)"; t
      Your principal needs an EKS access entry (or an aws-auth mapping) on the cluster."
 fi
 ARCHITECTURES="$(jq -r '[.items[].status.nodeInfo.architecture] | unique | join(" ")' <<<"$NODES_JSON")"
-# PyFlink publishes no aarch64 wheel, so the engine image is amd64 and a
-# cluster of arm64 nodes has nowhere to place a TaskManager. Refusing here is
-# minutes; the alternative is an unschedulable FlinkDeployment mid-run.
+# PyFlink publishes no aarch64 wheel, so the Flink image is amd64 whatever
+# platform is asked of it, and a cluster of arm64 nodes has nowhere to place a
+# TaskManager. Said rather than refused, because that image is the only one
+# pinned to an architecture: the harness and the Spark image are built for
+# whichever platform `push-images.sh` is given, so a Spark-only campaign on an
+# arm64 cluster is one this account can serve.
 grep -qw amd64 <<<"$ARCHITECTURES" ||
-	die "no node in $CLUSTER_NAME reports architecture amd64 (found: ${ARCHITECTURES:-none}); the Flink image is amd64-only.
+	log "warning: no node in $CLUSTER_NAME reports architecture amd64 (found: ${ARCHITECTURES:-none}); the Flink image is amd64-only, so no Flink run will be placed here. A Spark-only campaign may proceed.
      Add an amd64 node group — deploy/aws/eksctl-cluster.example.yaml has one."
 log "node architectures: $ARCHITECTURES"
 

@@ -9,9 +9,10 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
 
 ## Prerequisites
 
-- **An EKS cluster** with at least one **amd64** node. The Flink image is
-  amd64-only, because PyFlink publishes no aarch64 wheel, and the preflight
-  refuses a cluster without one. If you have no cluster,
+- **An EKS cluster**, with at least one **amd64** node to run Flink on. The
+  Flink image is amd64-only, because PyFlink publishes no aarch64 wheel, and
+  the preflight warns about a cluster without one rather than refusing it — a
+  Spark-only campaign needs no amd64 node. If you have no cluster,
   `eksctl-cluster.example.yaml` makes a minimal one — see the last section.
 - **Host tools**, on the machine you run all of this from. Every script here and
   every cluster driver under `scripts/` refuses up front on a missing one, and
@@ -59,8 +60,8 @@ this repository names an account, a region, a cluster or a bucket.
 ## What `setup.sh` creates
 
 Preflight first, and each refusal names its fix: the caller's identity, the
-cluster, `kubectl` reaching it, an amd64 node, the `eks-pod-identity-agent`
-add-on (installed and waited for if absent) and the
+cluster, `kubectl` reaching it, an amd64 node (a warning, not a refusal), the
+`eks-pod-identity-agent` add-on (installed and waited for if absent) and the
 `flinkdeployments.flink.apache.org` CRD (the operator is installed with
 `webhook.create=false` if absent, so no cert-manager is needed, and its chart
 version is printed either way). Then:

@@ -188,8 +188,10 @@ AWS leaves the key out, and no pod is given the variable.
 reach every Job and every engine pod, and they are the only place a node pool,
 label or taint of yours is named — nothing in this repository knows about your
 cluster's shape. A Flink run's pods pin `kubernetes.io/arch: amd64` over whatever
-the site selects, because the image has no aarch64 PyFlink to run; a Spark run's
-take the selector as it stands.
+the site selects, because the image has no aarch64 PyFlink to run — which is
+why `deploy/aws/setup.sh` warns about a cluster with no amd64 node, and why a
+Spark-only campaign needs none. A Spark run's pods take the selector as it
+stands.
 
 **Where files go.** `stage.sh` fetches the run directory into `./runs/<run_id>/`
 beside your `site.yaml`, and `RUNS_DIR` moves that. The pods write to
