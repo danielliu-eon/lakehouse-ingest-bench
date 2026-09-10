@@ -29,6 +29,7 @@ Neither script creates, deletes or reconfigures the EKS cluster. That is yours.
   | `git` | every driver that names an image, since the tag is a commit |
   | `curl` | `stage.sh`, to read a running engine through a port-forward |
   | `docker` | `push-images.sh` |
+  | `gzip` | `teardown.sh`, since a table may write its metadata document compressed |
 - Credentials for the account the cluster is in, with permission to create S3
   buckets, ECR repositories, MSK clusters, security groups, IAM roles and EKS
   add-ons and pod identity associations.

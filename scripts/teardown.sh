@@ -82,7 +82,7 @@ done
 	exit 2
 }
 
-require_host_tools kubectl aws yq jq git
+require_host_tools kubectl aws yq jq git gzip
 
 RUN_DIR="$RUNS_DIR/$RUN_ID"
 FACTS="$RUN_DIR/facts.json"
@@ -207,7 +207,7 @@ if ((METADATA_STATUS == 0)); then
 	# has its own reader: `finish.sh` and `purge.sh` open the local one, and the
 	# one in the bucket is what outlives this machine's working directory.
 	log "copying $TABLE's metadata document to $LOCAL_FINAL and $FINAL"
-	if aws s3 cp "$METADATA" "$LOCAL_FINAL" >&2; then
+	if k8s_fetch_metadata_document "$METADATA" "$LOCAL_FINAL"; then
 		aws s3 cp "$LOCAL_FINAL" "$FINAL" >&2 || log "could not copy $LOCAL_FINAL to $FINAL; it is still on this machine"
 	else
 		log "could not copy $METADATA to $LOCAL_FINAL; the table still holds it"

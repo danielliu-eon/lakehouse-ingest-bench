@@ -51,7 +51,45 @@ ENGINE_IMAGE_POLL_S="${ENGINE_IMAGE_POLL_S:-5}"
 # three drivers address it: a teardown writes it, `file-sizes` reads the
 # geometry out of it, and a purge reads the table's location out of it. Guessing
 # that location from the table's name is what this file exists to avoid.
+#
+# Always JSON, whatever the table wrote — see `k8s_fetch_metadata_document`.
 METADATA_FINAL_FILE=table-metadata.final.json
+
+# ---------------------------------------------------------------------------
+# The table's metadata document
+# ---------------------------------------------------------------------------
+
+# k8s_fetch_metadata_document <metadata uri> <local path>
+#
+# The table's current metadata document, stored as the JSON its readers parse.
+#
+# Iceberg's metadata document may be compressed — the table property
+# `write.metadata.compression-codec` makes it gzip, conventionally named
+# `*.gz.metadata.json` — and which of the two a run ends up with is the
+# writer's choice rather than anything this harness sets. Both readers of the
+# stored copy parse it with `jq`, so a gzip body reaches them as a syntax error
+# against a table that nothing can then reclaim: decompressing here is what
+# makes the file's format one thing rather than the writer's.
+#
+# The first two bytes decide and not the name, because the codec is the
+# property and the suffix is only the convention that usually follows it.
+k8s_fetch_metadata_document() {
+	local source=$1 path=$2
+	aws s3 cp "$source" "$path" >&2 || return 1
+	local magic=""
+	magic="$(od -An -tx1 -N2 -- "$path" | tr -d ' \n')" ||
+		die "could not read the first bytes of $path to tell whether it is compressed"
+	[[ $magic == 1f8b ]] || return 0
+	log "$source is gzip-compressed; storing it decompressed"
+	# Beside it and then moved, so a decompression that fails leaves the
+	# document that was fetched rather than a truncated one.
+	if ! gzip -dc -- "$path" >"$path.plain"; then
+		rm -f "$path.plain"
+		log "could not decompress $path, so it is stored as it was fetched"
+		return 1
+	fi
+	mv "$path.plain" "$path"
+}
 
 # ---------------------------------------------------------------------------
 # Reading the site

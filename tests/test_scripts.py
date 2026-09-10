@@ -18,6 +18,7 @@ otherwise as a denial minutes into a run on a live cluster.
 from __future__ import annotations
 
 import ast
+import gzip
 import importlib
 import inspect
 import json
@@ -3148,6 +3149,54 @@ def _purge_environment(tmp_path: Path) -> dict[str, str]:
 
 
 PURGE_PROGRAMS = {"drop-table": DROP_TABLE_STUB}
+
+
+@needs_shell_tools
+def test_a_compressed_metadata_document_is_stored_as_the_json_its_readers_parse(tmp_path: Path) -> None:
+    """Iceberg allows a gzip-compressed metadata document, and `jq` cannot read one.
+
+    The codec is a table property, so which of the two a run ends up with is
+    the writer's choice and not the harness's. Both readers of the copied
+    document parse it as JSON, and a gzip body reaches them as a syntax error
+    against a table nothing can then reclaim — so it is decompressed on the way
+    in and the file is JSON whichever way the table wrote it.
+    """
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    (run_dir / "scores").mkdir(parents=True)
+    (run_dir / "facts.json").write_text(json.dumps({**FACTS, "epoch": 1757419200}))
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    (run_dir / "flinkdeployment.yaml").write_text("# flinkdeployment.yaml\n")
+
+    # The `.gz.metadata.json` name Iceberg's convention gives one, holding what
+    # the codec actually produces. The body is what decides, not the name.
+    published = tmp_path / "published"
+    published.mkdir()
+    document = {"location": TABLE_LOCATION, "format-version": 2}
+    (published / "00003-abc.gz.metadata.json").write_bytes(gzip.compress(json.dumps(document).encode()))
+
+    torn = _run_driver(
+        TEARDOWN,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {
+            "STUB_METADATA_LOG": str(tmp_path / "metadata.log"),
+            "STUB_METADATA_STATUS": "0",
+            "STUB_METADATA_OUT": f"{TABLE_LOCATION}/metadata/00003-abc.gz.metadata.json",
+            "STUB_S3_CP_DIR": str(published),
+            "STUB_COLLECT_LOG": str(tmp_path / "collect.log"),
+        },
+        programs={"table-metadata": TABLE_METADATA_STUB, "collect": COLLECT_STUB},
+    )
+    assert torn.result.returncode == 0, torn.result.stderr
+
+    stored = run_dir / "table-metadata.final.json"
+    assert json.loads(stored.read_text()) == document, "the stored copy is the JSON, not the gzip"
+
+    # The reader that broke: purge parses this file for the location it removes,
+    # and against a gzip body it exited on a syntax error with the table intact.
+    purged = _run_driver(PURGE, [RUN_ID, "--yes"], tmp_path, _purge_environment(tmp_path), programs=PURGE_PROGRAMS)
+    assert purged.result.returncode == 0, purged.result.stderr
+    assert f"s3 rm --recursive {TABLE_LOCATION}" in purged.aws_calls
 
 
 @needs_shell_tools
