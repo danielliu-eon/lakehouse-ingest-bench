@@ -237,8 +237,9 @@ scorer reads the offered side from there rather than from the local disk.
 ## Reading the verdict
 
 `runs/<run_id>/scores/summary.json` is the whole answer, and the scripts print
-the part that matters. What every field means, when `run_valid` is true, and what
-each `state` says are in [`methodology.md`](methodology.md) §The verdict.
+the part that matters. What every field means, when `run_valid` is true, what
+`reason` names and what each `state` says are in
+[`methodology.md`](methodology.md) §The verdict.
 
 Two commands read the same artifacts on their own:
 

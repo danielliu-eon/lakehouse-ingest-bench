@@ -170,6 +170,18 @@ exactness an upper one. And false for one the loop abandoned even where the
 figures beneath it are clean, since an idle stop with every batch landed reads
 as exact and fresh.
 
+`reason` names the clause that failed, and is null for a valid run and for one
+still going. A void names every column the table got wrong, a run the loop
+abandoned says `idle_stop_before_drain`, and a scorer that died says
+`scorer_failed:` with its exception type. Any other invalid run takes the first
+of three clauses to fail — `producer_bound:` before `exactness:` before
+`freshness:`, since each makes the ones after it moot — and states its figures
+after that prefix: `producer_bound: a batch was acknowledged 9250 ms after it
+was due, over behind_max_ms 5000`; `exactness:` with whichever of `loss_rows`,
+`duplicate_rows` and `corrupt_batches` are not zero; `freshness: window p95
+79.4 s exceeds bound 60.0 s`, or its `window max`, `the table never drained`
+and `missing_emit_prefixes=` variants.
+
 `state` says how the run ended.
 
 | `state` | What it means |

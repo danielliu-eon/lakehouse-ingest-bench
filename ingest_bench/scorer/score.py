@@ -319,6 +319,67 @@ def _live_lag_s(state: ScoreState) -> float | None:
     return None if reference is None else (state.samples[-1].at_ms - reference) / 1000
 
 
+def _producer_reason(state: ScoreState) -> str:
+    """Which half of `producer_bound` was true, with the figure behind it."""
+    faults: list[str] = []
+    behind_ms = publish_log.behind_ms(state.records)
+    if behind_ms > state.args.behind_max_ms:
+        faults.append(
+            f"a batch was acknowledged {behind_ms} ms after it was due, over behind_max_ms {state.args.behind_max_ms}"
+        )
+    errors = sum(record.errors for record in state.records)
+    if errors:
+        faults.append(f"{errors} deliveries errored")
+    return f"{PRODUCER_BOUND}: " + "; ".join(faults)
+
+
+def _exactness_reason(exactness: dict[str, object]) -> str:
+    """The exactness figures that are not zero, which are the faults it found.
+
+    Every violation kind raises one of the three, so a run that is not exact
+    always has something to name here.
+    """
+    faults = ("loss_rows", "duplicate_rows", "corrupt_batches")
+    return "exactness: " + ", ".join(f"{name}={exactness[name]}" for name in faults if exactness[name])
+
+
+def _freshness_reason(result: freshness.FreshnessResult) -> str:
+    """Which clause of the freshness verdict failed, in the order it judges them.
+
+    Called only where the verdict is false, so the last clause is the one left
+    standing rather than a default.
+    """
+    if not result.drained:
+        return "freshness: the table never drained"
+    if result.missing_emit_prefixes:
+        return (
+            f"freshness: missing_emit_prefixes={len(result.missing_emit_prefixes)}, "
+            f"first={result.missing_emit_prefixes[0]}"
+        )
+    p95_s, max_s = result.window["p95_s"], result.window["max_s"]
+    if p95_s is not None and p95_s > result.bound_s:
+        return f"freshness: window p95 {p95_s:.1f} s exceeds bound {result.bound_s:.1f} s"
+    if max_s is not None and max_s > result.max_bound_s:
+        return f"freshness: window max {max_s:.1f} s exceeds max bound {result.max_bound_s:.1f} s"
+    return "freshness: the measurement window holds no lag sample to judge the bound on"
+
+
+def _invalid_reason(state: ScoreState, result: freshness.FreshnessResult, exactness: dict[str, object]) -> str:
+    """Why `run_valid` is false, as one clause of it rather than all of them.
+
+    Ordered by what makes what moot: a bound producer turns every figure below
+    it into a statement about the offer rather than the engine, and rows that
+    arrived twice or not at all make the freshness of the rest beside the
+    point. The two clauses missing from it — an abandoned run and a voided
+    table — have already named themselves by the time this is reached.
+    """
+    if state.producer_bound():
+        return _producer_reason(state)
+    if not exactness["exact"]:
+        return _exactness_reason(exactness)
+    return _freshness_reason(result)
+
+
 def _write_summary(state: ScoreState) -> None:
     """The one summary writer, used live and at the end.
 
@@ -612,7 +673,8 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
     # Only the batches the publish logs say were sent are judged: a replay over
     # a prefix of the corpus never offered the rest, and scoring them would
     # report rows nobody sent as rows the engine lost.
-    state.exactness = exactness_result(state.tally, offered_batches={record.batch for record in state.records})
+    exactness = exactness_result(state.tally, offered_batches={record.batch for record in state.records})
+    state.exactness = exactness
     if ending == VOID:
         # A void outranks a bound producer: the table is not the one the corpus
         # describes, so no figure taken from either side describes anything.
@@ -626,6 +688,11 @@ def _finalize(state: ScoreState, ending: str, clock: Clock, log: TextIO) -> int:
             state.reason = IDLE_STOP_REASON
             # No verdict was reached, so the gate has nothing to judge the fleet on.
             state.aborted = True
+    # A run invalid for its figures rather than for how it ended says so in the
+    # summary: the failing clause is otherwise only visible inside whichever
+    # artifact holds it.
+    if state.reason is None and not state.run_valid():
+        state.reason = _invalid_reason(state, result, exactness)
     document: dict[str, object] = dict(asdict(result))
     # Both time bases are published so another bound can be evaluated offline
     # from one run's artifacts: the table's own commit timestamps, and the wall

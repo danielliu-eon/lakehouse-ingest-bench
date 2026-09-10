@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import io
 import json
+import re
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -20,7 +22,7 @@ from ingest_bench.catalog import open_catalog
 from ingest_bench.clock import Clock, now_ms
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.producer import publish_log
-from ingest_bench.scorer import cli, score, snapshots
+from ingest_bench.scorer import cli, freshness, score, snapshots
 from ingest_bench.table import create
 from tests.test_tally import _rows_of
 
@@ -111,6 +113,7 @@ def test_scorer_drains_and_validates(tmp_path: Path, corpus: metadata.CorpusMeta
     assert score.run(args, clock, open(tmp_path / "score.log", "w")) == 0
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["run_valid"] is True and summary["state"] == "drained" and summary["prefix"] == 3
+    assert summary["reason"] is None
     fresh = json.loads((tmp_path / "out" / "freshness.json").read_text())
     assert fresh["drained"] and fresh["verdict"] and fresh["window"]["p95_s"] is not None
     exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
@@ -144,6 +147,7 @@ def test_idle_stop_before_drain_is_invalid(tmp_path: Path, corpus: metadata.Corp
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 2
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["run_valid"] is False and summary["state"] == "idle_stop" and summary["prefix"] == 0
+    assert summary["reason"] == score.IDLE_STOP_REASON
     exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
     assert exact["loss_rows"] == sum(r.rows for r in records[1:])
 
@@ -173,9 +177,19 @@ def test_producer_bound_voids(tmp_path: Path, corpus: metadata.CorpusMetadata) -
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 0
     summary = json.loads((tmp_path / "out" / "summary.json").read_text())
     assert summary["producer_bound"] is True and summary["run_valid"] is False and summary["state"] == "producer_bound"
+    assert summary["reason"] == (
+        "producer_bound: a batch was acknowledged 9000 ms after it was due, over behind_max_ms 5000"
+    )
 
 
-def _drained_run(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, late_batch: int = -1) -> Path:
+def _drained_run(
+    tmp_path: Path,
+    corpus: metadata.CorpusMetadata,
+    name: str,
+    late_batch: int = -1,
+    duplicate_batch: int = -1,
+    freshness_bound_s: float = 180.0,
+) -> Path:
     props = _props(tmp_path)
     records = metadata.read_manifest(corpus.uri)
     table = create.create_table(props, f"bench.{name}", corpus, create.parse_partition("unpartitioned"), {})
@@ -185,6 +199,8 @@ def _drained_run(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, lat
     _finished_producer(logs, records, epoch, late_batch=late_batch)
     for record in records:
         table.append(_rows_of(record, corpus))
+        if record.batch == duplicate_batch:
+            table.append(_rows_of(record, corpus))
     out_dir = tmp_path / "out"
     args = score.ScoreArgs(
         corpus_uri=corpus.uri,
@@ -196,7 +212,7 @@ def _drained_run(tmp_path: Path, corpus: metadata.CorpusMetadata, name: str, lat
         poll_interval_s=1.0,
         idle_stop_s=30.0,
         warmup_s=0,
-        freshness_bound_s=180.0,
+        freshness_bound_s=freshness_bound_s,
     )
     assert score.run(args, StepClock(now_ms()), open(tmp_path / "score.log", "w")) == 0
     return out_dir
@@ -212,6 +228,52 @@ def test_gate_judges_a_run_from_the_artifacts(tmp_path: Path, corpus: metadata.C
 def test_gate_voids_a_producer_bound_run(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
     out_dir = _drained_run(tmp_path, corpus, "gate2", late_batch=2)
     assert cli.gate(["--out", str(out_dir)]) == 5
+
+
+def test_a_breached_bound_names_the_freshness_clause(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    out_dir = _drained_run(tmp_path, corpus, "reason1", freshness_bound_s=1.0)
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["run_valid"] is False and summary["state"] == "drained"
+    # The offer began ten seconds before the first commit, so the window's p95
+    # is measured in seconds and cannot be inside a one-second bound.
+    assert re.fullmatch(r"freshness: window p95 \d+\.\d s exceeds bound 1\.0 s", summary["reason"])
+
+
+def test_duplicated_rows_outrank_a_breached_bound(tmp_path: Path, corpus: metadata.CorpusMetadata) -> None:
+    out_dir = _drained_run(tmp_path, corpus, "reason2", duplicate_batch=1, freshness_bound_s=1.0)
+    summary = json.loads((out_dir / "summary.json").read_text())
+    fresh = json.loads((out_dir / "freshness.json").read_text())
+    exact = json.loads((out_dir / "exactness.json").read_text())
+    assert fresh["verdict"] is False and exact["duplicate_rows"] > 0
+    assert summary["reason"] == f"exactness: duplicate_rows={exact['duplicate_rows']}"
+
+
+def test_the_exactness_reason_lists_only_the_figures_that_are_not_zero() -> None:
+    exactness: dict[str, object] = {"loss_rows": 12, "duplicate_rows": 0, "corrupt_batches": 3}
+    assert score._exactness_reason(exactness) == "exactness: loss_rows=12, corrupt_batches=3"
+
+
+def test_the_freshness_reason_names_the_clause_that_failed() -> None:
+    breached = freshness.FreshnessResult(
+        window={"p50_s": 3.0, "p95_s": 79.4, "p99_s": 90.0, "max_s": 100.0},
+        full={"p50_s": 3.0, "p95_s": 79.4, "p99_s": 90.0, "max_s": 100.0},
+        verdict=False,
+        drained=True,
+        bound_s=60.0,
+        max_bound_s=120.0,
+        warmup_s=0,
+        clock=freshness.TIMESTAMP_CLOCK,
+        clock_skew_suspected=False,
+        min_lag_s=1.0,
+        missing_emit_prefixes=[],
+    )
+    assert score._freshness_reason(breached) == "freshness: window p95 79.4 s exceeds bound 60.0 s"
+    assert score._freshness_reason(replace(breached, drained=False)) == "freshness: the table never drained"
+    assert score._freshness_reason(replace(breached, missing_emit_prefixes=[7, 9])) == (
+        "freshness: missing_emit_prefixes=2, first=7"
+    )
+    inside_p95 = replace(breached, window={"p50_s": 3.0, "p95_s": 10.0, "p99_s": 100.0, "max_s": 130.0})
+    assert score._freshness_reason(inside_p95) == "freshness: window max 130.0 s exceeds max bound 120.0 s"
 
 
 def _table_of(props: dict[str, str], name: str, fields: list[NestedField]) -> Table:
