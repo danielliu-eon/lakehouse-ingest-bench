@@ -184,6 +184,15 @@ def test_cost_is_n_a_when_the_site_disclosed_no_prices() -> None:
     assert _cell(row, 9) == "n/a"
 
 
+def test_cost_is_n_a_when_resource_cost_does_not_apply() -> None:
+    document = _minimal_document(preset="p", engine="spark", variant="hash", date="2026-01-01")
+    derived = document["derived"]
+    assert isinstance(derived, dict)
+    derived["cost"] = {"usd_per_hour": None, "run_hours": 0.5, "usd": None}
+    row = _table_rows(render_results_table([(Path("a"), document)]))[0]
+    assert _cell(row, 9) == "n/a"
+
+
 def test_file_size_is_n_a_when_geometry_is_null() -> None:
     document = _minimal_document(preset="p", engine="flink", variant="hash", date="2026-01-01", geometry=None)
     row = _table_rows(render_results_table([(Path("a"), document)]))[0]

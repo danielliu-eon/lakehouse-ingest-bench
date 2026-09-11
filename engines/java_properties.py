@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Normalize harness catalog and Kafka properties for the Java engines."""
 
-from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY
+from ingest_bench.kafka_auth import MECHANISM_KEY, REGION_KEY, refuse_java_oauth
 
 _CATALOG_PROP_RENAMES = {"s3.region": "client.region"}
 _FILE_IO_BY_SCHEME = {
@@ -38,6 +38,7 @@ def catalog_properties(props: dict[str, str], warehouse: str, *, engine: str) ->
 
 def kafka_properties(security: dict[str, str]) -> dict[str, str]:
     """Translate the harness's MSK IAM signal while preserving unrelated settings."""
+    refuse_java_oauth(security)
     if security.get(MECHANISM_KEY) != "OAUTHBEARER" or REGION_KEY not in security:
         return dict(security)
     # Java's IAM module uses pod credentials and AWS_REGION, not the harness region key.

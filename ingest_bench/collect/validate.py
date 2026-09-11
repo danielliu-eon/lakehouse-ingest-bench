@@ -110,6 +110,8 @@ def _document_failures(document: ResultDocument, shipped_presets: set[str], work
     failures.extend(_corpus_failures(run, shipped_presets, workloads))
 
     derived = document["derived"]
+    if derived["cost"]["usd_per_hour"] is None:
+        failures.append("derived.cost.usd_per_hour: is null — a published result must disclose resource cost")
     if derived["keepup"] is None:
         failures.append("derived.keepup: is null")
     if derived["producer"]["producer_bound"] is None:

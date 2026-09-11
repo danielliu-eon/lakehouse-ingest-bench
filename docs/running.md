@@ -166,6 +166,20 @@ table location from the metadata saved during teardown; if that document is
 missing, it queries the catalog. An unreachable catalog causes an error,
 not an assumption that the table is absent.
 
+### Resource capture and scorer polling
+
+`engine-fleet --spec <spec.yaml> --pods <pods.json> --out <engine-pods.json>`
+captures admitted CPU and memory requests from a `kubectl get pods -o json`
+response for the engine fleet. Staging runs it automatically and archives its
+output for cost calculation. It ignores terminal and terminating pods, then
+requires the declared number of running pods. Invalid or incomplete fleets
+exit with status 2. The output omits pod environment values and annotations.
+
+For direct scorer invocations, `score --poll-interval-s <seconds>` sets the
+polling interval (default `5`). The launch scripts use that default. Keep the
+interval equal across compared runs: scorer-clock lag and drain include polling
+delay; see [Keep-up](methodology.md#keep-up).
+
 ### Publishing a result
 
 `finish.sh <run_id> --publish results/` writes the run's document under
@@ -232,13 +246,14 @@ Staging writes `runs/<run_id>/`, and everything downstream reads it:
 | Path | Written by | What it is |
 |---|---|---|
 | `spec.yaml` | stage | the run spec, copied verbatim |
-| `facts.json` | stage | what an engine needs to join the run — see [`adding-an-engine.md`](adding-an-engine.md) |
+| `facts.json` | stage, launch | engine contract; local and cluster launch record the shared producer/scorer epoch — see [`adding-an-engine.md`](adding-an-engine.md) |
 | `timeline.log` | stage | one line per phase transition |
 | `job.sql`, `flink-conf.yaml`, `flink.env` | stage | a Flink run's script, the settings it is submitted with, and the cluster shape the local stack sizes containers from |
 | `spark-defaults.conf` | stage | a Spark run's settings, and `job.json`, `reader-schema.avsc`, `job.env` beside it |
 | `flinkdeployment.yaml` / `sparkapplication.yaml` | stage | the engine resource applied to its Kubernetes operator |
 | `flink-job-configmap.yaml` / `spark-job-configmap.yaml` | stage | rendered files packaged as a ConfigMap for engine pods |
 | `engine-image.json` | stage | the image the engine ran and the digest the node pulled |
+| `engine-pods.json` | cluster stage | verified fleet's admitted CPU/memory requests, uploaded under `stage/`; finish retrieves missing local copies for cost calculation |
 | `publish_log-<i>.jsonl` | producer | one record per batch: rows, bytes, when it was due, when it was acked. Beside the spec locally, under `producer/` on a cluster |
 | `scores/summary.json` | scorer | the verdict, rewritten on every poll |
 | `scores/freshness.json` | scorer | the lag quantiles and the whole lag curve, on both clocks |

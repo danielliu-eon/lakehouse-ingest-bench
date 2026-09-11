@@ -58,7 +58,7 @@ available for comparison.
 | `spec` | unchanged `spec.yaml`; omitted defaults remain omitted |
 | `engine` | `spec.engine` |
 | `engine_versions` | `{image, digest}` from `engine-image.json` for a managed engine; the spec's `external` block otherwise; `null` when neither was recorded |
-| `fleet` | requested resources as `[{role, count, vcpu, gib, machine_type}]`, from managed `fleet(spec)` or external `spec.fleet`. A missing managed machine type becomes `unspecified` and prevents publication; see [Cost](methodology.md#cost) |
+| `fleet` | `[{role, count, vcpu, gib, machine_type}]`: managed Kubernetes requests from `engine-pods.json`, or `[]` if missing; external fleet from `spec.fleet`; local managed sizing from knobs, without costs. Machine types remain spec declarations; missing types prevent publication. See [Cost](methodology.md#cost) |
 | `site_pricing` | `{vcpu_hour_usd, gib_hour_usd}` from the site |
 | `catalog_props` | `facts.catalog_props`, redacted |
 | `epoch_ms` | the run's time origin; `null` for a run that was staged but never launched |
@@ -69,15 +69,16 @@ available for comparison.
 ## `artifacts`
 
 Relative paths for the inputs `collect` found: `spec`, `facts`, `timeline`,
-`engine_image`, `summary`, `freshness`, `exactness`, `geometry`,
-`keepup_samples`. A path is absent exactly when the file is named in `missing`.
+`engine_image`, `engine_pods` (managed Kubernetes runs), `summary`, `freshness`, `exactness`, `geometry`,
+`keepup_samples`. Missing applicable inputs are listed in `missing`.
 
 `snapshots` embeds the parsed `snapshots.jsonl`, with one record per commit.
 This history lets readers inspect the commits behind the measurements.
 
 `publish_logs` contains a **summary per shard** to avoid embedding thousands of
 per-batch records. There is one entry per
-`producer/publish_log-<i>.jsonl`:
+`producer/publish_log-<i>.jsonl`, falling back to root-level logs for local runs.
+When both locations contain logs, collection uses only `producer/`:
 
 | Field | Description |
 |---|---|
@@ -117,8 +118,10 @@ acknowledgement interval. Without publish logs, `behind_ms_max` and `errors`
 come from the scorer and rate is `null`. `producer_bound` always comes from the
 scorer to remain consistent with `run_valid`.
 
-**`cost`.** Records the fleet's hourly cost, run duration and total cost. Duration
-and total cost are `null` without both an epoch and an end time. See
+**`cost`.** Records the fleet's hourly cost, run duration and total cost. Local
+runs (sites without `kubernetes`) always have `null` hourly and total dollar costs.
+Managed Kubernetes runs also have `null` costs without captured pod requests.
+Duration and total cost are `null` without both an epoch and an end time. See
 [Cost](methodology.md#cost) for the formula.
 
 ## `missing`

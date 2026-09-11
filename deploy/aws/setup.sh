@@ -159,22 +159,21 @@ fi
 # Wait even for an existing add-on: pods need it ACTIVE to receive credentials.
 aws eks wait addon-active --cluster-name "$CLUSTER_NAME" --addon-name eks-pod-identity-agent
 
-if kubectl --context "$KUBE_CONTEXT" get crd flinkdeployments.flink.apache.org >/dev/null 2>&1; then
-	log "the flinkdeployments CRD is present"
-else
-	log "installing the Flink Kubernetes Operator $FLINK_OPERATOR_VERSION"
-	# Use the archive so pinned charts remain available after newer releases.
-	helm repo add flink-operator-repo \
-		"https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/" --force-update
-	# Disable the validating webhook to avoid requiring cert-manager.
-	helm --kube-context "$KUBE_CONTEXT" install "$FLINK_OPERATOR_RELEASE" \
-		flink-operator-repo/flink-kubernetes-operator \
-		--namespace "$FLINK_OPERATOR_NAMESPACE" --create-namespace \
-		--set webhook.create=false --wait
-fi
-# Record the installed chart version, including preexisting installations.
+check_operator_release "$FLINK_OPERATOR_RELEASE" "$FLINK_OPERATOR_NAMESPACE"
+log "reconciling the Flink Kubernetes Operator $FLINK_OPERATOR_VERSION"
+# Use the archive so pinned charts remain available after newer releases.
+helm repo add flink-operator-repo \
+	"https://archive.apache.org/dist/flink/flink-kubernetes-operator-$FLINK_OPERATOR_VERSION/" --force-update
+# Helm retains CRDs after uninstall; reconcile the controller release even when
+# its CRD exists. --wait requires the chart's workloads to become ready.
+helm --kube-context "$KUBE_CONTEXT" upgrade --install "$FLINK_OPERATOR_RELEASE" \
+	flink-operator-repo/flink-kubernetes-operator \
+	--namespace "$FLINK_OPERATOR_NAMESPACE" --create-namespace \
+	--version "$FLINK_OPERATOR_VERSION" \
+	--set webhook.create=false --wait
+# Record the reconciled chart version.
 # Capture helm errors before parsing so pipefail cannot bypass diagnostics.
-if ! OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
+if ! OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --namespace "$FLINK_OPERATOR_NAMESPACE" \
 	--filter "^$FLINK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
 	die "helm could not list the releases on $KUBE_CONTEXT: $OPERATOR_RELEASES"
 fi

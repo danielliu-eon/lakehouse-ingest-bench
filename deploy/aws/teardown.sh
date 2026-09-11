@@ -27,6 +27,7 @@ Environment: AWS_REGION and CLUSTER_NAME are required. BUCKET, MSK_NAME,
 NAMESPACE and KUBE_CONTEXT must match the values used by setup.sh.
 MSK and its security group are removed only for kafka.deployment: managed.
 MSK_DELETED_WAIT_S sets the timeout for MSK deletion.
+If EKS is already gone, set VPC_ID to its original VPC for security-group cleanup.
 USAGE
 }
 
@@ -82,7 +83,7 @@ SPARK_OPERATOR_RELEASE=spark-operator
 SPARK_OPERATOR_NAMESPACE=spark-operator
 ECR_REPOSITORIES="lakehouse-ingest-bench/harness lakehouse-ingest-bench/flink lakehouse-ingest-bench/spark"
 
-require_host_tools aws kubectl
+require_host_tools aws kubectl jq
 if ((ALL == 1)); then
 	require_host_tools helm
 fi
@@ -94,8 +95,10 @@ BUCKET="${BUCKET:-lakehouse-ingest-bench-$ACCOUNT}"
 
 # Skip Kubernetes cleanup if the cluster is gone. Check once so later errors
 # are not mistaken for absent resources.
-if aws eks describe-cluster --name "$CLUSTER_NAME" >/dev/null 2>&1; then
+VPC_ID="${VPC_ID:-}"
+if CLUSTER_JSON="$(aws eks describe-cluster --name "$CLUSTER_NAME" --output json 2>/dev/null)"; then
 	CLUSTER_PRESENT=1
+	VPC_ID="$(jq -r '.cluster.resourcesVpcConfig.vpcId' <<<"$CLUSTER_JSON")"
 	if ! kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$KUBE_CONTEXT"; then
 		log "no kubeconfig context $KUBE_CONTEXT; writing one"
 		aws eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$KUBE_CONTEXT" >/dev/null
@@ -183,25 +186,7 @@ if [[ $KAFKA_DEPLOYMENT == managed ]]; then
 		log "MSK cluster $MSK_NAME is already gone"
 	fi
 
-	MSK_SG_NAME="$MSK_NAME-msk"
-	# Require the ownership tag as well as the name before deleting the group.
-	MSK_SG_ID="$(aws ec2 describe-security-groups \
-		--filters "Name=group-name,Values=$MSK_SG_NAME" "Name=tag:$TAG_KEY,Values=true" \
-		--query 'SecurityGroups[0].GroupId' --output text)"
-	if [[ -n $MSK_SG_ID && $MSK_SG_ID != None ]]; then
-		log "deleting security group $MSK_SG_NAME ($MSK_SG_ID)"
-		if ! DELETE_ERROR="$(aws ec2 delete-security-group --group-id "$MSK_SG_ID" 2>&1)"; then
-			case "$DELETE_ERROR" in
-			*DependencyViolation*)
-				die "$MSK_SG_ID is still in use: $DELETE_ERROR
-	     MSK may retain network interfaces for a few minutes after cluster deletion. Wait, then rerun this script."
-				;;
-			*) die "could not delete $MSK_SG_ID: $DELETE_ERROR" ;;
-			esac
-		fi
-	else
-		log "security group $MSK_SG_NAME is already gone"
-	fi
+	remove_msk_security_group
 else
 	log "skipping MSK and its security group (kafka.deployment=$KAFKA_DEPLOYMENT)"
 fi

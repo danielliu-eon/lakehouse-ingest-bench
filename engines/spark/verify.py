@@ -19,7 +19,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from engines.spark.knobs import Knobs, kubernetes_name, read
+from engines.spark.knobs import KUBERNETES, Knobs, kubernetes_name, read
+from ingest_bench.k8s.fleet import active_pods
 from ingest_bench.readings import (
     DRIFT_EXIT,
     NOT_REPORTED,
@@ -41,8 +42,7 @@ APPLICATIONS = "/api/v1/applications"
 # Diagnostic label for the pod list supplied by kubectl.
 PODS = "the pod list"
 
-# Operator role labels and required pod phase and QoS class.
-_ROLE_LABEL = "spark-role"
+# Operator roles and required pod phase and QoS class.
 _DRIVER = "driver"
 _EXECUTOR = "executor"
 _RUNNING_PHASE = "Running"
@@ -129,7 +129,7 @@ class _Pod:
 
 
 def _pods(answer: object) -> list[_Pod]:
-    items = documents(field(document(answer, PODS), "items", PODS), f"{PODS}'s items")
+    items = active_pods(answer, where=PODS)
     pods: list[_Pod] = []
     for item in items:
         metadata = document(field(item, "metadata", PODS), f"{PODS}'s metadata")
@@ -138,7 +138,7 @@ def _pods(answer: object) -> list[_Pod]:
         pods.append(
             _Pod(
                 name=str_field(metadata, "name", PODS),
-                role=optional_str_field(labels, _ROLE_LABEL, PODS),
+                role=optional_str_field(labels, KUBERNETES.pod_role_label, PODS),
                 phase=optional_str_field(status, "phase", PODS),
                 # A pod may lack QoS before admission; treat that as pending readiness.
                 qos_class=optional_str_field(status, "qosClass", PODS),

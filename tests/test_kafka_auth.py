@@ -195,3 +195,17 @@ def test_an_admin_client_with_no_token_callback_is_not_polled(monkeypatch: pytes
     built = fake_admin_clients(monkeypatch)
     assert kafka_admin.broker_count("b:9092", {}) == 2
     assert built[0].polls == 0
+
+
+@pytest.mark.parametrize("region", [None, REGION])
+def test_explicit_oauth_cannot_be_reinterpreted_as_java_iam(region: str | None) -> None:
+    from engines.java_properties import kafka_properties
+
+    security = {"sasl.mechanism": "OAUTHBEARER", "sasl.oauthbearer.method": "oidc"}
+    if region is not None:
+        security["aws.region"] = region
+    producer = kafka_auth.librdkafka_config(security)
+    assert producer["sasl.mechanism"] == "OAUTHBEARER"
+    assert "oauth_cb" not in producer
+    with pytest.raises(ValueError, match="managed Java engines do not support"):
+        kafka_properties(security)

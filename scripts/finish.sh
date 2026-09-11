@@ -94,6 +94,10 @@ GEOMETRY="$SCORES/geometry.json"
 # ---------------------------------------------------------------------------
 
 mkdir -p "$SCORES"
+if [[ ! -f $RUN_DIR/engine-pods.json ]]; then
+	aws s3 cp "$RUNS_ROOT/$RUN_ID/stage/engine-pods.json" "$RUN_DIR/engine-pods.json" --only-show-errors >&2 ||
+		log "no captured engine pod requests; managed engine cost will be unavailable"
+fi
 log "fetching $RUNS_ROOT/$RUN_ID/scores/ into $SCORES"
 aws s3 sync "$RUNS_ROOT/$RUN_ID/scores/" "$SCORES/" --only-show-errors >&2 ||
 	die "could not fetch $RUNS_ROOT/$RUN_ID/scores/; check that the run was launched and that you can read the bucket"

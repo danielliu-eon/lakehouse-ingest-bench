@@ -81,6 +81,8 @@ KUBERNETES = EngineKubernetes(
     log_target=f"pod/{NAME}-driver",
     provenance_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={NAME}",
     pods_selector=f"sparkoperator.k8s.io/app-name={NAME}",
+    fleet_selector=f"sparkoperator.k8s.io/app-name={NAME}",
+    pod_role_label="spark-role",
     document_file=SPARKAPPLICATION_FILE,
     configmap_file=CONFIGMAP_FILE,
 )

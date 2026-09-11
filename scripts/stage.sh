@@ -207,12 +207,9 @@ else
 	VERIFY_SPEC="$(cd -- "$RUN_DIR" && pwd)/spec.yaml" || die "could not resolve $RUN_DIR to check the engine against"
 	[[ -f $VERIFY_SPEC ]] ||
 		die "$RUNS_ROOT/$RUN_ID/stage/ holds no spec.yaml, so the engine has nothing to be checked against"
-	# Use a temporary pod snapshot only for verifiers that inspect fleet placement.
-	VERIFY_PODS=""
-	if [[ -n $ENGINE_PODS_SELECTOR ]]; then
-		VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
-			die "could not create a temporary file for the run's pod details"
-	fi
+	# Keep raw pod data temporary; the saved resource artifact omits environment values.
+	VERIFY_PODS="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-pods.XXXXXX")" ||
+		die "could not create a temporary file for the run's pod details"
 
 	# Install cleanup before opening the tunnel so failures leave no process behind.
 	trap 'k8s_port_forward_stop; [[ -z $VERIFY_PODS ]] || rm -f "$VERIFY_PODS"' EXIT
@@ -254,6 +251,12 @@ else
 		sleep "$ENGINE_POLL_S"
 	done
 	k8s_port_forward_stop
+
+	# Capture admitted requests while the complete fleet exists. Keep the artifact
+	# with staged files so collection can run after teardown or from another host.
+	k8s_write_pods "$VERIFY_PODS" "$ENGINE_FLEET_SELECTOR"
+	harness_local engine-fleet --spec "$VERIFY_SPEC" --pods "$VERIFY_PODS" --out "${VERIFY_SPEC%/*}/engine-pods.json"
+	aws s3 cp "$RUN_DIR/engine-pods.json" "$RUNS_ROOT/$RUN_ID/stage/engine-pods.json" --only-show-errors >&2
 
 	# Capture image provenance while the fleet still exists; teardown provides a fallback.
 	k8s_write_engine_image "$RUN_DIR/$ENGINE_IMAGE_FILE" "$ENGINE_PROVENANCE_SELECTOR"

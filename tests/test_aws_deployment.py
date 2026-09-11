@@ -37,6 +37,8 @@ if name == "aws":
     if (service, action) == ("sts", "get-caller-identity"):
         print("123456789012")
     elif (service, action) == ("eks", "describe-cluster"):
+        if os.environ.get("TEST_EKS_ABSENT"):
+            sys.exit(1)
         print(json.dumps({"cluster": {"resourcesVpcConfig": {"vpcId": "vpc-1", "subnetIds": ["s1", "s2"]}}}))
     elif (service, action) == ("s3api", "get-bucket-tagging"):
         print("true")
@@ -66,6 +68,8 @@ elif name == "kubectl":
         print(json.dumps({"items": [{"status": {"nodeInfo": {"architecture": "amd64"}}}]}))
     elif "apply" in args:
         sys.stdin.read()
+elif name == "helm" and "status" in args:
+    print(json.dumps({"info": {"status": "deployed"}}))
 elif name == "helm":
     print('[{"chart": "operator-1.0"}]')
 elif name == "helmfile":
@@ -168,6 +172,33 @@ def test_teardown_skips_msk_for_other_deployments(aws_environment: dict[str, str
     calls = [json.loads(line) for line in Path(aws_environment["CALLS"]).read_text().splitlines()]
     assert not any(call[:2] in (["aws", "kafka"], ["aws", "ec2"]) for call in calls)
     assert any(call[:3] == ["aws", "iam", "delete-role"] for call in calls)
+
+
+@pytest.mark.parametrize("eks_present,vpc_override", [(True, ""), (False, "vpc-original"), (False, "")])
+def test_teardown_scopes_msk_security_group_to_original_vpc(
+    aws_environment: dict[str, str], eks_present: bool, vpc_override: str
+) -> None:
+    Path(aws_environment["SITE_FILE"]).write_text("kafka: {deployment: managed}\n")
+    aws_environment["TEST_MSK_ABSENT"] = "true"
+    aws_environment["VPC_ID"] = vpc_override
+    if not eks_present:
+        aws_environment["TEST_EKS_ABSENT"] = "true"
+    result = subprocess.run(
+        ["bash", str(AWS / "teardown.sh")], env=aws_environment, capture_output=True, text=True, timeout=60
+    )
+    calls = [json.loads(line) for line in Path(aws_environment["CALLS"]).read_text().splitlines()]
+    group_calls = [call for call in calls if call[:3] == ["aws", "ec2", "describe-security-groups"]]
+    deletes = [call for call in calls if call[:3] == ["aws", "ec2", "delete-security-group"]]
+    if eks_present or vpc_override:
+        assert result.returncode == 0, result.stderr
+        assert len(group_calls) == len(deletes) == 1
+        expected_vpc = "vpc-1" if eks_present else vpc_override
+        assert f"Name=vpc-id,Values={expected_vpc}" in group_calls[0]
+        assert "Name=tag:lakehouse-ingest-bench,Values=true" in group_calls[0]
+    else:
+        assert result.returncode != 0
+        assert "set VPC_ID" in result.stderr
+        assert not group_calls and not deletes
 
 
 @pytest.mark.parametrize("script", ["aws/setup.sh", "aws/teardown.sh", "k8s/stack/setup.sh", "k8s/stack/teardown.sh"])

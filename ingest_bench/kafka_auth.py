@@ -65,6 +65,20 @@ def refuse_mechanism_alias(security: Mapping[str, object], where: str) -> None:
         raise ValueError(f"{where} sets unsupported alias {MECHANISM_ALIAS!r}; write it as {MECHANISM_KEY!r}")
 
 
+def has_explicit_oauth(security: Mapping[str, object]) -> bool:
+    """Whether the site supplies a librdkafka OAuth token source."""
+    return any(key.startswith(_OAUTHBEARER_PREFIX) for key in security)
+
+
+def refuse_java_oauth(security: Mapping[str, object]) -> None:
+    """Prevent librdkafka OAuth settings from silently selecting Java MSK IAM."""
+    if has_explicit_oauth(security):
+        raise ValueError(
+            "managed Java engines do not support site.kafka.security sasl.oauthbearer.* properties; "
+            "use an external engine for explicit OAuth, or omit these properties for Amazon MSK IAM"
+        )
+
+
 def librdkafka_config(
     security: Mapping[str, object],
     *,
@@ -81,7 +95,7 @@ def librdkafka_config(
     if MECHANISM_KEY not in security or security[MECHANISM_KEY] != _OAUTHBEARER:
         return config
     # Preserve an explicitly configured token source.
-    if any(key.startswith(_OAUTHBEARER_PREFIX) for key in security):
+    if has_explicit_oauth(security):
         return config
     if REGION_KEY not in security:
         raise ValueError(

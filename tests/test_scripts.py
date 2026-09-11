@@ -834,15 +834,12 @@ def test_setup_refuses_an_existing_site_before_it_touches_the_account(tmp_path: 
 
 
 @needs_shell_tools
-@pytest.mark.parametrize("already_installed", [False, True])
+@pytest.mark.parametrize("release_status", ["missing", "deployed", "failed", "pending-install", "pending-upgrade"])
 @pytest.mark.parametrize("version", [None, "2.6.0"])
 def test_spark_operator_installation_is_pinned_and_idempotent(
-    tmp_path: Path, already_installed: bool, version: str | None
+    tmp_path: Path, release_status: str, version: str | None
 ) -> None:
     calls = tmp_path / "calls"
-    installed = tmp_path / "installed"
-    if already_installed:
-        installed.touch()
     harness = f"""
         set -euo pipefail
         source "{AWS_RESOURCES}"
@@ -850,14 +847,18 @@ def test_spark_operator_installation_is_pinned_and_idempotent(
         NAMESPACE=ingest-bench
         log() {{ :; }}
         die() {{ printf '%s\\n' "$*" >&2; exit 1; }}
-        kubectl() {{
-            printf 'kubectl %s\\n' "$*" >>'{calls}'
-            [[ -e '{installed}' ]]
-        }}
+        # Retained CRDs must not suppress installation of the controller.
+        kubectl() {{ return 0; }}
         helm() {{
             printf 'helm %s\\n' "$*" >>'{calls}'
             case "$*" in
-                *install*) touch '{installed}' ;;
+                *status*)
+                    if [[ '{release_status}' == missing ]]; then
+                        echo 'Error: release: not found' >&2
+                        return 1
+                    fi
+                    echo '{{"info": {{"status": "{release_status}"}}}}'
+                    ;;
                 *list*) printf '[]\\n' ;;
             esac
         }}
@@ -868,22 +869,131 @@ def test_spark_operator_installation_is_pinned_and_idempotent(
     if version is not None:
         env["SPARK_OPERATOR_VERSION"] = version
     result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env=env)
-    assert result.returncode == 0, result.stderr
     commands = calls.read_text().splitlines()
-    assert commands.count("kubectl --context a-cluster get crd sparkapplications.sparkoperator.k8s.io") == 2
-    installs = [command for command in commands if " install " in command]
-    if already_installed:
-        assert installs == []
-        assert not any("repo add" in command for command in commands)
+    installs = [command for command in commands if " upgrade --install " in command]
+    if release_status.startswith("pending-"):
+        assert result.returncode == 1
+        assert release_status in result.stderr
+        assert not installs
     else:
-        assert installs == [
-            "helm --kube-context a-cluster install spark-operator spark-operator/spark-operator "
+        assert result.returncode == 0, result.stderr
+        expected = (
+            "helm --kube-context a-cluster upgrade --install spark-operator spark-operator/spark-operator "
             "--namespace spark-operator --create-namespace "
             f"--version {version or '2.5.2'} --set spark.jobNamespaces={{ingest-bench}} "
             "--set spark.serviceAccount.create=false --set spark.rbac.create=false "
             "--set webhook.enable=true --wait"
-        ]
-        assert "helm repo add spark-operator https://kubeflow.github.io/spark-operator --force-update" in commands
+        )
+        assert installs == [expected, expected]
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("answer", ["warning", "missing", "forbidden"])
+def test_operator_status_keeps_diagnostics_out_of_json(tmp_path: Path, answer: str) -> None:
+    harness = f"""
+        set -euo pipefail
+        source "{AWS_RESOURCES}"
+        KUBE_CONTEXT=a-cluster
+        die() {{ echo "$*" >&2; exit 1; }}
+        trap 'echo caller-cleanup' EXIT
+        helm() {{
+            echo 'WARNING: kubeconfig is group-readable' >&2
+            case '{answer}' in
+                warning) echo '{{"info": {{"status": "deployed"}}}}' ;;
+                missing) echo 'Error: release: not found' >&2; return 1 ;;
+                forbidden) echo 'Error: forbidden' >&2; return 1 ;;
+            esac
+        }}
+        check_operator_release operator operators
+    """
+    result = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, env={**os.environ, "TMPDIR": str(tmp_path)}
+    )
+    assert result.returncode == (1 if answer == "forbidden" else 0), result.stderr
+    assert "WARNING: kubeconfig is group-readable" in result.stderr
+    if answer == "forbidden":
+        assert "Error: forbidden" in result.stderr
+        assert "could not inspect operator release" in result.stderr
+    assert result.stdout.strip() == "caller-cleanup"
+    assert not list(tmp_path.glob("ingest-bench-helm.*"))
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("release_status", ["missing", "failed", "pending-install"])
+def test_flink_operator_reconciles_retained_crds(tmp_path: Path, release_status: str) -> None:
+    calls = tmp_path / "calls"
+    setup = AWS_SETUP.read_text()
+    reconcile = setup[setup.index('check_operator_release "$FLINK_OPERATOR_RELEASE"') :]
+    reconcile = reconcile[: reconcile.index("# Record the reconciled chart")]
+    harness = f"""
+        set -euo pipefail
+        source "{AWS_RESOURCES}"
+        KUBE_CONTEXT=a-cluster
+        FLINK_OPERATOR_RELEASE=flink-kubernetes-operator
+        FLINK_OPERATOR_NAMESPACE=flink-operator
+        FLINK_OPERATOR_VERSION=1.15.0
+        log() {{ :; }}
+        die() {{ echo "$*" >&2; exit 1; }}
+        kubectl() {{ return 0; }}
+        helm() {{
+            echo "$*" >>'{calls}'
+            if [[ "$*" == *status* ]]; then
+                if [[ '{release_status}' == missing ]]; then
+                    echo 'Error: release: not found' >&2
+                    return 1
+                fi
+                echo '{{"info": {{"status": "{release_status}"}}}}'
+            fi
+        }}
+        {reconcile}
+    """
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    commands = calls.read_text()
+    if release_status.startswith("pending-"):
+        assert result.returncode == 1
+        assert "upgrade --install" not in commands
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "upgrade --install flink-kubernetes-operator" in commands
+        assert "--version 1.15.0 --set webhook.create=false --wait" in commands
+
+
+@needs_shell_tools
+@pytest.mark.parametrize("vpc_id", ["vpc-owned", "", "null"])
+def test_msk_security_group_cleanup_requires_the_deployment_vpc(tmp_path: Path, vpc_id: str) -> None:
+    calls = tmp_path / "calls"
+    harness = f"""
+        set -euo pipefail
+        source "{AWS_RESOURCES}"
+        VPC_ID='{vpc_id}'
+        CLUSTER_NAME=a-cluster
+        MSK_NAME=lakehouse-ingest-bench
+        TAG_KEY=lakehouse-ingest-bench
+        log() {{ :; }}
+        die() {{ echo "$*" >&2; exit 1; }}
+        aws() {{
+            echo "$*" >>'{calls}'
+            if [[ "$*" == *describe-security-groups* ]]; then
+                if [[ "$*" == *Name=vpc-id,Values=vpc-owned* ]]; then
+                    echo sg-owned
+                else
+                    echo sg-other-deployment
+                fi
+            fi
+        }}
+        remove_msk_security_group
+    """
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    if vpc_id == "vpc-owned":
+        assert result.returncode == 0, result.stderr
+        commands = calls.read_text()
+        assert "Name=tag:lakehouse-ingest-bench,Values=true" in commands
+        assert "delete-security-group --group-id sg-owned" in commands
+        assert "sg-other-deployment" not in commands
+    else:
+        assert result.returncode == 1
+        assert "VPC_ID" in result.stderr
+        assert not calls.exists()
 
 
 def test_the_operator_chart_comes_from_the_archive_at_the_pinned_version() -> None:
@@ -1613,6 +1723,7 @@ esac
 # Simulate sync from fixture directories, listings from fixture text, and cp from STUB_S3_CP_DIR.
 # Missing-path variables model absent objects.
 AWS_STUB = """
+S3_SCHEME="s3://"
 printf '%s\\n' "$*" >>"$STUB_AWS_LOG"
 if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
 	mkdir -p "$4"
@@ -1620,7 +1731,13 @@ if [[ ${1:-} == s3 && ${2:-} == sync && -d ${STUB_STAGE_DIR:-} ]]; then
 fi
 if [[ ${1:-} == s3 && ${2:-} == cp ]]; then
 	[[ -z ${STUB_S3_CP_ABSENT:-} || ${3:-} != *"$STUB_S3_CP_ABSENT"* ]] || exit 1
-	if [[ -n ${STUB_S3_CP_DIR:-} && -f "$STUB_S3_CP_DIR/${3##*/}" ]]; then
+	if [[ $4 == "$S3_SCHEME"* ]]; then
+        [[ -f $3 ]] || exit 1
+        if [[ -n ${STUB_S3_UPLOAD_DIR:-} ]]; then
+            mkdir -p "$STUB_S3_UPLOAD_DIR"
+            cp "$3" "$STUB_S3_UPLOAD_DIR/${4##*/}"
+        fi
+    elif [[ -n ${STUB_S3_CP_DIR:-} && -f "$STUB_S3_CP_DIR/${3##*/}" ]]; then
 		cp "$STUB_S3_CP_DIR/${3##*/}" "$4"
 	else
 		: >"$4"
@@ -1665,6 +1782,21 @@ if [[ -n ${STUB_VERIFY_STATUSES:-} ]]; then
 	exit "${statuses[index]}"
 fi
 exit "${STUB_VERIFY_STATUS:-0}"
+"""
+
+# Resource parsing has dedicated tests; driver tests check capture and upload.
+ENGINE_FLEET_STUB = """
+pods=""
+out=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --pods) pods=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) shift ;;
+    esac
+done
+[[ ${STUB_FLEET_STATUS:-0} == 0 ]] || exit "$STUB_FLEET_STATUS"
+cp "$pods" "$out"
 """
 
 DROP_TABLE_STUB = """
@@ -1818,7 +1950,10 @@ def _run_driver(
     aws_calls.touch()
     job_log_file = tmp_path / "job.log"
     job_log_file.write_text(job_log if job_log is not None else STAGE_JOB_LOG)
-    stubs = _stub_bin(tmp_path / "bin", {"kubectl": KUBECTL_STUB, "aws": AWS_STUB, **(programs or {})})
+    stubs = _stub_bin(
+        tmp_path / "bin",
+        {"kubectl": KUBECTL_STUB, "aws": AWS_STUB, "engine-fleet": ENGINE_FLEET_STUB, **(programs or {})},
+    )
 
     result = subprocess.run(
         [str(script), *arguments],
@@ -1957,7 +2092,10 @@ def test_stage_reads_the_run_id_off_the_jobs_log_and_then_starts_the_engine(tmp_
 
     fetched = tmp_path / "work" / "runs" / RUN_ID
     assert json.loads((fetched / "facts.json").read_text())["topic"] == RUN_ID
-    assert run.aws_calls.strip() == f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/ --only-show-errors"
+    assert run.aws_calls.splitlines() == [
+        f"s3 sync s3://a-bucket/runs/{RUN_ID}/stage/ ./runs/{RUN_ID}/ --only-show-errors",
+        f"s3 cp ./runs/{RUN_ID}/engine-pods.json s3://a-bucket/runs/{RUN_ID}/stage/engine-pods.json --only-show-errors",
+    ]
 
     # Never fall back to the caller's current Kubernetes context or namespace.
     for line in run.calls.splitlines():
@@ -2277,6 +2415,29 @@ def test_launch_passes_the_scorers_read_width_only_when_it_is_set(tmp_path: Path
     assert run.result.returncode == 0, run.result.stderr
     scorer = _job_command(run.applied[0])
     assert "--read-workers 8" in scorer
+
+
+@needs_shell_tools
+def test_launch_cleans_partial_epoch_write_without_changing_facts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "work" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    original = json.dumps(FACTS)
+    (run_dir / "facts.json").write_text(original)
+    (run_dir / "spec.yaml").write_text((REPO_ROOT / "runs" / "smoke-flink.yaml").read_text())
+    real_jq = shutil.which("jq")
+    assert real_jq is not None
+    run = _run_driver(
+        LAUNCH,
+        [RUN_ID, "--image-tag", "abc1234"],
+        tmp_path,
+        {},
+        programs={
+            "jq": (f'if [[ $1 == --argjson && $2 == epoch ]]; then echo partial; exit 7; fi\nexec "{real_jq}" "$@"')
+        },
+    )
+    assert run.result.returncode == 7, run.result.stderr
+    assert (run_dir / "facts.json").read_text() == original
+    assert not list(run_dir.glob("facts.json.*"))
 
 
 @needs_shell_tools
@@ -2766,7 +2927,10 @@ def test_a_runs_kubernetes_objects_are_addressed_in_lower_case(tmp_path: Path) -
 
 @needs_shell_tools
 @pytest.mark.parametrize("engine", ["flink", "spark"])
-def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path: Path, engine: str) -> None:
+@pytest.mark.parametrize("fleet_status", [0, 2])
+def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(
+    tmp_path: Path, engine: str, fleet_status: int
+) -> None:
     descriptor = engines.kubernetes_for(engine)
     run_id = f"smoke-{engine}-20260908T120000Z"
     run_object = run_id.lower()
@@ -2784,13 +2948,20 @@ def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path
         tmp_path,
         {
             "STUB_STAGE_DIR": str(staged),
+            "STUB_FLEET_STATUS": str(fleet_status),
             "STUB_CURL_LOG": str(tmp_path / "curl-calls.log"),
             "STUB_VERIFY_LOG": str(verify_calls),
             "STUB_PODS": json.dumps({"items": [{"metadata": {"name": f"{run_object}-driver"}}]}),
+            "STUB_S3_UPLOAD_DIR": str(tmp_path / "uploaded"),
         },
         programs={"curl": CURL_STUB, f"verify-{engine}": VERIFY_STUB},
         job_log=_stage_job_log(run_id),
     )
+    if fleet_status:
+        assert run.result.returncode == fleet_status, run.result.stderr
+        assert "stage/engine-pods.json" not in run.aws_calls
+        assert f"run_id: {run_id}" not in run.result.stdout
+        return
     assert run.result.returncode == 0, run.result.stderr
     assert run.result.stdout.splitlines()[-1] == f"run_id: {run_id}"
 
@@ -2811,8 +2982,11 @@ def test_stage_addresses_an_engine_by_the_names_its_own_module_declares(tmp_path
         assert "--pods " in checked
         assert json.loads(checked.splitlines()[1])["items"][0]["metadata"]["name"] == f"{run_object}-driver"
     else:
-        assert "get pods -l" not in run.calls
         assert "--pods" not in checked
+    assert f"get pods -l {for_name(descriptor.fleet_selector, run_object)} -o json" in run.calls
+    captured = tmp_path / "work" / "runs" / run_id / "engine-pods.json"
+    assert json.loads(captured.read_text())["items"][0]["metadata"]["name"] == f"{run_object}-driver"
+    assert (tmp_path / "uploaded" / "engine-pods.json").read_bytes() == captured.read_bytes()
 
 
 def test_the_shell_reads_every_field_the_descriptor_prints() -> None:
@@ -3002,6 +3176,22 @@ FINISH_PROGRAMS = {
     "file-sizes": FILE_SIZES_STUB,
     "results-table": RESULTS_TABLE_STUB,
 }
+
+
+@needs_shell_tools
+def test_finish_recovers_pod_requests_without_overwriting_launch_facts(tmp_path: Path) -> None:
+    run_dir = _torn_down_run(tmp_path)
+    facts = (run_dir / "facts.json").read_bytes()
+    archived = tmp_path / "archived"
+    archived.mkdir()
+    requests = '{"captured_at":"2026-09-10T12:00:00Z","items":[]}'
+    (archived / "engine-pods.json").write_text(requests)
+    (archived / "facts.json").write_text('{"epoch":null}')
+    environment = {**_finish_environment(tmp_path), "STUB_S3_CP_DIR": str(archived)}
+    run = _run_driver(FINISH, [RUN_ID], tmp_path, environment, programs=FINISH_PROGRAMS)
+    assert run.result.returncode == 0, run.result.stderr
+    assert (run_dir / "engine-pods.json").read_text() == requests
+    assert (run_dir / "facts.json").read_bytes() == facts
 
 
 @needs_shell_tools

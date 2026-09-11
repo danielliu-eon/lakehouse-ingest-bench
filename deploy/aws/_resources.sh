@@ -230,29 +230,74 @@ choose_kafka_version() {
 		die "no ACTIVE 3.x Kafka version among ${KAFKA_VERSIONS//$'\t'/ }; set MSK_KAFKA_VERSION yourself"
 }
 
-install_spark_operator() {
-	if kubectl --context "$KUBE_CONTEXT" get crd sparkapplications.sparkoperator.k8s.io >/dev/null 2>&1; then
-		log "the sparkapplications CRD is present"
+# A pending Helm operation needs explicit recovery; starting another cannot fix it.
+check_operator_release() (
+	local release=$1 namespace=$2 status_json status diagnostics
+	diagnostics="$(mktemp "${TMPDIR:-/tmp}/ingest-bench-helm.XXXXXX")" || return
+	trap 'rm -f "$diagnostics"' EXIT
+	if status_json="$(helm --kube-context "$KUBE_CONTEXT" status "$release" \
+		--namespace "$namespace" --output json 2>"$diagnostics")"; then
+		cat "$diagnostics" >&2
+		status="$(jq -er '.info.status | select(type == "string")' <<<"$status_json")" ||
+			die "invalid Helm status for operator release $namespace/$release"
+		case "$status" in
+		pending-* | uninstalling)
+			die "operator release $namespace/$release is $status. Inspect helm status and helm history, then finish or recover that operation before rerunning setup."
+			;;
+		esac
 	else
-		log "installing the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
-		helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
-		# Use the benchmark service account bound to Pod Identity; the namespace
-		# manifest supplies its RBAC. Enable the webhook explicitly because it adds
-		# the ConfigMap volume mounts needed at /opt/bench/run.
-		helm --kube-context "$KUBE_CONTEXT" install "$SPARK_OPERATOR_RELEASE" \
-			"$SPARK_OPERATOR_RELEASE/spark-operator" \
-			--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
-			--version "$SPARK_OPERATOR_VERSION" \
-			--set "spark.jobNamespaces={$NAMESPACE}" \
-			--set spark.serviceAccount.create=false \
-			--set spark.rbac.create=false \
-			--set webhook.enable=true \
-			--wait
+		cat "$diagnostics" >&2
+		if ! grep -q 'release: not found' "$diagnostics"; then
+			die "could not inspect operator release $namespace/$release"
+		fi
 	fi
-	# Record the installed chart version, including preexisting installations.
-	if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --all-namespaces \
+)
+
+install_spark_operator() {
+	check_operator_release "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_NAMESPACE"
+	log "reconciling the Kubeflow spark-operator $SPARK_OPERATOR_VERSION"
+	helm repo add "$SPARK_OPERATOR_RELEASE" "$SPARK_OPERATOR_REPO" --force-update
+	# Use the benchmark service account bound to Pod Identity. The webhook adds
+	# the ConfigMap volume mounts needed at /opt/bench/run.
+	helm --kube-context "$KUBE_CONTEXT" upgrade --install "$SPARK_OPERATOR_RELEASE" \
+		"$SPARK_OPERATOR_RELEASE/spark-operator" \
+		--namespace "$SPARK_OPERATOR_NAMESPACE" --create-namespace \
+		--version "$SPARK_OPERATOR_VERSION" \
+		--set "spark.jobNamespaces={$NAMESPACE}" \
+		--set spark.serviceAccount.create=false \
+		--set spark.rbac.create=false \
+		--set webhook.enable=true \
+		--wait
+
+	# Record the reconciled chart version.
+	if ! SPARK_OPERATOR_RELEASES="$(helm --kube-context "$KUBE_CONTEXT" list --namespace "$SPARK_OPERATOR_NAMESPACE" \
 		--filter "^$SPARK_OPERATOR_RELEASE\$" --output json 2>&1)"; then
 		die "helm could not list the releases on $KUBE_CONTEXT: $SPARK_OPERATOR_RELEASES"
 	fi
 	log "spark operator: $(jq -r '.[0].chart // "not a helm release on this cluster"' <<<"$SPARK_OPERATOR_RELEASES")"
+}
+
+remove_msk_security_group() {
+	local MSK_SG_NAME MSK_SG_ID DELETE_ERROR
+	MSK_SG_NAME="$MSK_NAME-msk"
+	[[ -n $VPC_ID && $VPC_ID != null ]] ||
+		die "cannot identify the VPC for $CLUSTER_NAME; set VPC_ID to its original VPC and rerun to remove the MSK security group safely"
+	# Names and benchmark tags can repeat across VPCs.
+	MSK_SG_ID="$(aws ec2 describe-security-groups \
+		--filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=$MSK_SG_NAME" "Name=tag:$TAG_KEY,Values=true" \
+		--query 'SecurityGroups[0].GroupId' --output text)"
+	if [[ -n $MSK_SG_ID && $MSK_SG_ID != None ]]; then
+		log "deleting security group $MSK_SG_NAME ($MSK_SG_ID)"
+		if ! DELETE_ERROR="$(aws ec2 delete-security-group --group-id "$MSK_SG_ID" 2>&1)"; then
+			case "$DELETE_ERROR" in
+			*DependencyViolation*)
+				die "$MSK_SG_ID is still in use: $DELETE_ERROR
+	     MSK may retain network interfaces for a few minutes after cluster deletion. Wait, then rerun this script."
+				;;
+			*) die "could not delete $MSK_SG_ID: $DELETE_ERROR" ;;
+			esac
+		fi
+	else
+		log "security group $MSK_SG_NAME is already gone"
+	fi
 }

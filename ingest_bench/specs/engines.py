@@ -53,8 +53,8 @@ def knobs_for(engine: str) -> ModuleType:
 def fleet_for(engine: str) -> ModuleType:
     """The fleet module of a managed engine.
 
-    Every such module exposes ``fleet(spec) -> list[FleetRole]``: the compute
-    the run asked for, in the vCPU and GiB a published result is costed in.
+    Every such module exposes ``fleet(spec) -> list[FleetRole]``: declared role
+    counts, machine types and sizing estimates. Cluster cost uses pod requests.
     """
     return _engine_module(engine, FLEET_MODULE)
 

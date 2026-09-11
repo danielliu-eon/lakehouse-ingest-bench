@@ -98,7 +98,7 @@ def test_keepup_summary() -> None:
         )
         samples.append(prev)
     assert samples[1].offered_rate == 1000.0 and samples[1].committed_rate == 800.0
-    s = keepup.keepup_summary(samples, offer_end_ms=E + 9000, drained_ms=E + 12000)
+    s = keepup.keepup_summary(samples, offer_end_ms=E + 9000, drained_ms=E + 12000, final_offered_rows=10_000)
     assert s["absorbed_at_offer_end"] == 0.8 and s["drain_s"] == 3.0 and s["backlog_rows_max"] == 2000
 
 
@@ -261,3 +261,20 @@ def test_gate_describes_waiting_for_epoch_without_hiding_stale_samples(age_s: in
         assert "lag -" not in reason
     else:
         assert "staleness" in reason
+
+
+def test_offer_end_absorption_uses_final_total_despite_delayed_publish_logs() -> None:
+    samples = [
+        keepup.make_sample(E + 4000, offered_rows=400, committed_rows=400, previous=None),
+        keepup.make_sample(E + 6000, offered_rows=1000, committed_rows=1000, previous=None),
+    ]
+    summary = keepup.keepup_summary(samples, offer_end_ms=E + 5000, drained_ms=E + 6000, final_offered_rows=1000)
+    assert summary["absorbed_at_offer_end"] == 0.4
+    assert summary["drain_s"] == 1.0
+
+
+@pytest.mark.parametrize("final_offered_rows", [None, 0])
+def test_offer_end_absorption_requires_a_nonempty_final_offer(final_offered_rows: int | None) -> None:
+    samples = [keepup.make_sample(E, offered_rows=100, committed_rows=100, previous=None)]
+    summary = keepup.keepup_summary(samples, offer_end_ms=E, drained_ms=E, final_offered_rows=final_offered_rows)
+    assert summary["absorbed_at_offer_end"] is None
