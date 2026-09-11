@@ -1,116 +1,89 @@
 # Pitfalls
 
-These issues can invalidate a run or make its measurements misleading.
+These issues can invalidate a run, distort comparisons, or leave resources running
+after a failure.
 
-## Set table properties at creation
+## Create comparable tables before comparing writers
 
-With `table.managed_by: harness`, the harness creates the table using
-`table.properties`. With `managed_by: engine`, it supplies equivalent DDL in
-`facts.ddl` but creates nothing. The engine must apply those properties itself;
-writer configuration alone does not establish the properties of an existing
-table. Use the same creation path when comparing file geometry.
+Put persistent table settings in `table.properties`. With
+`table.managed_by: harness`, staging applies them when it creates the table and
+forces Iceberg format version 2. With `table.managed_by: engine`, staging leaves
+creation to the engine and supplies the requested DDL in `facts.ddl`.
 
-## Many partitions and writers produce small files
+Writer options do not necessarily change an existing table's properties. Use the
+same table creation path and properties across runs when comparing file geometry.
 
-If every writer touches every identity partition, a commit can produce up to one
-file per partition value per writer. Increasing the offer rate does not eliminate
-this multiplication; partitioning and commit cadence still determine file counts.
+## Runtime verification covers only selected settings
 
-The scorer must read the id column from every file. `--read-workers` controls
-concurrent reads, and the scorer pod must have enough resources for that setting.
-`SLOW_POLL` in a `POLL` line means a poll exceeded its interval. Increase reader
-capacity or use coarser partitioning before relying on the verdict: the gate
-returns `VOID` when measurements become stale.
+Staging checks managed engines after they start, but a successful check does not
+prove that every setting took effect. Flink verification covers checkpoint
+cadence and mode, operator parallelism, and TaskManager count. Spark verification
+covers selected driver-reported settings and the running pod fleet.
 
-## Accepted settings may still be ignored
+Two cadence settings deserve particular care:
 
-Both engines can accept settings that have no effect. Staging therefore compares
-the running engine's effective configuration with the spec and rejects mismatches.
+- Flink's `min_pause` defaults to `0s`. A nonzero pause can lengthen the time
+  between checkpoints even when `checkpoint_interval` is unchanged.
+- Spark's `trigger_interval` configures the writer's
+  `trigger(processingTime=…)` call. The verifier cannot read this interval back;
+  it rejects `spark.sql.streaming.trigger*` settings, which do not configure the
+  writer's trigger.
 
-- **Flink resource fields override `spec.flinkConfiguration`.** Resource values
-  in the custom resource take precedence over `extra_flink_conf`. Verification
-  checks effective resource settings. Also check `min_pause`: its default is
-  `0s`, and a nonzero pause changes cadence even with the same
-  `checkpoint_interval`.
-- **Spark trigger interval is a `writeStream` argument.** Spark 3.5 exposes no
-  REST resource for verifying a streaming query's interval. Settings under
-  `spark.sql.streaming.trigger` are rejected because they do not configure it.
+## Size the cluster for the entire run
 
-## Spark heap size is not total memory
+The scorer and each producer shard request 2 CPU, in addition to the engine
+fleet. Count schedulable capacity after system reservations and existing pod
+requests; a node with 4 vCPU may have room for only one 2-CPU pod.
 
-Cloud Spark driver and executor pods request their full CPU limits and use
-Guaranteed QoS. Keep resource requests consistent when comparing runs.
+`launch.sh` warns when available CPU appears insufficient for the scorer and
+producers, but the check is best-effort and does not block launch. Pods that
+cannot be scheduled stay Pending and have no application logs. Check pod events
+for `FailedScheduling` and `Insufficient cpu`. Without autoscaling, provision
+capacity before launch; see [cluster sizing](../deploy/aws/README.md#sizing-the-cluster).
 
-`executor_mem_mb` sets the JVM heap. The process also needs memory for JVM and
-other overhead, while Parquet decoding and buffering consume heap. The shipped
-cloud specs request twice their local counterparts' executor memory. Local runs
-use `--master local[N]`, where the driver's heap holds the workload and
-`executor_mem_mb` does not allocate a separate executor heap; see
-[`engines/spark/README.md`](../engines/spark/README.md).
+Spark memory settings also need care: `executor_mem_mb` sets the JVM heap, while
+pods need additional memory for process overhead. Local Spark runs execute in
+the driver's JVM, using `driver_mem_mb`; `executor_mem_mb` does not allocate a
+separate executor heap. See the [Spark engine guide](../engines/spark/README.md).
 
-## Allow one 2-CPU pod per small node
+## Small files can overwhelm the scorer
 
-The scorer and every producer shard request 2 CPU. Engine workers also request
-2 CPU in the shipped cloud specs (`tm_cpu: 2` / `executor_cores: 2`). The example
-`m6i.xlarge` nodes have 4 vCPU, but kubelet reservations and DaemonSets leave less
-than 4 CPU available. Each such node therefore fits only one 2-CPU pod. Hour-long
-runs need room for the scorer, five producer shards and the engine fleet at once.
+When many writers touch many identity partitions, each commit can create many
+small files. A higher offer rate alone does not control file count; partitioning,
+writer distribution, and commit cadence also matter.
 
-Unschedulable pods remain Pending without application logs. A scorer in this
-state can exhaust `FIRST_POLL_WAIT_S` (300 s) without publishing a measurement.
-Check pod events for `FailedScheduling ... Insufficient cpu`; the drivers print
-these alongside logs. `launch.sh` checks available capacity before applying pods
-and warns if they will not fit. It permits the launch because an autoscaler may
-add nodes. Without autoscaling, size the cluster first; see
-[cluster sizing](../deploy/aws/README.md#sizing-the-cluster).
+The scorer reads the ID column from each newly added file in append snapshots.
+`--read-workers` controls concurrent reads, so the scorer needs enough CPU and
+memory to support that concurrency. A `SLOW_POLL` log line means a poll took
+longer than its configured interval. Investigate reader capacity and file counts
+before trusting the verdict: the gate returns `VOID` when its latest measurement
+exceeds the staleness bound.
 
-## Keep snapshots until geometry has been measured
+## Retain snapshots until geometry measurement finishes
 
 The [engine contract](adding-an-engine.md) prohibits snapshot expiry during a
-run. Keep expiry disabled through `finish.sh` as well: it walks manifests from
-the final metadata document after teardown. Run it before scheduled maintenance
-can expire snapshots, and before `purge.sh` deletes the measured data.
+run. Keep expiry disabled until `finish.sh` completes as well. It reads manifests
+referenced by the final metadata document saved during teardown; saving that
+document does not preserve the manifests themselves. Finish measurement before
+scheduled expiry or `purge.sh` removes the required files.
 
-## Give every run a fresh identity
+## Failed launches still need cleanup
 
-A run id combines its spec name and a UTC timestamp. The topic, table and run
-directory derive from it, keeping runs independent and leftover resources
-traceable. Tables remain until explicitly purged.
+Staging creates resources before launch, and launch failures leave pods available
+for diagnosis. After inspecting logs and pod events:
 
-Never reuse a topic or table across runs. Committed consumer offsets, checkpoint
-state and existing rows can contaminate the next measurement.
+- Run `scripts/teardown.sh <run_id>` to remove managed engine, producer, and scorer
+  resources and drop the topic.
+- Run `scripts/purge.sh <run_id> --artifacts` when the table, its files, and the
+  stored run artifacts are no longer needed.
 
-## Clean up after failed launches
+Stage a fresh run for the next attempt. Reusing a topic or table can carry over
+consumer offsets, checkpoint state, and rows from the failed run.
 
-`stage.sh` creates the topic, artifact prefix and, unless the engine owns DDL,
-the table before launch. A failed launch preserves the fleet so pod events remain
-available for diagnosis. Clean up explicitly:
-
-- `teardown.sh <run_id>` deletes engine, producer and scorer resources and drops
-  the topic.
-- `purge.sh <run_id> --artifacts` drops the table, removes its files and deletes
-  the run's artifact prefix.
-
-## Set both AWS region variables
-
-The Java SDK reads `AWS_REGION`; botocore uses `AWS_DEFAULT_REGION`. Pods receive
-both so the MSK token signer and table FileIO use the intended region. Missing
-region configuration can surface as S3 signing or redirect failures.
-
-## Lowercase run ids for Kubernetes objects
-
-Run ids contain uppercase `T` and `Z` in their UTC timestamps. Kubernetes names
-must be lowercase, so rendered object names use a lowercased run id. The original
-id remains in the topic, table, run directory and Spark application name.
-Lowercase it when addressing Kubernetes objects manually.
-
-## Use environment references for cluster credentials
+## Keep credentials out of rendered configuration
 
 Rendered catalog and Kafka properties are stored in ConfigMaps and uploaded to
 the runs prefix. Cluster sites reject literal values for credential-named
-properties. Use `${env:NAME}` and the Secret described in
-[`run-spec.md`](run-spec.md#secrets).
-
-Local sites allow literals for the stack's public default credentials. Copying
-those settings into a cluster site triggers validation. Published results redact
-credential-named catalog properties and omit `site.kafka.security` entirely.
+properties. Use `${env:NAME}` and the Kubernetes Secret described in
+[the run specification](run-spec.md#secrets); local examples with public default
+credentials cannot be copied unchanged into a cluster site.
