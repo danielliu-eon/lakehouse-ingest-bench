@@ -19,6 +19,7 @@ import yaml
 
 from ingest_bench.collect.redact import redact_document, redact_props
 from ingest_bench.collect.schema import SCHEMA_VERSION as SCHEMA_VERSION
+from ingest_bench.k8s.fleet import PODS_FILE, fleet_from_pods
 from ingest_bench.producer import publish_log
 from ingest_bench.producer.publish_log import PublishRecord
 from ingest_bench.scorer import score
@@ -99,6 +100,8 @@ class _Inputs:
 
     def publish_logs(self) -> list[Path]:
         paths = sorted((self.run_dir / PRODUCER_DIR).glob(PUBLISH_LOG_GLOB))
+        if not paths:
+            paths = sorted(self.run_dir.glob(PUBLISH_LOG_GLOB))
         if not paths:
             self.missing.append(f"{PRODUCER_DIR}/{PUBLISH_LOG_GLOB}")
         return paths
@@ -220,17 +223,17 @@ def run_end_ms(records: list[PublishRecord], snapshots: list[dict[str, object]])
 def cost_figures(
     fleet: Sequence[FleetRole], site: SiteConfig, *, epoch_ms: int | None, end_ms: int | None
 ) -> dict[str, object]:
-    """Calculate fleet cost using site prices.
+    """Calculate Kubernetes fleet cost using site prices.
 
-    Hourly cost depends only on fleet size. Total cost is unknown unless both
-    start and end times are available.
+    Local runs have no resource cost. Duration is available independently when
+    both start and end times are recorded.
     """
-    per_hour = usd_per_hour(fleet, site)
+    per_hour = None if site.kubernetes is None or not fleet else usd_per_hour(fleet, site)
     hours = None if epoch_ms is None or end_ms is None else (end_ms - epoch_ms) / _MS_PER_HOUR
     return {
         "usd_per_hour": per_hour,
         "run_hours": hours,
-        "usd": None if hours is None else per_hour * hours,
+        "usd": None if hours is None or per_hour is None else per_hour * hours,
     }
 
 
@@ -285,12 +288,18 @@ def build_run_json(
     epoch = facts["epoch"]
     # A staged but unlaunched run has no epoch and can still be collected.
     epoch_ms = None if epoch is None else round(float(cast(float, epoch)) * 1000)
-    fleet = run_fleet(spec)
+    pods_path = None
+    if site.kubernetes is not None and not spec.is_external():
+        pods_path = inputs.optional(PODS_FILE)
+        fleet = [] if pods_path is None else fleet_from_pods(spec, _read_json(pods_path))
+    else:
+        fleet = run_fleet(spec)
 
     artifacts: dict[str, object] = {"spec": SPEC_FILE, "facts": FACTS_FILE}
     for name, path in (
         ("timeline", timeline_path),
         ("engine_image", image_path),
+        ("engine_pods", pods_path),
         ("summary", summary_path),
         ("freshness", freshness_path),
         ("exactness", exactness_path),

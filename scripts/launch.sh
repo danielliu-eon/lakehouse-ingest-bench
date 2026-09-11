@@ -227,11 +227,8 @@ k8s_render_apply deploy/k8s/producer-job.yaml.tmpl \
 	"NODE_SELECTOR=$NODE_SELECTOR" \
 	"TOLERATIONS=$TOLERATIONS"
 
-# Record the launch epoch for later readers, replacing facts.json through a temporary
-# file.
-EPOCH_TMP="$(mktemp "$RUN_DIR/facts.json.XXXXXX")"
-jq --argjson epoch "$EPOCH" '.epoch = $epoch' "$FACTS" >"$EPOCH_TMP"
-mv "$EPOCH_TMP" "$FACTS"
+# Record the launch epoch for later readers.
+write_launch_epoch "$FACTS" "$EPOCH"
 printf '%s launched epoch=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EPOCH" >>"$RUN_DIR/timeline.log"
 
 log "launched $RUN_ID at epoch $EPOCH; judge it with scripts/gate.sh $RUN_ID"

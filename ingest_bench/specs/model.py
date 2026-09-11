@@ -6,6 +6,7 @@ Reject unknown keys so misspelled settings cannot silently use defaults.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -283,7 +284,7 @@ def _producer_spec(raw: dict[str, object]) -> ProducerSpec:
     )
     if compression not in COMPRESSIONS:
         raise ValueError(f"spec.producer.compression must be one of {sorted(COMPRESSIONS)}, got {compression!r}")
-    return ProducerSpec(
+    producer = ProducerSpec(
         speed=1.0 if "speed" not in block else _as_float(block["speed"], "spec.producer.speed"),
         seconds=None if "seconds" not in block else _as_int(block["seconds"], "spec.producer.seconds"),
         shards=1 if "shards" not in block else _as_int(block["shards"], "spec.producer.shards"),
@@ -292,6 +293,15 @@ def _producer_spec(raw: dict[str, object]) -> ProducerSpec:
         else _as_int(block["behind_max_ms"], "spec.producer.behind_max_ms"),
         compression=compression,
     )
+
+    if not math.isfinite(producer.speed) or producer.speed <= 0:
+        raise ValueError("spec.producer.speed must be finite and positive")
+    for key, value in (("seconds", producer.seconds), ("shards", producer.shards)):
+        if value is not None and value <= 0:
+            raise ValueError(f"spec.producer.{key} must be positive")
+    if producer.behind_max_ms < 0:
+        raise ValueError("spec.producer.behind_max_ms must be nonnegative")
+    return producer
 
 
 def _scoring_spec(raw: dict[str, object]) -> ScoringSpec:
@@ -311,7 +321,7 @@ def _scoring_spec(raw: dict[str, object]) -> ScoringSpec:
             _as_int(offset, f"spec.scoring.geometry_offsets_s[{index}]")
             for index, offset in enumerate(cast(list[object], raw_offsets))
         )
-    return ScoringSpec(
+    scoring = ScoringSpec(
         freshness_bound_s=180.0
         if "freshness_bound_s" not in block
         else _as_float(block["freshness_bound_s"], "spec.scoring.freshness_bound_s"),
@@ -324,6 +334,19 @@ def _scoring_spec(raw: dict[str, object]) -> ScoringSpec:
         if "gate_window_s" not in block
         else _as_int(block["gate_window_s"], "spec.scoring.gate_window_s"),
     )
+
+    if not math.isfinite(scoring.freshness_bound_s) or scoring.freshness_bound_s <= 0:
+        raise ValueError("spec.scoring.freshness_bound_s must be finite and positive")
+    for key, value in (("warmup_s", scoring.warmup_s), ("gate_adaptation_s", scoring.gate_adaptation_s)):
+        if value is not None and value < 0:
+            raise ValueError(f"spec.scoring.{key} must be nonnegative")
+    if scoring.gate_window_s is not None and scoring.gate_window_s <= 0:
+        raise ValueError("spec.scoring.gate_window_s must be positive")
+    if any(offset < 0 for offset in offsets):
+        raise ValueError("spec.scoring.geometry_offsets_s must be nonnegative")
+    if any(right <= left for left, right in zip(offsets, offsets[1:], strict=False)):
+        raise ValueError("spec.scoring.geometry_offsets_s must strictly ascend")
+    return scoring
 
 
 def _external_spec(raw: dict[str, object]) -> ExternalSpec:

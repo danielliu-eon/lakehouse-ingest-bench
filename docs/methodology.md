@@ -75,7 +75,10 @@ Dropping the sample would hide missing evidence.
 
 Lag is published on two time bases: the table's commit timestamps (the default)
 and the scorer's wall time when it first observed each commit. The second avoids
-dependence on the writer's clock.
+dependence on the writer's clock. All snapshots discovered in one metadata read
+share an observation timestamp, captured before scanning their data files. The
+scorer-clock series includes polling delay and still assumes the producer and
+scorer clocks are aligned.
 
 `min_lag_s` is the smallest per-commit lag on the table's clock. A negative value
 means a commit timestamp precedes the corresponding producer acknowledgement and
@@ -107,13 +110,22 @@ during the offer reveals that it failed to keep pace.
 
 | Figure | Definition |
 |---|---|
-| `absorbed_at_offer_end` | committed rows divided by offered rows when the last batch was acknowledged; `1.0` means no remaining backlog |
-| `drain_s` | seconds from the last acknowledgement until the prefix reached the last batch |
+| `absorbed_at_offer_end` | last committed row count sampled at or before the final acknowledgement, divided by the final acknowledged row total |
+| `drain_s` | seconds from the final producer acknowledgement until the scorer first observed the prefix covering the last batch |
 | `backlog_rows_max`, `backlog_rows_p50` | backlog over the whole run |
 
-The absorbed fraction is measured when the offer stops, before subsequent drain
-can erase the difference between fleets. Both offered and committed quantities
-are row counts.
+The absorbed fraction uses the final publish logs as its denominator, so delayed
+log uploads cannot inflate it by understating the offer. Its numerator comes
+from a completed poll at or before offer end; polling and scan delays can make
+this a conservative estimate. It is null if there is no sample at or before
+offer end or no final offered rows. Later drain does not change the numerator.
+
+Both figures use producer acknowledgement times and scorer observation times,
+so they assume those clocks are aligned. Drain includes polling delay but is
+independent of writer-clock skew. Use the same `score --poll-interval-s` across
+compared runs (default `5` seconds). Negative drain values are retained; inspect
+producer/scorer clock alignment if they occur. Live backlog and rate samples still
+reflect the publish logs available at each poll.
 
 ## Geometry
 
@@ -194,10 +206,20 @@ judgment.
 
 ## Cost
 
+Resource-based cost applies only to Kubernetes runs. Local runs (sites without
+`kubernetes`) report hourly and total dollar costs as `null`, displayed as `n/a`
+in the results table. Run duration remains available when timestamps are recorded.
+
 Hourly cost is `Σ count × (vcpu × vcpu_hour_usd + gib × gib_hour_usd)` across the
-fleet. Multiply by run hours for total cost. The fleet uses requested container
-resources, independent of how the cluster packs pods onto nodes. Run hours extend
-from the epoch to the later of the producer's last acknowledgement and the table's
+fleet. Multiply by run hours for total cost. Managed fleets use admitted container
+requests captured in `engine-pods.json` after staging verifies the running fleet;
+external engines use their declared fleet. Missing pod evidence leaves managed
+cost unavailable. This accounts for Spark memory overhead and configuration
+overrides, independent of how the cluster packs pods onto nodes. The snapshot
+assumes fixed replica counts and resource requests throughout the run. Capture
+supports ordinary containers; init containers and pod-level resource settings
+require additional accounting and are rejected. Run hours extend from the epoch
+to the later of the producer's last acknowledgement and the table's
 last commit, including drain time.
 
 Use one pricing rule across compared runs. Split the instance's hourly price `P`

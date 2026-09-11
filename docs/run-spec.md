@@ -6,6 +6,7 @@ A **site config** (`./site.yaml`, or a path supplied with `--site`) defines the
 operator's storage, broker, catalog, cluster and prices. It is not published.
 
 Both loaders reject unknown keys so misspelled settings cannot be silently ignored.
+The run-spec loader checks numeric ranges before staging creates resources.
 
 See the [methodology glossary](methodology.md#glossary) for measurement terms.
 
@@ -18,7 +19,7 @@ See the [methodology glossary](methodology.md#glossary) for measurement terms.
 | `corpus` | *required* | a shipped preset name, or a path to a preset file. See [`corpus.md`](corpus.md) |
 | `<engine>:` | *required* for a managed engine | that engine's knobs; see `engines/<name>/README.md`. Refused for `engine: external` |
 | `external:` | *required* for `engine: external` | `{name, version, notes}`, all strings. Operator-supplied engine identity and tuning notes |
-| `fleet:` | *required* for `engine: external` | a non-empty list of `{role, count, vcpu, gib, machine_type}`. Resources used to calculate cost; managed engines derive this list from their knobs |
+| `fleet:` | *required* for `engine: external` | a non-empty list of `{role, count, vcpu, gib, machine_type}` for cluster cost. Managed cluster costs use captured pod requests; local runs have no resource cost |
 
 ### `table`
 
@@ -46,6 +47,9 @@ See the [methodology glossary](methodology.md#glossary) for measurement terms.
 | `behind_max_ms` | `5000` | maximum permitted batch acknowledgement delay after its due time; exceeding it makes the run `producer_bound` |
 | `compression` | `zstd` | the wire codec: `zstd`, `lz4`, `snappy`, `gzip` or `none`. Use the same codec for compared runs |
 
+Replay speed must be finite and positive. Supplied `seconds` and `shards` must
+be positive integers; `behind_max_ms` must be nonnegative.
+
 ### `scoring`
 
 | Key | Default | Effect |
@@ -56,7 +60,10 @@ See the [methodology glossary](methodology.md#glossary) for measurement terms.
 | `gate_adaptation_s` | `120` (gate default) | seconds after the epoch before capacity checks begin |
 | `gate_window_s` | `60` (gate default) | the width of the three backlog-floor windows |
 
-Omit the gate keys to use the gate's defaults.
+Omit the gate keys to use the gate's defaults. `freshness_bound_s` must be finite
+and positive; `gate_window_s` must be positive. `warmup_s` and
+`gate_adaptation_s` must be nonnegative. Geometry offsets must be nonnegative
+integers in strictly increasing order.
 
 ## Site config
 
@@ -65,7 +72,7 @@ Omit the gate keys to use the gate's defaults.
 | `corpus_root`, `runs_root`, `warehouse` | *required*. Storage roots for corpora, run artifacts and table data; redacted in results. Shell drivers use the AWS CLI and require `s3://` URIs |
 | `kafka.bootstrap_servers` | *required* |
 | `kafka.deployment` | `managed`, `in-cluster`, or `external`. Required by AWS and in-cluster stack setup and teardown; optional for run drivers and existing sites. On AWS, only `managed` provisions MSK |
-| `kafka.security` | librdkafka `security.*` / `sasl.*` properties, passed to every client verbatim; omitted from results |
+| `kafka.security` | librdkafka `security.*` / `sasl.*` properties; managed engines apply the translations below. Omitted from results |
 | `kafka.schema_registry` | `{url, basic_auth_user_info?}`; optional for raw Avro, required for Confluent framing |
 | `catalog.props` | *required*. PyIceberg catalog properties. Managed engines require a REST catalog; external runs may use any catalog PyIceberg can open |
 | `kubernetes` | empty for local runs. Cluster runs require `context`, `namespace`, `harness_service_account`, `flink_service_account` and `registry`, and may set `spark_service_account` (default `ingest-bench-spark`), `aws_region`, `secret_name` (§Secrets), `service_account_annotations`, `node_selector` and `tolerations` |
@@ -84,12 +91,15 @@ configuration, with these translations:
 | `type` (`rest`, or absent) | the engine's own REST catalog binding |
 | `s3.region` | `client.region` |
 | `warehouse` on `s3://` or `gs://` | the matching `io-impl`, selected from `site.warehouse`. The catalog warehouse may be an ID, as in Glue, rather than a storage URI |
-| `sasl.mechanism: OAUTHBEARER` plus `aws.region` | the Java client's `AWS_MSK_IAM` login module and its callback handler |
+| `sasl.mechanism: OAUTHBEARER` plus `aws.region`, without `sasl.oauthbearer.*` | the Java client's `AWS_MSK_IAM` login module and its callback handler |
 
 `aws.region` configures MSK token signing and is removed before passing
 properties to librdkafka. Install the harness with the `aws` extra to use it.
 If the site supplies a `sasl.oauthbearer.*` property, the harness leaves that
-OAuth configuration unchanged.
+OAuth configuration unchanged for its own clients. Managed Spark and Flink runs
+reject these librdkafka-specific OAuth properties before staging creates resources;
+they are not translated into Java OAuth settings. Use an external engine for
+explicit OAuth, or omit these properties when using Amazon MSK IAM.
 
 **Set compression only through `producer.compression`.** The site loader and
 producer reject `compression.*` keys in `site.kafka.security` and `--kafka-prop`

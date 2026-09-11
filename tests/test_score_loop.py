@@ -22,7 +22,7 @@ from ingest_bench.catalog import open_catalog
 from ingest_bench.clock import Clock, now_ms
 from ingest_bench.corpus import generate, metadata, preset
 from ingest_bench.producer import publish_log
-from ingest_bench.scorer import cli, freshness, score, snapshots
+from ingest_bench.scorer import cli, freshness, score, snapshots, tally
 from ingest_bench.table import create
 from tests.test_tally import _rows_of
 
@@ -900,3 +900,61 @@ def test_a_run_the_loop_abandoned_is_not_publishable(tmp_path: Path, corpus: met
     exact = json.loads((tmp_path / "out" / "exactness.json").read_text())
     assert exact["exact"] is True
     assert summary["run_valid"] is False
+
+
+def test_snapshots_share_metadata_observation_time_despite_slow_scans_and_writer_skew(
+    tmp_path: Path, corpus: metadata.CorpusMetadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = metadata.read_manifest(corpus.uri)
+    table = create.create_table(_props(tmp_path), "bench.clock", corpus, create.parse_partition("unpartitioned"), {})
+    for record in records:
+        table.append(_rows_of(record, corpus))
+    args = _many_file_args(tmp_path, corpus, "clock", read_workers=1)
+    clock = StepClock(now_ms())
+    log = io.StringIO()
+    state = score._load_inputs(args, clock, log)
+
+    def slow_read(path: str, file_format: str) -> np.ndarray:
+        clock.sleep(2)
+        return tally.read_id_column(path, file_format)
+
+    def skewed_snapshots(document: TableMetadata) -> list[snapshots.SnapshotInfo]:
+        return [
+            replace(info, timestamp_ms=info.timestamp_ms - 60_000) for info in snapshots.snapshots_in_order(document)
+        ]
+
+    monkeypatch.setattr(score, "read_id_column", slow_read)
+    monkeypatch.setattr(score, "snapshots_in_order", skewed_snapshots)
+    observed_ms = clock.now_ms()
+    assert score._poll_once(state, clock, log)
+    assert len(state.observations) == len(records)
+    assert {obs.first_seen_ms for obs in state.observations} == {observed_ms}
+    saved = [json.loads(line) for line in (args.out_dir / score.SNAPSHOTS_FILE).read_text().splitlines()]
+    assert {row["first_seen_ms"] for row in saved} == {observed_ms}
+    offer_end_ms = max(record.last_ack_ms for record in state.records)
+    assert score._keepup(state)["drain_s"] == (observed_ms - offer_end_ms) / 1000
+    assert "SLOW_POLL" in log.getvalue()
+
+
+def test_late_final_publish_logs_correct_absorption_without_rewriting_samples(
+    tmp_path: Path, corpus: metadata.CorpusMetadata
+) -> None:
+    records = metadata.read_manifest(corpus.uri)
+    _many_file_commit(tmp_path, corpus, "late_logs", files=1)
+    args = _many_file_args(tmp_path, corpus, "late_logs", read_workers=1)
+    logs = Path(args.publish_logs_uri)
+    (logs / "publish_log-0.jsonl").unlink()
+    _finished_producer(logs, records[:1], args.epoch_ms, done=False)
+    clock = StepClock(args.epoch_ms + 1000)
+    log = io.StringIO()
+    state = score._load_inputs(args, clock, log)
+    assert score._poll_once(state, clock, log)
+    historical = state.samples[-1]
+    assert historical.offered_rows == historical.committed_rows == records[0].rows
+    assert score._keepup(state)["absorbed_at_offer_end"] is None
+
+    _finished_producer(logs, records[1:], args.epoch_ms)
+    clock.sleep(5)
+    assert not score._poll_once(state, clock, log)
+    assert score._keepup(state)["absorbed_at_offer_end"] == records[0].rows / corpus.row_count
+    assert state.samples[0] == historical

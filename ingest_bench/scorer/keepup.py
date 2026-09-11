@@ -51,17 +51,19 @@ def keepup_summary(
     samples: list[KeepupSample],
     offer_end_ms: int | None,
     drained_ms: int | None,
+    final_offered_rows: int | None,
 ) -> dict[str, object]:
     """Summarize offer-end absorption, drain time, and backlog.
 
-    Measure absorption from the last sample at or before the offer ended.
+    Use the last committed count sampled at or before offer end and the final
+    acknowledged row total; historical samples may contain incomplete publish logs.
     """
     absorbed: float | None = None
     if offer_end_ms is not None:
         while_offering = [sample for sample in samples if sample.at_ms <= offer_end_ms]
         last = while_offering[-1] if while_offering else None
-        if last is not None and last.offered_rows > 0:
-            absorbed = last.committed_rows / last.offered_rows
+        if last is not None and final_offered_rows is not None and final_offered_rows > 0:
+            absorbed = last.committed_rows / final_offered_rows
     backlogs = [sample.backlog_rows for sample in samples]
     return {
         "absorbed_at_offer_end": absorbed,

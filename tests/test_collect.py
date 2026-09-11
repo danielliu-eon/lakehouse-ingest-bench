@@ -73,17 +73,24 @@ def _site(tmp_path: Path) -> Path:
                 "warehouse": f"{BUCKET}/warehouse",
                 "kafka": {
                     "bootstrap_servers": "broker.invalid:9092",
-                    "security": {"sasl.password": "the-broker-password"},
+                    "security": {"sasl.password": "${env:KAFKA_PASSWORD}"},
                 },
                 "catalog": {
                     "props": {
                         "uri": "https://catalog.invalid/iceberg",
                         "warehouse": f"{BUCKET}/warehouse",
-                        "token": "a-literal-catalog-token",
+                        "token": "${env:CATALOG_TOKEN}",
                         "s3.secret-access-key": "${env:AWS_SECRET_ACCESS_KEY}",
                     }
                 },
                 "pricing": {"vcpu_hour_usd": VCPU_HOUR_USD, "gib_hour_usd": GIB_HOUR_USD},
+                "kubernetes": {
+                    "context": "cluster",
+                    "namespace": "bench",
+                    "harness_service_account": "harness",
+                    "flink_service_account": "flink",
+                    "registry": "images.invalid",
+                },
             }
         )
     )
@@ -187,6 +194,33 @@ def _run_dir(
     scores = run_dir / "scores"
     scores.mkdir(parents=True)
     (run_dir / "spec.yaml").write_text(spec)
+    (run_dir / "engine-pods.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {"name": name, "labels": {"component": role}},
+                        "status": {"phase": "Running"},
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "flink",
+                                    "resources": {
+                                        "requests": {"cpu": cpu, "memory": memory},
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                    for name, role, cpu, memory in (
+                        ("jm", "jobmanager", "1", "2Gi"),
+                        ("tm-1", "taskmanager", "2", "4Gi"),
+                        ("tm-2", "taskmanager", "2", "4Gi"),
+                    )
+                ]
+            }
+        )
+    )
     (run_dir / "facts.json").write_text(
         json.dumps(
             {
@@ -598,6 +632,53 @@ def test_run_json_costs_the_fleet_over_the_run(tmp_path: Path) -> None:
         "run_hours": pytest.approx(0.5),
         "usd": pytest.approx(0.125),
     }
+
+
+def test_cluster_cost_uses_pods_and_never_falls_back_to_heap_knobs(tmp_path: Path) -> None:
+    from tests.test_pod_fleet import ROOT, spark_pods
+
+    run_dir = _run_dir(tmp_path, spec=(ROOT / "runs/aws-smoke-spark.yaml").read_text())
+    pods = run_dir / "engine-pods.json"
+    pods.write_text(json.dumps(spark_pods()))
+    derived = _build(run_dir, _site(tmp_path))["derived"]
+    assert isinstance(derived, dict)
+    assert derived["cost"]["usd_per_hour"] == pytest.approx(5 * 0.04 + (14335 / 1024) * 0.005)
+    pods.unlink()
+    missing = _build(run_dir, _site(tmp_path))
+    missing_inputs, derived = missing["missing"], missing["derived"]
+    assert isinstance(missing_inputs, list) and isinstance(derived, dict)
+    assert "engine-pods.json" in missing_inputs
+    assert derived["cost"]["usd_per_hour"] is None
+    assert derived["cost"]["usd"] is None
+
+
+def test_collect_finds_local_publish_logs_without_counting_copies(tmp_path: Path) -> None:
+    run_dir = _run_dir(tmp_path)
+    cluster_log = run_dir / "producer/publish_log-0.jsonl"
+    local_log = run_dir / cluster_log.name
+    local_log.write_bytes(cluster_log.read_bytes())
+    both = _build(run_dir, _site(tmp_path))
+    cluster_log.unlink()
+    local = _build(run_dir, _site(tmp_path))
+    local_derived, both_derived = local["derived"], both["derived"]
+    assert isinstance(local_derived, dict) and isinstance(both_derived, dict)
+    assert local_derived["producer"] == both_derived["producer"]
+    assert local_derived["producer"]["effective_offered_rate_bytes_per_s"] is not None
+    missing = local["missing"]
+    assert isinstance(missing, list)
+    assert "producer/publish_log-*.jsonl" not in missing
+
+
+@pytest.mark.parametrize("spec", [FLINK_SPEC, EXTERNAL_SPEC], ids=["managed", "external"])
+def test_local_runs_have_no_dollar_cost_even_with_site_prices(tmp_path: Path, spec: str) -> None:
+    site_path = _site(tmp_path)
+    site = yaml.safe_load(site_path.read_text())
+    site.pop("kubernetes")
+    site_path.write_text(yaml.safe_dump(site))
+    document = _build(_run_dir(tmp_path, spec=spec), site_path)
+    derived = document["derived"]
+    assert isinstance(derived, dict)
+    assert derived["cost"] == {"usd_per_hour": None, "run_hours": pytest.approx(0.5), "usd": None}
 
 
 def test_run_json_names_every_optional_input_it_could_not_read(tmp_path: Path) -> None:

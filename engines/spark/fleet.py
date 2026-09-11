@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Report Spark's requested compute by role for cost calculations.
+"""Report Spark's declared role counts, machine types and heap sizing.
 
-Costs use the spec's requests. verify.py checks the running fleet separately.
+Cluster costs use captured pod requests, including non-heap overhead.
 """
 
 from __future__ import annotations

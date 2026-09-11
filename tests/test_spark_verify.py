@@ -133,6 +133,27 @@ def test_a_fleet_running_what_the_spec_asked_for_drifts_nowhere() -> None:
     assert _drift() == []
 
 
+@pytest.mark.parametrize("answer", [{}, {"items": "nope"}, {"items": [{"metadata": {}}]}])
+def test_invalid_pod_inputs_name_the_verifiers_input(answer: object) -> None:
+    with pytest.raises(ValueError, match="the pod list") as error:
+        verify_module._pods(answer)
+    assert "engine-pods.json" not in str(error.value)
+
+
+@pytest.mark.parametrize("phase, deleting", [("Failed", False), ("Succeeded", False), ("Running", True)])
+def test_retired_executors_do_not_count_as_fleet_drift(phase: str, deleting: bool) -> None:
+    pods = _pods()
+    retired = _pod("retired-executor", "executor", phase=phase)
+    metadata = retired["metadata"]
+    assert isinstance(metadata, dict)
+    if deleting:
+        metadata["deletionTimestamp"] = "2026-09-10T12:00:00Z"
+    items = pods["items"]
+    assert isinstance(items, list)
+    items.append(retired)
+    assert _drift(pods=pods) == []
+
+
 def test_a_setting_the_driver_was_not_given_is_named_rather_than_guessed() -> None:
     assert _drift(answers=_answers(drop=("spark.executor.instances",))) == [
         "executors: spec 2, engine not reported",

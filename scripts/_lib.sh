@@ -20,6 +20,16 @@ die() {
 	exit 1
 }
 
+# Replace facts atomically; a subshell keeps temporary cleanup separate from
+# the caller's traps (including local container cleanup).
+write_launch_epoch() (
+	local facts=$1 epoch=$2 temporary
+	temporary="$(mktemp "$facts.XXXXXX")" || return
+	trap 'rm -f "$temporary"' EXIT
+	jq --argjson epoch "$epoch" '.epoch = $epoch' "$facts" >"$temporary" || return
+	mv "$temporary" "$facts"
+)
+
 # Require an explicit deployment before provisioning or deleting resources.
 read_deployment_site() {
 	[[ -f $SITE_FILE ]] ||

@@ -547,6 +547,7 @@ k8s_read_engine() {
 	ENGINE_LOG_TARGET=""
 	ENGINE_PROVENANCE_SELECTOR=""
 	ENGINE_PODS_SELECTOR=""
+	ENGINE_FLEET_SELECTOR=""
 	ENGINE_DOCUMENT_FILE=""
 	ENGINE_CONFIGMAP_FILE=""
 	# Split at the first = to preserve selectors. Reject unknown fields so descriptor changes
@@ -566,6 +567,7 @@ k8s_read_engine() {
 		log_target) ENGINE_LOG_TARGET="$value" ;;
 		provenance_selector) ENGINE_PROVENANCE_SELECTOR="$value" ;;
 		pods_selector) ENGINE_PODS_SELECTOR="$value" ;;
+		fleet_selector) ENGINE_FLEET_SELECTOR="$value" ;;
 		document_file) ENGINE_DOCUMENT_FILE="$value" ;;
 		configmap_file) ENGINE_CONFIGMAP_FILE="$value" ;;
 		*) die "engine-k8s $engine returned unsupported field '$key'; update scripts/_k8s.sh" ;;
@@ -574,7 +576,7 @@ k8s_read_engine() {
 	# Only pods_selector may be empty: some verifiers do not inspect pods.
 	for required in ENGINE_KIND ENGINE_RUNNING_STATE ENGINE_FAILED_STATES ENGINE_STATE_JSONPATH \
 		ENGINE_ERROR_JSONPATH ENGINE_LIFECYCLE_JSONPATH ENGINE_REST_SERVICE_SUFFIX ENGINE_REST_PORT \
-		ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
+		ENGINE_LOG_TARGET ENGINE_PROVENANCE_SELECTOR ENGINE_FLEET_SELECTOR ENGINE_DOCUMENT_FILE ENGINE_CONFIGMAP_FILE; do
 		[[ -n ${!required} ]] || die "engine-k8s $engine returned no ${required#ENGINE_}; cannot identify this run's resources"
 	done
 }

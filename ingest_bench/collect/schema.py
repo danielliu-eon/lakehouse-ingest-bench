@@ -80,7 +80,7 @@ class Producer(TypedDict):
 
 
 class Cost(TypedDict):
-    usd_per_hour: float
+    usd_per_hour: float | None
 
 
 class Derived(TypedDict):

@@ -21,6 +21,7 @@ from ingest_bench import kafka_admin, uri
 from ingest_bench.catalog import table_identifier
 from ingest_bench.collect.redact import redact_props
 from ingest_bench.corpus import metadata
+from ingest_bench.kafka_auth import refuse_java_oauth
 from ingest_bench.schema_registry import register_schema, subject_for
 from ingest_bench.specs import derive as derive_module
 from ingest_bench.specs import model
@@ -273,6 +274,8 @@ def stage(
     """
     site = model.load_site(site_path)
     spec = model.load_run_spec(spec_path)
+    if not spec.is_external():
+        refuse_java_oauth(site.kafka_security)
     derived = derive_module.derive(
         spec, site, stamp=stamp, corpus_dir=resolve_corpus_dir(site.corpus_root, spec.corpus)
     )

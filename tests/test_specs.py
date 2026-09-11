@@ -989,3 +989,65 @@ def test_site_rejects_unknown_kafka_deployments(tmp_path: Path, deployment: obje
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match="site.kafka.deployment"):
         model.load_site(path)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [("producer", "speed", value) for value in (0, -1.0, float("nan"), float("inf"))]
+    + [
+        ("producer", "shards", 0),
+        ("producer", "seconds", 0),
+        ("producer", "behind_max_ms", -1),
+        ("scoring", "geometry_offsets_s", [600, 300]),
+        ("scoring", "geometry_offsets_s", [-10]),
+        ("scoring", "geometry_offsets_s", [300, 300]),
+        ("scoring", "freshness_bound_s", 0),
+        ("scoring", "freshness_bound_s", float("nan")),
+        ("scoring", "freshness_bound_s", float("inf")),
+        ("scoring", "warmup_s", -5),
+        ("scoring", "gate_adaptation_s", -1),
+        ("scoring", "gate_window_s", 0),
+    ],
+)
+def test_run_spec_refuses_invalid_ranges(tmp_path: Path, section: str, key: str, value: object) -> None:
+    raw = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    raw.setdefault(section, {})[key] = value
+    path = tmp_path / "invalid.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"spec\.{section}\.{key}"):
+        model.load_run_spec(path)
+
+
+def test_run_spec_accepts_zero_delays_and_increasing_offsets(tmp_path: Path) -> None:
+    raw = yaml.safe_load((ROOT / "runs" / "smoke-external.yaml").read_text())
+    raw.setdefault("producer", {}).update(speed=0.1, seconds=1, shards=1, behind_max_ms=0)
+    raw["scoring"].update(warmup_s=0, gate_adaptation_s=0, gate_window_s=1, geometry_offsets_s=[0, 1])
+    path = tmp_path / "valid.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    spec = model.load_run_spec(path)
+    assert spec.scoring.geometry_offsets_s == (0, 1)
+    assert spec.producer.speed == 0.1
+
+
+@pytest.mark.parametrize("engine", ["spark", "flink", "custom"])
+def test_managed_oauth_is_refused_before_staging_resources(
+    tmp_path: Path, engine: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = ROOT / "runs" / f"smoke-{engine}.yaml"
+    if engine == "custom":
+        monkeypatch.setitem(engines.MANAGED, "custom", engines.MANAGED["flink"])
+        raw = yaml.safe_load((ROOT / "runs/smoke-flink.yaml").read_text())
+        raw["engine"] = "custom"
+        raw["custom"] = raw.pop("flink")
+        spec_path = tmp_path / "custom.yaml"
+        spec_path.write_text(yaml.safe_dump(raw))
+    site_path = _site_file(
+        tmp_path,
+        "file:///missing-corpus",
+        security={"sasl.mechanism": "OAUTHBEARER", "aws.region": "eu-west-1", "sasl.oauthbearer.method": "oidc"},
+    )
+    admin = FakeAdmin()
+    with pytest.raises(ValueError, match="managed Java engines do not support"):
+        stage.stage(spec_path, site_path, tmp_path / "runs", admin)
+    assert not admin.clients and not admin.created
+    assert not (tmp_path / "runs").exists()

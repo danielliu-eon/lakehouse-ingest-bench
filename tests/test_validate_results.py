@@ -197,6 +197,17 @@ def test_validate_results_fails_when_two_results_measured_the_same_table(tmp_pat
     assert "is also the topic of" in result.stdout, result.stdout
 
 
+def test_validate_results_fails_when_resource_cost_is_unavailable(tmp_path: Path) -> None:
+    def mutate(document: dict[str, object]) -> None:
+        derived = document["derived"]
+        assert isinstance(derived, dict)
+        derived["cost"] = {"usd_per_hour": None}
+
+    result = _run(_mutated(tmp_path, mutate))
+    assert result.returncode != 0, result.stdout
+    assert "derived.cost.usd_per_hour" in result.stdout
+
+
 def test_validate_results_fails_on_a_cost_column_with_no_price_behind_it(tmp_path: Path) -> None:
     for field in ("vcpu_hour_usd", "gib_hour_usd"):
 

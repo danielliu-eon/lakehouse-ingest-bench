@@ -2,8 +2,9 @@
 
 `setup.sh` provisions the shared AWS resources needed by benchmark runs.
 `teardown.sh` removes them. Both check existing resources, so you can rerun an
-interrupted operation. Manage the EKS cluster separately; neither script creates,
-reconfigures, or deletes it.
+interrupted operation. Pending Helm operations need
+[recovery](#remove-shared-resources) before retrying. Manage the EKS cluster
+separately; neither script creates, reconfigures, or deletes it.
 
 ## Prerequisites
 
@@ -45,12 +46,17 @@ Kubernetes schedules pods by resource requests. Budget for these requests:
 | Schema registry | one when `WITH_SCHEMA_REGISTRY=true` | `200m` | `512Mi` |
 | Flink jobmanager | one | `jm_cpu` (`1`) | `jm_mem_mb` |
 | Flink taskmanager | `taskmanagers` | `tm_cpu` | `tm_mem_mb` |
-| Spark driver | one | `driver_cores` (`1`) | `driver_mem_mb` |
-| Spark executor | `executors` | `executor_cores` | `executor_mem_mb` |
+| Spark driver | one | `driver_cores` (`1`) | approximately `1.4 × driver_mem_mb` |
+| Spark executor | `executors` | `executor_cores` | approximately `1.4 × executor_mem_mb` |
 
 Harness requests come from `deploy/k8s/` templates. Engine requests come from
 run knobs, rendered by [Flink](../../engines/flink/knobs.py) and
-[Spark](../../engines/spark/knobs.py).
+[Spark](../../engines/spark/knobs.py). Spark's memory knobs set JVM heap;
+its Python application also requests overhead (40% by default, subject to
+minimums and Spark configuration overrides). The shipped Spark smoke fleet
+requests about 14 GiB, versus 10 GiB of configured heap. Plan capacity for the
+full request. Collected Kubernetes costs use captured pod requests as the
+authoritative resource sizes.
 
 A node fits `floor((allocatable CPU − DaemonSet requests) / 2)` two-CPU pods.
 A four-vCPU node has less than four allocatable cores, so it fits only one.
@@ -94,8 +100,8 @@ Pass site-specific values through environment variables:
 | `MSK_BROKERS` | `2` | Broker count; requires this many availability zones with private subnets |
 | `MSK_KAFKA_VERSION` | newest `ACTIVE` `3.x` | Kafka version; setup prints the selected version |
 | `MSK_VOLUME_GIB` | `100` | EBS GiB per broker. Increase for longer offers or larger backlogs. Existing volumes can grow with `update-broker-storage`, but cannot shrink |
-| `FLINK_OPERATOR_VERSION` | `1.15.0` | Flink operator chart installed from `archive.apache.org` when its CRD is absent |
-| `SPARK_OPERATOR_VERSION` | `2.5.2` | Kubeflow operator chart installed when its CRD is absent; configured to watch `$NAMESPACE` and use the benchmark's Spark identity |
+| `FLINK_OPERATOR_VERSION` | `1.15.0` | Flink operator chart reconciled from `archive.apache.org` |
+| `SPARK_OPERATOR_VERSION` | `2.5.2` | Kubeflow operator chart reconciled on each setup; configured to watch `$NAMESPACE` and use the benchmark's Spark identity |
 | `NAMESPACE` | `ingest-bench` | Namespace shared by harness Jobs and engine runs |
 | `WITH_SCHEMA_REGISTRY` | `false` | Create an in-memory Apicurio registry for Confluent runs at `http://schema-registry.<namespace>.svc:8080/apis/ccompat/v7`; removed with the namespace |
 | `NODE_SELECTOR` / `TOLERATIONS` | `{}` / `[]` | One-line JSON for registry placement. Harness Jobs read placement from `site.yaml` |
@@ -106,7 +112,7 @@ Pass site-specific values through environment variables:
 
 Setup first checks credentials, cluster access, and node architectures. It
 installs the Pod Identity agent if absent and waits for it to become active.
-It also installs the Flink operator when its CRD is absent, disabling its
+It also reconciles the Flink operator release, disabling its
 validating webhook so cert-manager is not required.
 
 Setup then provisions:
@@ -130,9 +136,8 @@ Setup then provisions:
 - **Kubernetes:** the namespace, harness/Flink/Spark service accounts, and
   engine RBAC. The Spark operator is installed after the namespace because its
   chart creates a Role there. It watches `spark.jobNamespaces={$NAMESPACE}`
-  and uses the benchmark Spark identity. Its webhook must be enabled to mount
-  run ConfigMaps in driver and executor pods. Setup does not repair an existing
-  Spark operator installation whose webhook is disabled.
+  and uses the benchmark Spark identity. Setup enables its webhook to mount
+  run ConfigMaps in driver and executor pods, including on existing releases.
 - **Optional registry:** with `WITH_SCHEMA_REGISTRY=true`, an in-memory
   Apicurio Deployment and Service, followed by a rollout wait.
 
@@ -195,7 +200,10 @@ their original values. For external Kafka, use a file containing
 
 Cleanup follows dependency order: stop workloads and remove their identity.
 For managed Kafka, delete MSK, then remove its security group after network
-interfaces release it.
+interfaces release it. Security-group lookup requires the original EKS VPC,
+group name, and benchmark ownership tag. If EKS is already gone, supply its
+original `VPC_ID` when rerunning teardown; cleanup refuses to select a group
+without that scope.
 Without `--all`, the bucket, images, and operators remain available for another
 campaign or other workloads.
 
@@ -204,6 +212,14 @@ tag plus confirmation. It removes every corpus, run artifact, and warehouse
 object. `--yes` supplies confirmation for unattended use. By the time the prompt
 appears, the images and operators have already been removed. Declining keeps
 the bucket but does not restore those resources.
+
+Helm retains both engine operators' CRDs after uninstall. Setup uses
+`helm upgrade --install --wait` to restore the controller releases and wait for
+their workloads, even when those CRDs remain. Do not delete CRDs to repair a
+missing operator: doing so also deletes custom resources using them. Failed
+releases can be reconciled on rerun. If setup reports a pending Helm operation,
+inspect `helm status` and `helm history` in the operator namespace and finish or
+recover that operation before rerunning setup.
 
 The EKS cluster and `eks-pod-identity-agent` add-on remain installed.
 

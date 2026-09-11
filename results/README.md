@@ -25,6 +25,7 @@ CI runs `scripts/validate-results.py` over this directory. It checks that:
   `machine_type` other than `unspecified` or a `YOUR_` placeholder, plus
   positive `vcpu` and `gib` values.
 - Both rates in `run.site_pricing` are positive, allowing costs to be derived.
+- `derived.cost.usd_per_hour` is not null; resource cost must be available.
 - The scorer summary, derived keep-up measures and `producer_bound` are present.
 - No two results reuse a table or topic name.
 - `RESULTS.md` matches a fresh render of the result documents.

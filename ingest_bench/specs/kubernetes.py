@@ -19,6 +19,8 @@ class EngineKubernetes:
 
     Replace ``NAME`` in targets and selectors with the run's object name. An empty
     ``pods_selector`` means verification needs no pod list.
+    ``fleet_selector`` selects all engine pods for resource accounting.
+    ``pod_role_label`` identifies their roles in the Python resource reader.
 
     Use ``error_jsonpath`` with ``lifecycle_jsonpath`` to distinguish a rejected
     resource from a reconciliation the operator will retry. Compare lifecycle
@@ -39,6 +41,8 @@ class EngineKubernetes:
     log_target: str
     provenance_selector: str
     pods_selector: str
+    fleet_selector: str
+    pod_role_label: str
     document_file: str
     configmap_file: str
     max_object_name_length: int | None = None
@@ -57,14 +61,15 @@ class EngineKubernetes:
             "log_target": self.log_target,
             "provenance_selector": self.provenance_selector,
             "pods_selector": self.pods_selector,
+            "fleet_selector": self.fleet_selector,
             "document_file": self.document_file,
             "configmap_file": self.configmap_file,
         }
 
 
-# Exclude Python-only validation fields explicitly so descriptor checks still
+# Exclude Python-only fields explicitly so descriptor checks still
 # catch newly added fields that lack a shell representation.
-_UNPRINTED = frozenset({"max_object_name_length"})
+_UNPRINTED = frozenset({"max_object_name_length", "pod_role_label"})
 
 # The field names a driver reads, in declaration order, which is the order
 # `engine-k8s` prints them in.

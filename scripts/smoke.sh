@@ -206,6 +206,7 @@ BEHIND_MAX_MS="$(yq '.producer.behind_max_ms' "$SPEC_FILE")"
 COMPRESSION="$(yq '.producer.compression' "$SPEC_FILE")"
 
 EPOCH=$(($(date +%s) + EPOCH_LEAD_S))
+write_launch_epoch "$RUN_DIR/facts.json" "$EPOCH"
 SCORE="score --corpus $CORPUS_URI --table $TABLE --catalog-prop-file /catalog.props"
 SCORE="$SCORE --publish-logs s3://runs/$RUN_ID/producer --epoch $EPOCH --out /runs/$RUN_ID/scores"
 SCORE="$SCORE --idle-stop-s $IDLE_STOP_S"

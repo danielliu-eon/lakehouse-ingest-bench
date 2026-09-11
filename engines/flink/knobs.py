@@ -79,6 +79,8 @@ KUBERNETES = EngineKubernetes(
     log_target=f"deploy/{NAME}",
     provenance_selector=f"app={NAME},component=jobmanager",
     pods_selector="",
+    fleet_selector=f"app={NAME}",
+    pod_role_label="component",
     document_file=FLINKDEPLOYMENT_FILE,
     configmap_file=CONFIGMAP_FILE,
     # The operator derives a Service name from this label and enforces a

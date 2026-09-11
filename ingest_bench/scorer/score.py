@@ -228,15 +228,20 @@ def _offer_end_ms(state: ScoreState) -> int | None:
 
 
 def _drained_ms(state: ScoreState) -> int | None:
-    """The commit at which the prefix first reached the last batch."""
+    """Scorer time when the prefix was first observed covering the last batch."""
     last = state.last_batch()
     if last < 0:
         return None
-    return next((obs.timestamp_ms for obs in state.observations if obs.prefix >= last), None)
+    return next((obs.first_seen_ms for obs in state.observations if obs.prefix >= last), None)
 
 
 def _keepup(state: ScoreState) -> dict[str, object]:
-    return keepup_summary(state.samples, _offer_end_ms(state), _drained_ms(state))
+    return keepup_summary(
+        state.samples,
+        _offer_end_ms(state),
+        _drained_ms(state),
+        final_offered_rows=state.offered_rows() if state.offer_ended else None,
+    )
 
 
 def _live_lag_s(state: ScoreState) -> float | None:
@@ -434,12 +439,13 @@ def _read_inputs(state: ScoreState, clock: Clock, log: TextIO) -> PollRead:
         # Do not publish measurements for a table that violates the corpus schema.
         return PollRead(seen_new=False, files=0)
     document = read_metadata(table)
+    # Every snapshot in this document was visible before any ID-column scans.
+    first_seen_ms = clock.now_ms()
     seen_new = False
     read_files = 0
     for info in snapshots_in_order(document):
         if info.snapshot_id in state.seen:
             continue
-        first_seen_ms = clock.now_ms()
         files = added_files(document, info.snapshot_id, table.io)
         if info.operation == APPEND:
             read_files += _apply_added_files(state, files)

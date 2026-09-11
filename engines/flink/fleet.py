@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Report Flink's requested compute by role for cost calculations.
+"""Report Flink's declared role counts, machine types and sizing.
 
-Translate the fleet knobs into vCPU-hours and GiB-hours. Costs use container
-requests, regardless of how Kubernetes distributes the pods across nodes.
+Cluster costs use captured pod requests, including effective overrides.
 """
 
 from __future__ import annotations
